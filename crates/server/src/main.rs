@@ -76,6 +76,21 @@ struct RecordView {
     cells: Vec<String>,
 }
 
+#[derive(Template)]
+#[template(path = "edit.html")]
+struct EditTemplate {
+    chrome: Chrome,
+    table: String,
+    id: i64,
+    fields: Vec<EditFieldView>,
+}
+
+struct EditFieldView {
+    id: i64,
+    name: String,
+    value: String,
+}
+
 /// Home → first table's Browse view, or a hint if there are none.
 async fn index(State(st): State<AppState>) -> impl IntoResponse {
     let sol = st.sol.lock().unwrap();
@@ -144,6 +159,49 @@ async fn delete_record(
     Redirect::to(&format!("/t/{name}"))
 }
 
+/// Show the edit form for a record, pre-filled with its current values.
+async fn edit_form(
+    State(st): State<AppState>,
+    Path((name, id)): Path<(String, i64)>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let Some(table) = sol.table_by_name(&name).unwrap() else {
+        return Html(format!("<p>No such table: {name}</p>")).into_response();
+    };
+    let fields = sol.fields(table.id).unwrap();
+    let Some(values) = sol.get_record(&table, &fields, id).unwrap() else {
+        return Html(format!("<p>No such record: {id}</p>")).into_response();
+    };
+    let chrome = Chrome::build(&sol, "browse", None);
+    let fv = fields
+        .iter()
+        .zip(values)
+        .map(|(f, v)| EditFieldView { id: f.id, name: f.name.clone(), value: v })
+        .collect();
+    let tmpl = EditTemplate { chrome, table: table.name.clone(), id, fields: fv };
+    Html(tmpl.render().unwrap()).into_response()
+}
+
+/// Save edits to a record (inputs named `f<field_id>`), then back to the list.
+async fn save_record(
+    State(st): State<AppState>,
+    Path((name, id)): Path<(String, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> impl IntoResponse {
+    {
+        let sol = st.sol.lock().unwrap();
+        if let Some(table) = sol.table_by_name(&name).unwrap() {
+            let fields = sol.fields(table.id).unwrap();
+            let values = fields
+                .iter()
+                .filter_map(|f| form.get(&format!("f{}", f.id)).map(|v| (f, v.clone())))
+                .collect::<Vec<_>>();
+            sol.update_record(&table, id, &values).unwrap();
+        }
+    }
+    Redirect::to(&format!("/t/{name}"))
+}
+
 /// Seed a demo "Customers" table on first run so there's something to browse.
 fn seed(sol: &mut Solution) -> anyhow::Result<()> {
     if sol.tables()?.is_empty() {
@@ -164,6 +222,8 @@ fn app(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/t/:name", get(browse).post(create_record))
+        .route("/t/:name/:id", post(save_record))
+        .route("/t/:name/:id/edit", get(edit_form))
         .route("/t/:name/:id/delete", post(delete_record))
         .with_state(state)
 }

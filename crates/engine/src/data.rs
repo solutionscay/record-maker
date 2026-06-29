@@ -5,7 +5,7 @@
 //! therefore safe to interpolate; all user *values* are bound as parameters.
 
 use anyhow::Result;
-use rusqlite::types::ValueRef;
+use rusqlite::types::{Value, ValueRef};
 use rusqlite::{params, params_from_iter};
 
 use crate::model::{FieldMeta, TableMeta};
@@ -71,6 +71,61 @@ impl Solution {
         )?;
         Ok(())
     }
+
+    /// Fetch a single row's cells aligned to `fields`. `None` if no such id.
+    pub fn get_record(
+        &self,
+        table: &TableMeta,
+        fields: &[FieldMeta],
+        id: i64,
+    ) -> Result<Option<Vec<String>>> {
+        let mut select = String::from("id");
+        for f in fields {
+            select.push_str(", ");
+            select.push_str(&f.phys);
+        }
+        let sql = format!("SELECT {select} FROM {} WHERE id=?1", table.phys);
+        let mut stmt = self.data.prepare(&sql)?;
+        let n = fields.len();
+        let mut rows = stmt.query_map(params![id], |row| {
+            let mut cells = Vec::with_capacity(n);
+            for i in 0..n {
+                cells.push(value_to_string(row.get_ref(i + 1)?));
+            }
+            Ok(cells)
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Update a row's fields by id. No-op if `values` is empty.
+    pub fn update_record(
+        &self,
+        table: &TableMeta,
+        id: i64,
+        values: &[(&FieldMeta, String)],
+    ) -> Result<()> {
+        if values.is_empty() {
+            return Ok(());
+        }
+        let sets: Vec<String> = values
+            .iter()
+            .enumerate()
+            .map(|(i, (f, _))| format!("{}=?{}", f.phys, i + 1))
+            .collect();
+        let sql = format!(
+            "UPDATE {} SET {} WHERE id=?{}",
+            table.phys,
+            sets.join(", "),
+            values.len() + 1
+        );
+        let mut ps: Vec<Value> = values.iter().map(|(_, v)| Value::Text(v.clone())).collect();
+        ps.push(Value::Integer(id));
+        self.data.execute(&sql, params_from_iter(ps))?;
+        Ok(())
+    }
 }
 
 fn value_to_string(v: ValueRef<'_>) -> String {
@@ -134,5 +189,37 @@ mod tests {
         let recs = s.list_records(&table, &fields).unwrap();
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].cells[0], "Linus");
+    }
+
+    #[test]
+    fn get_and_update_record() {
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table(
+            "People",
+            &[
+                NewField { name: "Name".into(), kind: FieldKind::Text },
+                NewField { name: "Age".into(), kind: FieldKind::Number },
+            ],
+        )
+        .unwrap();
+        let table = s.table_by_name("People").unwrap().unwrap();
+        let fields = s.fields(table.id).unwrap();
+        let id = s
+            .insert_record(&table, &[(&fields[0], "Ada".into()), (&fields[1], "36".into())])
+            .unwrap();
+
+        let got = s.get_record(&table, &fields, id).unwrap().unwrap();
+        assert_eq!(got[0], "Ada");
+        assert!(s.get_record(&table, &fields, 999_999).unwrap().is_none());
+
+        s.update_record(
+            &table,
+            id,
+            &[(&fields[0], "Ada L".into()), (&fields[1], "37".into())],
+        )
+        .unwrap();
+        let got2 = s.get_record(&table, &fields, id).unwrap().unwrap();
+        assert_eq!(got2[0], "Ada L");
+        assert_eq!(got2[1].parse::<f64>().unwrap(), 37.0);
     }
 }

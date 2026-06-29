@@ -1,0 +1,14 @@
+{% extends "shell.html" %}
+
+{% block content %}
+<h2>{{ table }} · edit record</h2>
+<form class="newrec" method="post" action="/t/{{ table }}/{{ id }}">
+  {% for f in fields %}
+  <label>{{ f.name }}<input name="f{{ f.id }}" value="{{ f.value }}"></label>
+  {% endfor %}
+  <button type="submit">Save</button>
+  <a href="/t/{{ table }}">Cancel</a>
+</form>
+{% endblock %}
+
+{% block statusbar %}<span>{{ table }} · editing record #{{ id }}</span>{% endblock %}

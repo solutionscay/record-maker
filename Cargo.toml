@@ -1,5 +1,5 @@
 [workspace]
 resolver = "2"
-members = ["crates/server"]
+members = ["crates/server", "crates/engine"]
 
-# Engine, Tauri shell, etc. are added as crates here as the MVP issues land.
+# Tauri shell and further crates are added here as the MVP issues land.

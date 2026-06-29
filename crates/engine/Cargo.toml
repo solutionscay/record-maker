@@ -1,0 +1,10 @@
+[package]
+name = "record-maker-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Metadata-driven core — two-database solution storage + versioned meta schema"
+
+[dependencies]
+# bundled = compile SQLite from source (no system libsqlite3 dependency).
+rusqlite = { version = "0.32", features = ["bundled"] }
+anyhow = "1"

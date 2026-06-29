@@ -3,7 +3,7 @@
 //! — defined exactly once (see Build Plan: engine accessor ledger).
 
 use anyhow::Result;
-use rusqlite::params;
+use rusqlite::{params, Transaction};
 
 use crate::Solution;
 
@@ -52,6 +52,39 @@ impl Solution {
             None => Ok(None),
         }
     }
+}
+
+/// Create a default Form layout for a freshly-defined table, inside the caller's
+/// transaction (so table + layout are atomic). One meta_layout (view='form'),
+/// one body meta_part, and one kind='field' meta_object per field — stacked,
+/// with binding `<TableName>.<FieldName>` (the frozen binding contract).
+/// Returns the new layout id. (#21)
+pub(crate) fn generate_default_form(
+    tx: &Transaction<'_>,
+    table_id: i64,
+    table_name: &str,
+    fields: &[(i64, String)],
+) -> Result<i64> {
+    tx.execute(
+        "INSERT INTO meta_layout(name, table_id, view) VALUES (?1, ?2, 'form')",
+        params![table_name, table_id],
+    )?;
+    let layout_id = tx.last_insert_rowid();
+    tx.execute(
+        "INSERT INTO meta_part(layout_id, kind, height, position) VALUES (?1, 'body', ?2, 0)",
+        params![layout_id, 40 + fields.len() as i64 * 32],
+    )?;
+    let part_id = tx.last_insert_rowid();
+    for (i, (_fid, fname)) in fields.iter().enumerate() {
+        let y = 16 + i as i64 * 32;
+        let binding = format!("{table_name}.{fname}");
+        tx.execute(
+            "INSERT INTO meta_object(part_id, kind, x, y, w, h, binding) \
+             VALUES (?1, 'field', 16, ?2, 200, 24, ?3)",
+            params![part_id, y, binding],
+        )?;
+    }
+    Ok(layout_id)
 }
 
 #[cfg(test)]

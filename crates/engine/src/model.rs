@@ -93,6 +93,7 @@ impl Solution {
         )?;
 
         let mut col_defs = vec!["id INTEGER PRIMARY KEY".to_string()];
+        let mut field_meta: Vec<(i64, String)> = Vec::new();
         for (pos, f) in fields.iter().enumerate() {
             tx.execute(
                 "INSERT INTO meta_field(table_id, name, phys_name, kind, position) \
@@ -106,7 +107,12 @@ impl Solution {
                 params![fphys, fid],
             )?;
             col_defs.push(format!("{fphys} {}", f.kind.sql_type()));
+            field_meta.push((fid, f.name.clone()));
         }
+
+        // Default Form layout (one body part + a field object per field) in the
+        // same transaction, so table + layout are created atomically (#21).
+        crate::layout::generate_default_form(&tx, table_id, name, &field_meta)?;
         tx.commit()?;
 
         // Physical table lives in data.db (a separate connection → a separate step).
@@ -165,5 +171,82 @@ impl Solution {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{FieldKind, NewField, Solution};
+
+    #[test]
+    fn create_table_generates_default_form_layout() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s
+            .create_table(
+                "Invoices",
+                &[
+                    NewField { name: "Number".into(), kind: FieldKind::Text },
+                    NewField { name: "Total".into(), kind: FieldKind::Number },
+                ],
+            )
+            .unwrap();
+
+        let layouts = s.layouts().unwrap();
+        assert_eq!(layouts.len(), 1);
+        let lay = &layouts[0];
+        assert_eq!(lay.name, "Invoices");
+        assert_eq!(lay.table_id, tid);
+        assert_eq!(lay.view, "form");
+
+        let body_parts: i64 = s
+            .app
+            .query_row(
+                "SELECT count(*) FROM meta_part WHERE layout_id=?1 AND kind='body'",
+                [lay.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(body_parts, 1);
+
+        let mut stmt = s
+            .app
+            .prepare(
+                "SELECT o.kind, o.y, o.w, o.h, o.binding FROM meta_object o \
+                 JOIN meta_part p ON p.id = o.part_id WHERE p.layout_id = ?1 ORDER BY o.y",
+            )
+            .unwrap();
+        let rows: Vec<(String, i64, i64, i64, Option<String>)> = stmt
+            .query_map([lay.id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].1 < rows[1].1, "y increases down the form");
+        for row in &rows {
+            assert_eq!(row.0, "field");
+            assert!(row.2 > 0 && row.3 > 0, "non-zero w/h");
+        }
+        assert_eq!(rows[0].4.as_deref(), Some("Invoices.Number"));
+        assert_eq!(rows[1].4.as_deref(), Some("Invoices.Total"));
+    }
+
+    #[test]
+    fn zero_field_table_gets_layout_and_body_but_no_objects() {
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table("Empty", &[]).unwrap();
+        let lay = &s.layouts().unwrap()[0];
+        let objs: i64 = s
+            .app
+            .query_row(
+                "SELECT count(*) FROM meta_object o JOIN meta_part p ON p.id = o.part_id \
+                 WHERE p.layout_id = ?1",
+                [lay.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(objs, 0);
     }
 }

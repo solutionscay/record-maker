@@ -154,6 +154,24 @@ impl Solution {
         }
     }
 
+    /// Look up a table by id.
+    pub fn table_by_id(&self, id: i64) -> Result<Option<TableMeta>> {
+        let mut stmt = self
+            .app
+            .prepare("SELECT id, name, phys_name FROM meta_table WHERE id=?1")?;
+        let mut rows = stmt.query_map(params![id], |r| {
+            Ok(TableMeta {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                phys: r.get(2)?,
+            })
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
     /// Fields of a table, in display order.
     pub fn fields(&self, table_id: i64) -> Result<Vec<FieldMeta>> {
         let mut stmt = self.app.prepare(

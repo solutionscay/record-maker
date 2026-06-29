@@ -1,0 +1,10 @@
+{% extends "shell.html" %}
+
+{% block content %}
+<h2>{{ layout }} · Layout mode</h2>
+<p>The pixel-perfect design canvas mounts here (#15 / #24). For now this confirms
+mode routing — you're on <code>/design/{{ layout_id }}</code>. Use the toggle to
+return to Browse.</p>
+{% endblock %}
+
+{% block statusbar %}<span>{{ layout }} · Layout mode</span>{% endblock %}

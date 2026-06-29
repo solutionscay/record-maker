@@ -28,6 +28,8 @@ struct Chrome {
     current_layout: Option<i64>,
     /// Form/List/Table tabs for the Browse view toggle; empty in Layout mode.
     view_tabs: Vec<ViewTab>,
+    /// Record-navigation flipbook for the Browse status bar; `None` elsewhere.
+    nav: Option<Flipbook>,
 }
 
 struct LayoutLink {
@@ -41,6 +43,45 @@ struct ViewTab {
     label: &'static str,
     href: String,
     active: bool,
+}
+
+/// Record navigation in the Browse status bar: ⏮ ◀ "N of M" ▶ ⏭ over the
+/// current layout's found set (#23). `current` is 1-based, `0` when empty.
+struct Flipbook {
+    current: i64,
+    total: i64,
+    first_href: String,
+    prev_href: String,
+    next_href: String,
+    last_href: String,
+    at_first: bool,
+    at_last: bool,
+}
+
+/// Parse `?rec=N` (1-based) and clamp it into the found set (frozen #23):
+/// `[1, total]`, defaulting to 1; `0` when there are no records.
+fn clamp_rec(q: &HashMap<String, String>, total: i64) -> i64 {
+    if total <= 0 {
+        return 0;
+    }
+    let n = q.get("rec").and_then(|s| s.parse::<i64>().ok()).unwrap_or(1);
+    n.clamp(1, total)
+}
+
+/// Build the flipbook for record `current` of `total` on `layout_id`/`view`.
+/// Step links preserve the current view and stay clamped to the found set.
+fn flipbook(layout_id: i64, view: &str, current: i64, total: i64) -> Flipbook {
+    let href = |n: i64| format!("/browse/{layout_id}?view={view}&rec={n}");
+    Flipbook {
+        current,
+        total,
+        first_href: href(1),
+        prev_href: href((current - 1).max(1)),
+        next_href: href((current + 1).min(total.max(1))),
+        last_href: href(total.max(1)),
+        at_first: current <= 1,
+        at_last: current >= total,
+    }
 }
 
 /// The three Browse views, in toggle order. The frozen `?view=` contract (#20).
@@ -95,7 +136,7 @@ impl Chrome {
                 .collect(),
             _ => Vec::new(),
         };
-        Chrome { mode, tables, layouts, current_layout, view_tabs }
+        Chrome { mode, tables, layouts, current_layout, view_tabs, nav: None }
     }
 }
 
@@ -128,6 +169,20 @@ struct FormTemplate {
     chrome: Chrome,
     layout: String,
     table: String,
+    /// The record at the flipbook's current position; `None` when empty.
+    record: Option<RecordForm>,
+}
+
+/// One record shown in Form view as named field values (interim until the
+/// positioned object render in #25).
+struct RecordForm {
+    id: i64,
+    fields: Vec<NamedValue>,
+}
+
+struct NamedValue {
+    name: String,
+    value: String,
 }
 
 #[derive(Template)]
@@ -193,15 +248,38 @@ async fn browse(
         return not_found("layout", layout_id);
     };
     let view = view_param(&q);
-    let chrome = Chrome::build(&sol, "browse", Some(layout_id), Some(view));
+    let mut chrome = Chrome::build(&sol, "browse", Some(layout_id), Some(view));
+
+    // Found set + flipbook position drive record navigation across all views.
+    let ids = sol.record_ids(&table).unwrap();
+    let total = ids.len() as i64;
+    let rec = clamp_rec(&q, total);
+    chrome.nav = Some(flipbook(layout_id, view, rec, total));
 
     match view {
-        "form" => Html(
-            FormTemplate { chrome, layout: lay.name.clone(), table: table.name.clone() }
+        "form" => {
+            let fields = sol.fields(table.id).unwrap();
+            let record = (rec > 0).then(|| ids[(rec - 1) as usize]).and_then(|id| {
+                let cells = sol.get_record(&table, &fields, id).unwrap()?;
+                let named = fields
+                    .iter()
+                    .zip(cells)
+                    .map(|(f, value)| NamedValue { name: f.name.clone(), value })
+                    .collect();
+                Some(RecordForm { id, fields: named })
+            });
+            Html(
+                FormTemplate {
+                    chrome,
+                    layout: lay.name.clone(),
+                    table: table.name.clone(),
+                    record,
+                }
                 .render()
                 .unwrap(),
-        )
-        .into_response(),
+            )
+            .into_response()
+        }
         "list" => Html(
             ListTemplate { chrome, layout: lay.name.clone(), table: table.name.clone() }
                 .render()

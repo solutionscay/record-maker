@@ -40,6 +40,20 @@ impl Solution {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The **found set** of `table`: the ids of all its rows, ordered by id.
+    ///
+    /// This is the record-navigation primitive (#23). Until Find exists the
+    /// found set is every record (`found == total`); the flipbook navigates
+    /// 1-based positions within this list, and `len()` is the "of M" total.
+    /// Find will later return a filtered version of exactly this shape.
+    pub fn record_ids(&self, table: &TableMeta) -> Result<Vec<i64>> {
+        let mut stmt = self
+            .data
+            .prepare(&format!("SELECT id FROM {} ORDER BY id", table.phys))?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Insert a row. `values` are `(field, string-value)` pairs; SQLite type
     /// affinity converts the strings into each column's type.
     pub fn insert_record(&self, table: &TableMeta, values: &[(&FieldMeta, String)]) -> Result<i64> {
@@ -189,6 +203,26 @@ mod tests {
         let recs = s.list_records(&table, &fields).unwrap();
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].cells[0], "Linus");
+    }
+
+    #[test]
+    fn record_ids_is_the_ordered_found_set() {
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table("T", &[NewField { name: "N".into(), kind: FieldKind::Text }])
+            .unwrap();
+        let table = s.table_by_name("T").unwrap().unwrap();
+        let fields = s.fields(table.id).unwrap();
+
+        assert!(s.record_ids(&table).unwrap().is_empty());
+
+        let a = s.insert_record(&table, &[(&fields[0], "a".into())]).unwrap();
+        let b = s.insert_record(&table, &[(&fields[0], "b".into())]).unwrap();
+        let c = s.insert_record(&table, &[(&fields[0], "c".into())]).unwrap();
+        assert_eq!(s.record_ids(&table).unwrap(), vec![a, b, c]);
+
+        // deletion shrinks the found set; order is preserved
+        s.delete_record(&table, b).unwrap();
+        assert_eq!(s.record_ids(&table).unwrap(), vec![a, c]);
     }
 
     #[test]

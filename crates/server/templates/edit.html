@@ -2,12 +2,12 @@
 
 {% block content %}
 <h2>{{ table }} · edit record</h2>
-<form class="newrec" method="post" action="/t/{{ table }}/{{ id }}">
+<form class="newrec" method="post" action="/browse/{{ layout_id }}/{{ id }}">
   {% for f in fields %}
   <label>{{ f.name }}<input name="f{{ f.id }}" value="{{ f.value }}"></label>
   {% endfor %}
   <button type="submit">Save</button>
-  <a href="/t/{{ table }}">Cancel</a>
+  <a href="/browse/{{ layout_id }}">Cancel</a>
 </form>
 {% endblock %}
 

@@ -1,0 +1,17 @@
+{# A layout part rendered as a band of absolutely-positioned objects. Shared by
+   Form view (#25) and List view (#26) so both render objects identically. #}
+{% macro band(p) %}
+<div class="fm-part" style="height: {{ p.height }}px;">
+  {% for o in p.objects %}
+  <div class="fm-obj{% if o.field %} fm-field{% endif %}"
+       style="left:{{ o.x }}px; top:{{ o.y }}px; width:{{ o.w }}px; height:{{ o.h }}px;">
+    {% if o.field %}
+    <span class="fm-flabel">{{ o.label }}</span>
+    <span class="fm-fvalue">{{ o.value }}</span>
+    {% else %}
+    <span class="fm-text">{{ o.value }}</span>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endmacro %}

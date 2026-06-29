@@ -1,10 +1,24 @@
 {% extends "shell.html" %}
+{% import "_band.html" as band %}
 
 {% block content %}
 <h2>{{ layout }} · List view</h2>
-<p class="placeholder">List view renders the layout's Body part once per record of
-<strong>{{ table }}</strong>, stacked and scrolling, using the same objects as
-Form view (#26). Use the toggle to switch to Table view.</p>
+{% if rows.is_empty() %}
+<p class="placeholder">No records in <strong>{{ table }}</strong> yet. Add one in
+Table view, then they'll list here.</p>
+{% else %}
+<div class="fm-list" style="width: {{ width }}px;">
+  {% for p in header %}{% call band::band(p) %}{% endfor %}
+  {% for row in rows %}
+  <div class="fm-row{% if row.current %} current{% endif %}" id="rec-{{ row.id }}">
+    {% for p in row.parts %}{% call band::band(p) %}{% endfor %}
+  </div>
+  {% endfor %}
+  {% for p in footer %}{% call band::band(p) %}{% endfor %}
+</div>
+<p class="hint">{{ rows.len() }} record(s) of <strong>{{ table }}</strong>, each a
+repeated Body band — the flipbook highlights the current row.</p>
+{% endif %}
 {% endblock %}
 
 {% block statusbar %}<span>{{ table }} · List view</span>{% endblock %}

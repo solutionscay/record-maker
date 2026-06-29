@@ -9,9 +9,11 @@
 
 pub mod data;
 pub mod db;
+pub mod layout;
 pub mod model;
 pub mod schema;
 
 pub use data::Record;
 pub use db::Solution;
+pub use layout::LayoutMeta;
 pub use model::{FieldKind, FieldMeta, NewField, TableMeta};

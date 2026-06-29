@@ -1,6 +1,7 @@
-//! Browse Mode runtime (#14): wires the embedded axum server to the engine so
-//! layouts/records are served live from data.db. One generic set of handlers
-//! serves every table by reading metadata — no per-table code.
+//! Browse Mode runtime + app shell. One generic set of handlers serves every
+//! table by reading metadata — no per-table code. The shell (top bar with mode
+//! toggle + layout selector, left rail, status bar) is server-rendered and
+//! shared by every view (#19, ADR-0005).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -19,10 +20,47 @@ struct AppState {
     sol: Arc<Mutex<Solution>>,
 }
 
+/// Persistent shell context shared by every page (the chrome).
+struct Chrome {
+    mode: &'static str, // "browse" | "design"
+    tables: Vec<String>,
+    layouts: Vec<LayoutLink>,
+    current_layout: Option<i64>,
+}
+
+struct LayoutLink {
+    id: i64,
+    name: String,
+    selected: bool,
+}
+
+impl Chrome {
+    /// Build the chrome from the solution for a given mode + current layout.
+    fn build(sol: &Solution, mode: &'static str, current_layout: Option<i64>) -> Self {
+        let tables = sol
+            .tables()
+            .map(|ts| ts.into_iter().map(|t| t.name).collect())
+            .unwrap_or_default();
+        let layouts = sol
+            .layouts()
+            .map(|ls| {
+                ls.into_iter()
+                    .map(|l| LayoutLink {
+                        selected: Some(l.id) == current_layout,
+                        id: l.id,
+                        name: l.name,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Chrome { mode, tables, layouts, current_layout }
+    }
+}
+
 #[derive(Template)]
 #[template(path = "browse.html")]
 struct BrowseTemplate {
-    tables: Vec<String>,
+    chrome: Chrome,
     table: String,
     fields: Vec<FieldView>,
     records: Vec<RecordView>,
@@ -47,23 +85,18 @@ async fn index(State(st): State<AppState>) -> impl IntoResponse {
     }
 }
 
-/// Browse a table: column headers from fields, rows from data.db.
+/// Browse a table (Table view): headers from fields, rows from data.db.
 async fn browse(State(st): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
     let sol = st.sol.lock().unwrap();
-    let tables = sol
-        .tables()
-        .unwrap()
-        .into_iter()
-        .map(|t| t.name)
-        .collect::<Vec<_>>();
     let Some(table) = sol.table_by_name(&name).unwrap() else {
         return Html(format!("<p>No such table: {name}</p>")).into_response();
     };
     let fields = sol.fields(table.id).unwrap();
     let records = sol.list_records(&table, &fields).unwrap();
+    let chrome = Chrome::build(&sol, "browse", None);
 
     let tmpl = BrowseTemplate {
-        tables,
+        chrome,
         table: table.name.clone(),
         fields: fields
             .iter()
@@ -126,7 +159,7 @@ fn seed(sol: &mut Solution) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build the router. A fn so the Tauri shell (#13b) embeds the same app.
+/// Build the router. A fn so the Tauri shell (#16) embeds the same app.
 fn app(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))

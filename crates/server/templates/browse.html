@@ -1,12 +1,6 @@
-{% extends "layout.html" %}
+{% extends "shell.html" %}
+
 {% block content %}
-<h1>record-maker</h1>
-<p>Browse Mode — live records from <code>data.db</code>.</p>
-
-<nav>
-  {% for t in tables %}<a href="/t/{{ t }}">{{ t }}</a>{% endfor %}
-</nav>
-
 <h2>{{ table }}</h2>
 
 <table>
@@ -39,3 +33,5 @@
   <button type="submit">Add</button>
 </form>
 {% endblock %}
+
+{% block statusbar %}<span>{{ table }} · Table view</span>{% endblock %}

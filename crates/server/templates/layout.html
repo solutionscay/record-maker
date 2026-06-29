@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>record-maker</title>
+  {# TODO(#13b): vendor htmx locally for offline desktop use; CDN is fine for the dev scaffold #}
+  <script src="https://unpkg.com/htmx.org@2.0.3"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 4rem auto; padding: 0 1rem; color: #1b1b1f; }
+    button { font: inherit; padding: .5rem .9rem; border-radius: .4rem; border: 1px solid #888; cursor: pointer; }
+    #out:not(:empty) { margin-top: 1rem; padding: .75rem; background: #eef7ee; border-radius: .4rem; }
+  </style>
+</head>
+<body>
+  {% block content %}{% endblock %}
+</body>
+</html>

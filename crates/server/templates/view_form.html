@@ -1,0 +1,11 @@
+{% extends "shell.html" %}
+
+{% block content %}
+<h2>{{ layout }} · Form view</h2>
+<p class="placeholder">Form view renders the layout's positioned objects
+(<code>meta_part</code> → <code>meta_object</code>) for a single record of
+<strong>{{ table }}</strong>, bound to live data. Record navigation arrives in
+#23; the positioned render in #25. Use the toggle to switch to Table view.</p>
+{% endblock %}
+
+{% block statusbar %}<span>{{ table }} · Form view</span>{% endblock %}

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use askama::Template;
 use axum::{
-    extract::{Form, Path, State},
+    extract::{Form, Path, Query, State},
     response::{Html, IntoResponse, Redirect},
     routing::{get, post},
     Router,
@@ -26,6 +26,8 @@ struct Chrome {
     tables: Vec<String>,
     layouts: Vec<LayoutLink>,
     current_layout: Option<i64>,
+    /// Form/List/Table tabs for the Browse view toggle; empty in Layout mode.
+    view_tabs: Vec<ViewTab>,
 }
 
 struct LayoutLink {
@@ -34,8 +36,33 @@ struct LayoutLink {
     selected: bool,
 }
 
+/// One entry in the Browse Form/List/Table view toggle.
+struct ViewTab {
+    label: &'static str,
+    href: String,
+    active: bool,
+}
+
+/// The three Browse views, in toggle order. The frozen `?view=` contract (#20).
+const VIEWS: [&str; 3] = ["form", "list", "table"];
+
+/// Normalise a `?view=` value to a known view, defaulting to Table.
+// TODO(#25): default to the layout's stored `view` once Form view renders.
+fn view_param(q: &HashMap<String, String>) -> &'static str {
+    match q.get("view").map(String::as_str) {
+        Some("form") => "form",
+        Some("list") => "list",
+        _ => "table",
+    }
+}
+
 impl Chrome {
-    fn build(sol: &Solution, mode: &'static str, current_layout: Option<i64>) -> Self {
+    fn build(
+        sol: &Solution,
+        mode: &'static str,
+        current_layout: Option<i64>,
+        view: Option<&str>,
+    ) -> Self {
         let tables = sol
             .tables()
             .map(|ts| ts.into_iter().map(|t| t.name).collect())
@@ -52,7 +79,23 @@ impl Chrome {
                     .collect()
             })
             .unwrap_or_default();
-        Chrome { mode, tables, layouts, current_layout }
+        // The view toggle exists only in Browse, where a layout is open.
+        let view_tabs = match (current_layout, view) {
+            (Some(lid), Some(active)) => VIEWS
+                .iter()
+                .map(|&v| ViewTab {
+                    label: match v {
+                        "form" => "Form",
+                        "list" => "List",
+                        _ => "Table",
+                    },
+                    href: format!("/browse/{lid}?view={v}"),
+                    active: v == active,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        Chrome { mode, tables, layouts, current_layout, view_tabs }
     }
 }
 
@@ -67,16 +110,32 @@ fn not_found(what: &str, id: i64) -> axum::response::Response {
     Html(format!("<p>No such {what}: {id}</p>")).into_response()
 }
 
-// ---- Browse (Table view for now; Form/List arrive in #22/#25/#26) ----
+// ---- Browse views — Table (live), Form/List placeholders until #25/#26 ----
 
 #[derive(Template)]
-#[template(path = "browse.html")]
-struct BrowseTemplate {
+#[template(path = "view_table.html")]
+struct TableTemplate {
     chrome: Chrome,
     layout_id: i64,
     table: String,
     fields: Vec<FieldView>,
     records: Vec<RecordView>,
+}
+
+#[derive(Template)]
+#[template(path = "view_form.html")]
+struct FormTemplate {
+    chrome: Chrome,
+    layout: String,
+    table: String,
+}
+
+#[derive(Template)]
+#[template(path = "view_list.html")]
+struct ListTemplate {
+    chrome: Chrome,
+    layout: String,
+    table: String,
 }
 
 struct FieldView {
@@ -122,30 +181,52 @@ async fn index(State(st): State<AppState>) -> impl IntoResponse {
     }
 }
 
-/// Browse a layout (Table view): headers from fields, rows from data.db.
-async fn browse(State(st): State<AppState>, Path(layout_id): Path<i64>) -> impl IntoResponse {
+/// Browse a layout. `?view=table|form|list` (frozen #20) picks the renderer;
+/// Table is the field-derived grid, Form/List render the layout's objects.
+async fn browse(
+    State(st): State<AppState>,
+    Path(layout_id): Path<i64>,
+    Query(q): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
     let sol = st.sol.lock().unwrap();
-    let Some((_lay, table)) = layout_table(&sol, layout_id) else {
+    let Some((lay, table)) = layout_table(&sol, layout_id) else {
         return not_found("layout", layout_id);
     };
-    let fields = sol.fields(table.id).unwrap();
-    let records = sol.list_records(&table, &fields).unwrap();
-    let chrome = Chrome::build(&sol, "browse", Some(layout_id));
+    let view = view_param(&q);
+    let chrome = Chrome::build(&sol, "browse", Some(layout_id), Some(view));
 
-    let tmpl = BrowseTemplate {
-        chrome,
-        layout_id,
-        table: table.name.clone(),
-        fields: fields
-            .iter()
-            .map(|f| FieldView { id: f.id, name: f.name.clone() })
-            .collect(),
-        records: records
-            .into_iter()
-            .map(|r| RecordView { id: r.id, cells: r.cells })
-            .collect(),
-    };
-    Html(tmpl.render().unwrap()).into_response()
+    match view {
+        "form" => Html(
+            FormTemplate { chrome, layout: lay.name.clone(), table: table.name.clone() }
+                .render()
+                .unwrap(),
+        )
+        .into_response(),
+        "list" => Html(
+            ListTemplate { chrome, layout: lay.name.clone(), table: table.name.clone() }
+                .render()
+                .unwrap(),
+        )
+        .into_response(),
+        _ => {
+            let fields = sol.fields(table.id).unwrap();
+            let records = sol.list_records(&table, &fields).unwrap();
+            let tmpl = TableTemplate {
+                chrome,
+                layout_id,
+                table: table.name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|f| FieldView { id: f.id, name: f.name.clone() })
+                    .collect(),
+                records: records
+                    .into_iter()
+                    .map(|r| RecordView { id: r.id, cells: r.cells })
+                    .collect(),
+            };
+            Html(tmpl.render().unwrap()).into_response()
+        }
+    }
 }
 
 /// Layout (design) mode — placeholder until the canvas lands (#15/#24).
@@ -154,7 +235,7 @@ async fn design(State(st): State<AppState>, Path(layout_id): Path<i64>) -> impl 
     let Some((lay, _table)) = layout_table(&sol, layout_id) else {
         return not_found("layout", layout_id);
     };
-    let chrome = Chrome::build(&sol, "design", Some(layout_id));
+    let chrome = Chrome::build(&sol, "design", Some(layout_id), None);
     let tmpl = DesignTemplate { chrome, layout_id, layout: lay.name.clone() };
     Html(tmpl.render().unwrap()).into_response()
 }
@@ -189,7 +270,7 @@ async fn edit_form(
     let Some(values) = sol.get_record(&table, &fields, id).unwrap() else {
         return not_found("record", id);
     };
-    let chrome = Chrome::build(&sol, "browse", Some(layout_id));
+    let chrome = Chrome::build(&sol, "browse", Some(layout_id), Some("table"));
     let fv = fields
         .iter()
         .zip(values)

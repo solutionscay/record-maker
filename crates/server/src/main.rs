@@ -13,7 +13,9 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use record_maker_engine::{FieldKind, LayoutMeta, NewField, Solution, TableMeta};
+use record_maker_engine::{
+    FieldKind, FieldMeta, LayoutMeta, NewField, ObjectMeta, Solution, TableMeta,
+};
 
 #[derive(Clone)]
 struct AppState {
@@ -87,12 +89,12 @@ fn flipbook(layout_id: i64, view: &str, current: i64, total: i64) -> Flipbook {
 /// The three Browse views, in toggle order. The frozen `?view=` contract (#20).
 const VIEWS: [&str; 3] = ["form", "list", "table"];
 
-/// Normalise a `?view=` value to a known view, defaulting to Table.
-// TODO(#25): default to the layout's stored `view` once Form view renders.
-fn view_param(q: &HashMap<String, String>) -> &'static str {
-    match q.get("view").map(String::as_str) {
-        Some("form") => "form",
-        Some("list") => "list",
+/// Normalise a `?view=` value to a known view, falling back to the layout's
+/// stored default view (`form` for default forms) when `?view` is absent.
+fn view_param(q: &HashMap<String, String>, default: &str) -> &'static str {
+    match q.get("view").map(String::as_str).unwrap_or(default) {
+        "form" => "form",
+        "list" => "list",
         _ => "table",
     }
 }
@@ -170,18 +172,32 @@ struct FormTemplate {
     layout: String,
     table: String,
     /// The record at the flipbook's current position; `None` when empty.
-    record: Option<RecordForm>,
+    record: Option<FormRecord>,
 }
 
-/// One record shown in Form view as named field values (interim until the
-/// positioned object render in #25).
-struct RecordForm {
+/// One record laid out per the layout's parts/objects, with live values (#25).
+/// `width` is the canvas width (max object right edge + margin).
+struct FormRecord {
     id: i64,
-    fields: Vec<NamedValue>,
+    width: i64,
+    parts: Vec<PartView>,
 }
 
-struct NamedValue {
-    name: String,
+/// A part band; objects are positioned **relative to it** (geometry contract).
+struct PartView {
+    height: i64,
+    objects: Vec<ObjectView>,
+}
+
+/// A positioned object. `field` objects show `label` + live `value`; other
+/// kinds render `value` as plain text.
+struct ObjectView {
+    field: bool,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    label: String,
     value: String,
 }
 
@@ -236,6 +252,64 @@ async fn index(State(st): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// Resolve a field object's binding to its (label, value) for the current
+/// record. Interim two-segment resolver: the last dot-path segment is the field
+/// name, matched case-insensitively against `by_name` (lowercased field name →
+/// `(display name, value)`). The full relationship resolver replaces this (#11).
+fn resolve_object(
+    o: &ObjectMeta,
+    by_name: &HashMap<String, (String, String)>,
+) -> (bool, String, String) {
+    match (o.kind.as_str(), o.binding.as_deref()) {
+        ("field", Some(binding)) => {
+            let seg = binding.rsplit('.').next().unwrap_or(binding).to_lowercase();
+            match by_name.get(&seg) {
+                Some((label, value)) => (true, label.clone(), value.clone()),
+                // a binding that doesn't resolve yet (e.g. a relationship path)
+                None => (true, binding.to_string(), String::new()),
+            }
+        }
+        // non-field objects (text/button/…) render their binding text, if any
+        _ => (false, String::new(), o.binding.clone().unwrap_or_default()),
+    }
+}
+
+/// Build the Form-view render of the record at flipbook position `rec`: the
+/// layout's parts, each with its objects positioned and bound to live values.
+/// `None` when the found set is empty (`rec == 0`) or the row vanished.
+fn build_form_record(
+    sol: &Solution,
+    layout_id: i64,
+    table: &TableMeta,
+    fields: &[FieldMeta],
+    ids: &[i64],
+    rec: i64,
+) -> Option<FormRecord> {
+    if rec <= 0 {
+        return None;
+    }
+    let id = ids[(rec - 1) as usize];
+    let cells = sol.get_record(table, fields, id).unwrap()?;
+    let by_name: HashMap<String, (String, String)> = fields
+        .iter()
+        .zip(cells)
+        .map(|(f, value)| (f.name.to_lowercase(), (f.name.clone(), value)))
+        .collect();
+
+    let mut width = 0i64;
+    let mut parts = Vec::new();
+    for p in sol.parts(layout_id).unwrap() {
+        let mut objects = Vec::new();
+        for o in sol.objects(p.id).unwrap() {
+            let (field, label, value) = resolve_object(&o, &by_name);
+            width = width.max(o.x + o.w);
+            objects.push(ObjectView { field, x: o.x, y: o.y, w: o.w, h: o.h, label, value });
+        }
+        parts.push(PartView { height: p.height, objects });
+    }
+    Some(FormRecord { id, width: width + 24, parts })
+}
+
 /// Browse a layout. `?view=table|form|list` (frozen #20) picks the renderer;
 /// Table is the field-derived grid, Form/List render the layout's objects.
 async fn browse(
@@ -247,7 +321,7 @@ async fn browse(
     let Some((lay, table)) = layout_table(&sol, layout_id) else {
         return not_found("layout", layout_id);
     };
-    let view = view_param(&q);
+    let view = view_param(&q, &lay.view);
     let mut chrome = Chrome::build(&sol, "browse", Some(layout_id), Some(view));
 
     // Found set + flipbook position drive record navigation across all views.
@@ -259,15 +333,7 @@ async fn browse(
     match view {
         "form" => {
             let fields = sol.fields(table.id).unwrap();
-            let record = (rec > 0).then(|| ids[(rec - 1) as usize]).and_then(|id| {
-                let cells = sol.get_record(&table, &fields, id).unwrap()?;
-                let named = fields
-                    .iter()
-                    .zip(cells)
-                    .map(|(f, value)| NamedValue { name: f.name.clone(), value })
-                    .collect();
-                Some(RecordForm { id, fields: named })
-            });
+            let record = build_form_record(&sol, layout_id, &table, &fields, &ids, rec);
             Html(
                 FormTemplate {
                     chrome,

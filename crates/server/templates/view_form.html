@@ -4,14 +4,25 @@
 <h2>{{ layout }} · Form view</h2>
 {% match record %}
 {% when Some with (r) %}
-<div class="form-fields">
-  {% for f in r.fields %}
-  <label>{{ f.name }}<input value="{{ f.value }}" readonly></label>
+<div class="fm-canvas" style="width: {{ r.width }}px;">
+  {% for p in r.parts %}
+  <div class="fm-part" style="height: {{ p.height }}px;">
+    {% for o in p.objects %}
+    <div class="fm-obj{% if o.field %} fm-field{% endif %}"
+         style="left:{{ o.x }}px; top:{{ o.y }}px; width:{{ o.w }}px; height:{{ o.h }}px;">
+      {% if o.field %}
+      <span class="fm-flabel">{{ o.label }}</span>
+      <span class="fm-fvalue">{{ o.value }}</span>
+      {% else %}
+      <span class="fm-text">{{ o.value }}</span>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
   {% endfor %}
 </div>
-<p class="hint">Showing record #{{ r.id }} from <strong>{{ table }}</strong>, live
-from data.db — page through with the flipbook below. The positioned object
-render (and editing) arrives in #25.</p>
+<p class="hint">Record #{{ r.id }} of <strong>{{ table }}</strong>, rendered from
+the layout's objects with live values — page through with the flipbook below.</p>
 {% when None %}
 <p class="placeholder">No records in <strong>{{ table }}</strong> yet. Add one in
 Table view, then page through them here.</p>

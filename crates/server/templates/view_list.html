@@ -1,0 +1,10 @@
+{% extends "shell.html" %}
+
+{% block content %}
+<h2>{{ layout }} · List view</h2>
+<p class="placeholder">List view renders the layout's Body part once per record of
+<strong>{{ table }}</strong>, stacked and scrolling, using the same objects as
+Form view (#26). Use the toggle to switch to Table view.</p>
+{% endblock %}
+
+{% block statusbar %}<span>{{ table }} · List view</span>{% endblock %}

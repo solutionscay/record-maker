@@ -14,7 +14,7 @@ use axum::{
     Router,
 };
 use record_maker_engine::{
-    FieldKind, FieldMeta, LayoutMeta, NewField, ObjectMeta, Solution, TableMeta,
+    FieldKind, FieldMeta, LayoutMeta, NewField, ObjectMeta, PartMeta, Solution, TableMeta,
 };
 
 #[derive(Clone)]
@@ -207,6 +207,20 @@ struct ListTemplate {
     chrome: Chrome,
     layout: String,
     table: String,
+    width: i64,
+    /// Non-body parts (header/title/…) rendered once above the rows.
+    header: Vec<PartView>,
+    /// One entry per record: the Body part(s) bound to that record.
+    rows: Vec<ListRow>,
+    /// Footer/grand-summary parts rendered once below the rows.
+    footer: Vec<PartView>,
+}
+
+/// One record's Body band(s) in List view; `current` marks the flipbook's row.
+struct ListRow {
+    id: i64,
+    current: bool,
+    parts: Vec<PartView>,
 }
 
 struct FieldView {
@@ -274,6 +288,47 @@ fn resolve_object(
     }
 }
 
+/// A record's field values keyed by lowercased field name → (display name,
+/// value) — the lookup `resolve_object` binds against.
+fn by_name_map(fields: &[FieldMeta], cells: Vec<String>) -> HashMap<String, (String, String)> {
+    fields
+        .iter()
+        .zip(cells)
+        .map(|(f, value)| (f.name.to_lowercase(), (f.name.clone(), value)))
+        .collect()
+}
+
+/// Render one part's objects, positioned and bound against `by_name` (an empty
+/// map leaves field values blank — used for header/footer with no record).
+fn render_part(
+    sol: &Solution,
+    part: &PartMeta,
+    by_name: &HashMap<String, (String, String)>,
+) -> PartView {
+    let objects = sol
+        .objects(part.id)
+        .unwrap()
+        .iter()
+        .map(|o| {
+            let (field, label, value) = resolve_object(o, by_name);
+            ObjectView { field, x: o.x, y: o.y, w: o.w, h: o.h, label, value }
+        })
+        .collect();
+    PartView { height: part.height, objects }
+}
+
+/// Canvas width for a layout: the rightmost object edge + a margin. Geometry is
+/// record-independent, so this is the same for every record (Form and List).
+fn layout_canvas_width(sol: &Solution, layout_id: i64) -> i64 {
+    let mut w = 0i64;
+    for p in sol.parts(layout_id).unwrap() {
+        for o in sol.objects(p.id).unwrap() {
+            w = w.max(o.x + o.w);
+        }
+    }
+    w + 24
+}
+
 /// Build the Form-view render of the record at flipbook position `rec`: the
 /// layout's parts, each with its objects positioned and bound to live values.
 /// `None` when the found set is empty (`rec == 0`) or the row vanished.
@@ -290,24 +345,47 @@ fn build_form_record(
     }
     let id = ids[(rec - 1) as usize];
     let cells = sol.get_record(table, fields, id).unwrap()?;
-    let by_name: HashMap<String, (String, String)> = fields
+    let by_name = by_name_map(fields, cells);
+    let parts = sol
+        .parts(layout_id)
+        .unwrap()
         .iter()
-        .zip(cells)
-        .map(|(f, value)| (f.name.to_lowercase(), (f.name.clone(), value)))
+        .map(|p| render_part(sol, p, &by_name))
         .collect();
+    Some(FormRecord { id, width: layout_canvas_width(sol, layout_id), parts })
+}
 
-    let mut width = 0i64;
-    let mut parts = Vec::new();
+/// Build the List-view render: header/footer parts once, the Body part(s)
+/// repeated per record bound to its values. `current_rec` (1-based) marks the
+/// flipbook's row. Returns `(header, rows, footer)`.
+fn build_list(
+    sol: &Solution,
+    layout_id: i64,
+    table: &TableMeta,
+    fields: &[FieldMeta],
+    ids: &[i64],
+    current_rec: i64,
+) -> (Vec<PartView>, Vec<ListRow>, Vec<PartView>) {
+    let no_record = HashMap::new();
+    let (mut header, mut footer, mut body_parts) = (Vec::new(), Vec::new(), Vec::new());
     for p in sol.parts(layout_id).unwrap() {
-        let mut objects = Vec::new();
-        for o in sol.objects(p.id).unwrap() {
-            let (field, label, value) = resolve_object(&o, &by_name);
-            width = width.max(o.x + o.w);
-            objects.push(ObjectView { field, x: o.x, y: o.y, w: o.w, h: o.h, label, value });
+        match p.kind.as_str() {
+            "body" => body_parts.push(p),
+            "footer" | "grandsummary" => footer.push(render_part(sol, &p, &no_record)),
+            _ => header.push(render_part(sol, &p, &no_record)), // header/title/subsummary
         }
-        parts.push(PartView { height: p.height, objects });
     }
-    Some(FormRecord { id, width: width + 24, parts })
+
+    let mut rows = Vec::new();
+    for (i, &id) in ids.iter().enumerate() {
+        let Some(cells) = sol.get_record(table, fields, id).unwrap() else {
+            continue;
+        };
+        let by_name = by_name_map(fields, cells);
+        let parts = body_parts.iter().map(|p| render_part(sol, p, &by_name)).collect();
+        rows.push(ListRow { id, current: (i as i64) + 1 == current_rec, parts });
+    }
+    (header, rows, footer)
 }
 
 /// Browse a layout. `?view=table|form|list` (frozen #20) picks the renderer;
@@ -346,12 +424,25 @@ async fn browse(
             )
             .into_response()
         }
-        "list" => Html(
-            ListTemplate { chrome, layout: lay.name.clone(), table: table.name.clone() }
+        "list" => {
+            let fields = sol.fields(table.id).unwrap();
+            let (header, rows, footer) =
+                build_list(&sol, layout_id, &table, &fields, &ids, rec);
+            Html(
+                ListTemplate {
+                    chrome,
+                    layout: lay.name.clone(),
+                    table: table.name.clone(),
+                    width: layout_canvas_width(&sol, layout_id),
+                    header,
+                    rows,
+                    footer,
+                }
                 .render()
                 .unwrap(),
-        )
-        .into_response(),
+            )
+            .into_response()
+        }
         _ => {
             let fields = sol.fields(table.id).unwrap();
             let records = sol.list_records(&table, &fields).unwrap();

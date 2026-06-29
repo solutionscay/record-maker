@@ -1,0 +1,41 @@
+{% extends "layout.html" %}
+{% block content %}
+<h1>record-maker</h1>
+<p>Browse Mode — live records from <code>data.db</code>.</p>
+
+<nav>
+  {% for t in tables %}<a href="/t/{{ t }}">{{ t }}</a>{% endfor %}
+</nav>
+
+<h2>{{ table }}</h2>
+
+<table>
+  <thead>
+    <tr>
+      {% for f in fields %}<th>{{ f.name }}</th>{% endfor %}
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in records %}
+    <tr>
+      {% for c in r.cells %}<td>{{ c }}</td>{% endfor %}
+      <td>
+        <form class="inline" method="post" action="/t/{{ table }}/{{ r.id }}/delete"
+              onsubmit="return confirm('Delete this record?')">
+          <button type="submit" title="Delete">✕</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h3>New record</h3>
+<form class="newrec" method="post" action="/t/{{ table }}">
+  {% for f in fields %}
+  <label>{{ f.name }}<input name="f{{ f.id }}"></label>
+  {% endfor %}
+  <button type="submit">Add</button>
+</form>
+{% endblock %}

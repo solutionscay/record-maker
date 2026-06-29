@@ -2,7 +2,7 @@
 name = "record-maker-server"
 version = "0.1.0"
 edition = "2021"
-description = "Embedded axum server core — Browse Mode runtime + web-publish target"
+description = "Embedded axum server — Browse Mode runtime + web-publish target"
 
 [[bin]]
 name = "record-maker-server"
@@ -12,3 +12,5 @@ path = "src/main.rs"
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 askama = "0.12"
+anyhow = "1"
+record-maker-engine = { path = "../engine" }

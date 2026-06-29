@@ -1,7 +1,0 @@
-{% extends "layout.html" %}
-{% block content %}
-<h1>record-maker</h1>
-<p>The embedded <strong>axum + askama + HTMX</strong> server core is running.</p>
-<button hx-get="/hello" hx-target="#out" hx-swap="innerHTML">Ping the server</button>
-<div id="out"></div>
-{% endblock %}

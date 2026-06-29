@@ -7,7 +7,11 @@
 //! NOTE: `anyhow` is used for error handling during the MVP; it will be
 //! replaced with a typed error enum before the engine becomes a public API.
 
+pub mod data;
 pub mod db;
+pub mod model;
 pub mod schema;
 
+pub use data::Record;
 pub use db::Solution;
+pub use model::{FieldKind, FieldMeta, NewField, TableMeta};

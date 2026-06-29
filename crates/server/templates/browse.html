@@ -14,7 +14,8 @@
     {% for r in records %}
     <tr>
       {% for c in r.cells %}<td>{{ c }}</td>{% endfor %}
-      <td>
+      <td class="rowactions">
+        <a href="/t/{{ table }}/{{ r.id }}/edit">edit</a>
         <form class="inline" method="post" action="/t/{{ table }}/{{ r.id }}/delete"
               onsubmit="return confirm('Delete this record?')">
           <button type="submit" title="Delete">✕</button>

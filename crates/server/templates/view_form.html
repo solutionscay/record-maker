@@ -2,10 +2,20 @@
 
 {% block content %}
 <h2>{{ layout }} · Form view</h2>
-<p class="placeholder">Form view renders the layout's positioned objects
-(<code>meta_part</code> → <code>meta_object</code>) for a single record of
-<strong>{{ table }}</strong>, bound to live data. Record navigation arrives in
-#23; the positioned render in #25. Use the toggle to switch to Table view.</p>
+{% match record %}
+{% when Some with (r) %}
+<div class="form-fields">
+  {% for f in r.fields %}
+  <label>{{ f.name }}<input value="{{ f.value }}" readonly></label>
+  {% endfor %}
+</div>
+<p class="hint">Showing record #{{ r.id }} from <strong>{{ table }}</strong>, live
+from data.db — page through with the flipbook below. The positioned object
+render (and editing) arrives in #25.</p>
+{% when None %}
+<p class="placeholder">No records in <strong>{{ table }}</strong> yet. Add one in
+Table view, then page through them here.</p>
+{% endmatch %}
 {% endblock %}
 
 {% block statusbar %}<span>{{ table }} · Form view</span>{% endblock %}

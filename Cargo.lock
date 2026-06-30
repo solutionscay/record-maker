@@ -504,6 +504,7 @@ dependencies = [
  "axum",
  "record-maker-engine",
  "tokio",
+ "tower",
 ]
 
 [[package]]

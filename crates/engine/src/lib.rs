@@ -15,5 +15,5 @@ pub mod schema;
 
 pub use data::Record;
 pub use db::Solution;
-pub use layout::{LayoutMeta, ObjectMeta, PartMeta};
+pub use layout::{LayoutMeta, ObjectKind, ObjectMeta, PartKind, PartMeta};
 pub use model::{FieldKind, FieldMeta, NewField, TableMeta};

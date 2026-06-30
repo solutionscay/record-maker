@@ -90,6 +90,14 @@
   .le-workspace {
     width: max-content;
   }
+  /* Design mode: make each part band's bounds visible. Browse keeps the bands
+     subtle (the faint shell.html divider), but on the canvas the designer needs
+     to see where parts begin and end. CSS-only + design-mode-scoped, so the
+     parity-checked Browse markup is untouched. */
+  .le-stage :global(.fm-part) {
+    outline: 1px dashed #aeb6bf;
+    outline-offset: -1px;
+  }
   .le-stage :global(.fm-obj) {
     cursor: move;
     user-select: none;

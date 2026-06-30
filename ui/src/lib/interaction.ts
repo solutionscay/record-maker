@@ -226,8 +226,12 @@ export class CanvasInteraction {
       return;
     }
     const box = defaultBox(tool);
-    const y = Math.max(0, Math.round(where.localY));
-    llog('place', 'resolved drop', { tool, partId: where.partId, x: cx, partLocalY: y, w: box.w, h: box.h });
+    // Centre the object on the cursor (click-to-place), clamped to the band
+    // origin — placing the top-left at the cursor made objects appear down-right
+    // of where you clicked.
+    const x = Math.max(0, cx - Math.round(box.w / 2));
+    const y = Math.max(0, Math.round(where.localY) - Math.round(box.h / 2));
+    llog('place', 'resolved drop (centred on cursor)', { tool, partId: where.partId, x, y, w: box.w, h: box.h });
 
     this.#placing = true;
     try {
@@ -241,7 +245,7 @@ export class CanvasInteraction {
         views = await createObject(this.#layoutId, {
           partId: where.partId,
           kind: 'field',
-          x: cx,
+          x,
           y,
           w: box.w,
           h: box.h,
@@ -252,7 +256,7 @@ export class CanvasInteraction {
         views = await createObject(this.#layoutId, {
           partId: where.partId,
           kind: tool,
-          x: cx,
+          x,
           y,
           w: box.w,
           h: box.h,
@@ -269,7 +273,12 @@ export class CanvasInteraction {
       const placed = views.at(-1); // the field VALUE (its label sorts before it)
       if (placed) {
         this.#doc.selectOnly([placed.id]);
-        llog('place', 'added to store + selected — awaiting reactive re-target', { selectedId: placed.id });
+        // The cursor now sits over the freshly-placed object, so make it the hover
+        // too: otherwise `#updateTarget` prefers a STALE hover (whatever was under
+        // the cursor before the click) and points moveable at the wrong object —
+        // the reported "resize does nothing" (it resized the hovered object).
+        this.#hoverId = placed.id;
+        llog('place', 'added to store + selected + hover pinned to placed', { selectedId: placed.id });
       }
     } catch (e) {
       lerror('place', 'create failed', e);

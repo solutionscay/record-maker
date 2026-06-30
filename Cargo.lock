@@ -503,6 +503,7 @@ dependencies = [
  "askama",
  "axum",
  "record-maker-engine",
+ "serde",
  "tokio",
  "tower",
 ]

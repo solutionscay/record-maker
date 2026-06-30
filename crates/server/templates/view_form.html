@@ -9,7 +9,7 @@
   {% for p in r.parts %}{% call band::band(p) %}{% endfor %}
 </div>
 <p class="hint">Record #{{ r.id }} of <strong>{{ table }}</strong>, rendered from
-the layout's objects with live values — page through with the flipbook below.</p>
+the layout's objects with live values — page through with the record stepper at left.</p>
 {% when None %}
 <p class="placeholder">No records in <strong>{{ table }}</strong> yet. Add one in
 Table view, then page through them here.</p>

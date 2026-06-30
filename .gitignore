@@ -1,8 +1,8 @@
 /target
 **/*.rs.bk
 
-# local solution data created at runtime (app.db / data.db)
-/.rm-data
+# local solution data created at runtime (app.db / data.db), wherever launched
+.rm-data/
 
 # Node (frontend tooling, added later)
 node_modules/

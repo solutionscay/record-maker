@@ -3,14 +3,19 @@
    `editable` is the view-level flag; a per-object read-only flag (#43)
    suppresses the input even in an editable view, so a read-only object always
    renders its value as a non-editable span. `z` sets the CSS stacking order for
-   overlapping objects (the z-order contract). #}
+   overlapping objects (the z-order contract).
+
+   Each object renders by kind (#60): a `field` renders its VALUE only (an input
+   in an editable view unless read-only) — its caption is a separate `text`
+   object; a shape renders a styled box from its server-derived `shape_style`;
+   any other object is static `text` rendered from its `content` slot. The Svelte
+   `Band` component mirrors this branch-for-branch (the #44 parity contract). #}
 {% macro band(p, editable) %}
 <div class="fm-part" style="height: {{ p.height }}px;">
   {% for o in p.objects %}
   <div class="fm-obj{% if o.field %} fm-field{% endif %}{% if o.read_only %} fm-readonly{% endif %}"
        style="left:{{ o.x }}px; top:{{ o.y }}px; width:{{ o.w }}px; height:{{ o.h }}px; z-index:{{ o.z }};">
     {% if o.field %}
-    <span class="fm-flabel">{{ o.label }}</span>
     {% if editable && !o.read_only %}
       {% match o.field_id %}
       {% when Some with (fid) %}
@@ -21,8 +26,10 @@
     {% else %}
     <span class="fm-fvalue">{{ o.value }}</span>
     {% endif %}
+    {% else if o.shape %}
+    <div class="fm-shape fm-{{ o.kind }}" style="{{ o.shape_style }}"></div>
     {% else %}
-    <span class="fm-text">{{ o.value }}</span>
+    <span class="fm-text">{{ o.content }}</span>
     {% endif %}
   </div>
   {% endfor %}

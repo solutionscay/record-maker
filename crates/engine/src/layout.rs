@@ -29,8 +29,11 @@
 //! - `position` — band order top→bottom within the layout (`0` = topmost).
 //!
 //! ## Object / control ([`ObjectMeta`], [`ObjectKind`])
-//! - `kind` — `field` (data-bound: label + live value) or `text` (static label).
+//! - `kind` — `field` (data-bound, renders the value only), `text` (static label
+//!   from `content`), or a shape (`rect` / `line` / `ellipse`, drawn from `props`).
 //!   See [`ObjectKind`] for how each renders.
+//! - `content` — the static text of a `text` object (its own slot; `binding` is
+//!   data-paths only). `None` for `field`/shape objects.
 //! - `x`, `y`, `w`, `h` — geometry in pixels, **relative to the owning part's
 //!   top-left** (the frozen geometry contract, #25). `x`/`y` are measured from
 //!   the band origin, not the page; `w`/`h` are the object's box.
@@ -97,18 +100,25 @@ impl PartKind {
     }
 }
 
-/// The kind of a layout object, and how each renders:
-/// - `Field` — a **data-bound** control: shows the bound field's label and its
-///   live value (an editable input in Browse unless the object is read-only).
-/// - `Text` — **static** text/label content (never editable).
+/// The kind of a layout object, and how each renders (#60):
+/// - `Field` — a **data-bound** control: renders the bound field's live **value
+///   only** (an editable input in Browse unless the object is read-only). Its
+///   caption is a *separate* `Text` object, not baked into the field.
+/// - `Text` — **static** text/label content from its own `content` slot (never
+///   editable). A field's label is one of these, auto-spawned beside the field.
+/// - `Rect` / `Line` / `Ellipse` — **shapes**: no data, no text; drawn as a styled
+///   box from `props` (fill / stroke / radius) at the object's geometry and `z`.
 ///
-/// The closed set the canvas and engine agree on today (#43); stored as text in
-/// `meta_object.kind`. Further kinds (button / portal / image / line) join this
-/// enum when their rendering lands, so the set stays exactly what can render.
+/// The closed set the canvas and engine agree on (#43/#60); stored as text in
+/// `meta_object.kind`. Further kinds (button / portal / image) join this enum when
+/// their rendering lands, so the set stays exactly what can render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectKind {
     Field,
     Text,
+    Rect,
+    Line,
+    Ellipse,
 }
 
 impl ObjectKind {
@@ -116,6 +126,9 @@ impl ObjectKind {
         match self {
             ObjectKind::Field => "field",
             ObjectKind::Text => "text",
+            ObjectKind::Rect => "rect",
+            ObjectKind::Line => "line",
+            ObjectKind::Ellipse => "ellipse",
         }
     }
 
@@ -123,6 +136,9 @@ impl ObjectKind {
         Some(match s {
             "field" => ObjectKind::Field,
             "text" => ObjectKind::Text,
+            "rect" => ObjectKind::Rect,
+            "line" => ObjectKind::Line,
+            "ellipse" => ObjectKind::Ellipse,
             _ => return None,
         })
     }
@@ -130,6 +146,11 @@ impl ObjectKind {
     /// Whether this kind is data-bound (resolves a `binding` to a live value).
     pub fn is_field(self) -> bool {
         matches!(self, ObjectKind::Field)
+    }
+
+    /// Whether this kind is a drawn shape (rendered from `props`, no data/text).
+    pub fn is_shape(self) -> bool {
+        matches!(self, ObjectKind::Rect | ObjectKind::Line | ObjectKind::Ellipse)
     }
 }
 
@@ -164,6 +185,9 @@ pub struct ObjectMeta {
     /// When `true`, Browse renders a non-editable value instead of an input.
     pub read_only: bool,
     pub binding: Option<String>,
+    /// Static text for a `text` object — its own slot, distinct from `binding`
+    /// (which is data-paths only). `None` for `field`/shape objects.
+    pub content: Option<String>,
     pub props: Option<String>,
 }
 
@@ -227,7 +251,7 @@ impl Solution {
     /// stored `kind` falls back to `Text` (rendered, never editable).
     pub fn objects(&self, part_id: i64) -> Result<Vec<ObjectMeta>> {
         let mut stmt = self.app.prepare(
-            "SELECT id, part_id, kind, x, y, w, h, z, read_only, binding, props \
+            "SELECT id, part_id, kind, x, y, w, h, z, read_only, binding, content, props \
              FROM meta_object WHERE part_id=?1 ORDER BY z, id",
         )?;
         let rows = stmt.query_map(params![part_id], |r| {
@@ -243,7 +267,8 @@ impl Solution {
                 z: r.get(7)?,
                 read_only: r.get::<_, i64>(8)? != 0,
                 binding: r.get(9)?,
-                props: r.get(10)?,
+                content: r.get(10)?,
+                props: r.get(11)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -318,10 +343,13 @@ impl Solution {
 }
 
 /// Create a default Form layout for a freshly-defined table, inside the caller's
-/// transaction (so table + layout are atomic). One meta_layout (view='form'),
-/// one body meta_part, and one kind='field' meta_object per field — stacked,
-/// with binding `<TableName>.<FieldName>` (the frozen binding contract).
-/// Returns the new layout id. (#21)
+/// transaction (so table + layout are atomic). One meta_layout (view='form'), one
+/// body meta_part, and — per field — TWO objects stacked down the body (#60): a
+/// `text` label (its `content` = the field name) and, beside it, a value `field`
+/// object bound `<TableName>.<FieldName>` (the frozen binding contract). The label
+/// is independent: it renders the caption while the field renders the value only.
+/// The label is inserted first so it owns the lower id (paints behind / reads
+/// left-to-right). Returns the new layout id. (#21/#60)
 pub(crate) fn generate_default_form(
     tx: &Transaction<'_>,
     table_id: i64,
@@ -340,10 +368,17 @@ pub(crate) fn generate_default_form(
     let part_id = tx.last_insert_rowid();
     for (i, (_fid, fname)) in fields.iter().enumerate() {
         let y = 16 + i as i64 * 32;
+        // Caption: a separate static-text object to the left of the value.
+        tx.execute(
+            "INSERT INTO meta_object(part_id, kind, x, y, w, h, content) \
+             VALUES (?1, 'text', 16, ?2, 72, 24, ?3)",
+            params![part_id, y, fname],
+        )?;
+        // Value: the data-bound field, rendered value-only beside its caption.
         let binding = format!("{table_name}.{fname}");
         tx.execute(
             "INSERT INTO meta_object(part_id, kind, x, y, w, h, binding) \
-             VALUES (?1, 'field', 16, ?2, 200, 24, ?3)",
+             VALUES (?1, 'field', 96, ?2, 200, 24, ?3)",
             params![part_id, y, binding],
         )?;
     }
@@ -351,10 +386,10 @@ pub(crate) fn generate_default_form(
 }
 
 /// Deep-copy a layout into a new one for a different `view` (#57): clones the
-/// layout row, every part, and every object (geometry/z/read_only/binding/props),
-/// so the new view starts identical to the source but is then edited completely
-/// independently. Returns the new layout id. Runs inside the caller's connection
-/// or transaction (`&Transaction` coerces to `&Connection`).
+/// layout row, every part, and every object (geometry/z/read_only/binding/content/
+/// props), so the new view starts identical to the source but is then edited
+/// completely independently. Returns the new layout id. Runs inside the caller's
+/// connection or transaction (`&Transaction` coerces to `&Connection`).
 pub(crate) fn clone_layout(
     conn: &Connection,
     src_layout_id: i64,
@@ -389,8 +424,8 @@ pub(crate) fn clone_layout(
         )?;
         let new_part_id = conn.last_insert_rowid();
         conn.execute(
-            "INSERT INTO meta_object(part_id, kind, x, y, w, h, z, read_only, binding, props) \
-             SELECT ?1, kind, x, y, w, h, z, read_only, binding, props FROM meta_object WHERE part_id=?2",
+            "INSERT INTO meta_object(part_id, kind, x, y, w, h, z, read_only, binding, content, props) \
+             SELECT ?1, kind, x, y, w, h, z, read_only, binding, content, props FROM meta_object WHERE part_id=?2",
             params![new_part_id, src_part_id],
         )?;
     }
@@ -423,18 +458,35 @@ mod tests {
         assert!(parts[0].height > 0);
 
         let objs = s.objects(parts[0].id).unwrap();
-        assert_eq!(objs.len(), 2);
+        // Per field: a separate label text object + a value field object (#60).
+        assert_eq!(objs.len(), 4);
         for o in &objs {
-            assert_eq!(o.kind, ObjectKind::Field);
             assert_eq!(o.part_id, parts[0].id);
             assert!(o.w > 0 && o.h > 0 && o.x >= 0 && o.y >= 0);
             // Default-form objects are editable and unstacked (the interim default).
             assert_eq!(o.z, 0);
             assert!(!o.read_only);
         }
-        assert_eq!(objs[0].binding.as_deref(), Some("Customers.Name"));
-        assert_eq!(objs[1].binding.as_deref(), Some("Customers.Email"));
-        assert!(objs[0].y < objs[1].y, "stacked down the body");
+        // Insertion is label-then-field per field, so (z,id) order is
+        // [Name label, Name value, Email label, Email value].
+        let (name_label, name_field, email_label, email_field) =
+            (&objs[0], &objs[1], &objs[2], &objs[3]);
+        // Labels are static text with the caption in `content` and no binding.
+        assert_eq!(name_label.kind, ObjectKind::Text);
+        assert_eq!(name_label.content.as_deref(), Some("Name"));
+        assert!(name_label.binding.is_none());
+        assert_eq!(email_label.kind, ObjectKind::Text);
+        assert_eq!(email_label.content.as_deref(), Some("Email"));
+        // Fields are value-only: a binding, no baked-in caption content.
+        assert_eq!(name_field.kind, ObjectKind::Field);
+        assert_eq!(name_field.binding.as_deref(), Some("Customers.Name"));
+        assert!(name_field.content.is_none());
+        assert_eq!(email_field.kind, ObjectKind::Field);
+        assert_eq!(email_field.binding.as_deref(), Some("Customers.Email"));
+        // Each label sits to the LEFT of its value on the same row; rows stack down.
+        assert!(name_label.x < name_field.x, "label beside its value");
+        assert_eq!(name_label.y, name_field.y, "label shares the field's row");
+        assert!(name_field.y < email_field.y, "rows stacked down the body");
 
         // unknown ids yield empty, not error
         assert!(s.parts(999_999).unwrap().is_empty());
@@ -480,12 +532,25 @@ mod tests {
         ] {
             assert_eq!(PartKind::parse(k.as_str()), Some(k));
         }
-        for k in [ObjectKind::Field, ObjectKind::Text] {
+        for k in [
+            ObjectKind::Field,
+            ObjectKind::Text,
+            ObjectKind::Rect,
+            ObjectKind::Line,
+            ObjectKind::Ellipse,
+        ] {
             assert_eq!(ObjectKind::parse(k.as_str()), Some(k));
         }
         assert!(PartKind::parse("nope").is_none());
         assert!(ObjectKind::parse("nope").is_none());
         assert!(ObjectKind::Field.is_field() && !ObjectKind::Text.is_field());
+        // Shapes are the drawn kinds; field/text are not shapes.
+        assert!(
+            ObjectKind::Rect.is_shape()
+                && ObjectKind::Line.is_shape()
+                && ObjectKind::Ellipse.is_shape()
+        );
+        assert!(!ObjectKind::Field.is_shape() && !ObjectKind::Text.is_shape());
     }
 
     #[test]
@@ -631,21 +696,25 @@ mod tests {
             .unwrap();
         let pid = s.app.last_insert_rowid();
 
-        // Insert front-most first (z=10) so id order and z order disagree.
+        // Insert front-most first (z=10) so id order and z order disagree. The
+        // field carries `binding`; the text object carries `content`.
         s.app
             .execute(
-                "INSERT INTO meta_object(part_id, kind, z, read_only, binding) \
-                 VALUES (?1, 'field', 10, 1, 'top'), (?1, 'text', 0, 0, 'back')",
+                "INSERT INTO meta_object(part_id, kind, z, read_only, binding, content) \
+                 VALUES (?1, 'field', 10, 1, 'top', NULL), (?1, 'text', 0, 0, NULL, 'back')",
                 [pid],
             )
             .unwrap();
 
         let objs = s.objects(pid).unwrap();
         assert_eq!(objs.len(), 2);
-        // Lower z paints first (back); read_only and kind both round-trip.
-        assert_eq!(objs[0].binding.as_deref(), Some("back"));
+        // Lower z paints first (back); read_only, kind, and the binding/content
+        // payload slots all round-trip independently.
         assert_eq!((objs[0].z, objs[0].kind, objs[0].read_only), (0, ObjectKind::Text, false));
-        assert_eq!(objs[1].binding.as_deref(), Some("top"));
+        assert_eq!(objs[0].content.as_deref(), Some("back"));
+        assert!(objs[0].binding.is_none());
         assert_eq!((objs[1].z, objs[1].kind, objs[1].read_only), (10, ObjectKind::Field, true));
+        assert_eq!(objs[1].binding.as_deref(), Some("top"));
+        assert!(objs[1].content.is_none());
     }
 }

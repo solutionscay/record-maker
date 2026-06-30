@@ -236,26 +236,31 @@ mod tests {
         let mut stmt = s
             .app
             .prepare(
-                "SELECT o.kind, o.y, o.w, o.h, o.binding FROM meta_object o \
-                 JOIN meta_part p ON p.id = o.part_id WHERE p.layout_id = ?1 ORDER BY o.y",
+                "SELECT o.kind, o.y, o.w, o.h, o.binding, o.content FROM meta_object o \
+                 JOIN meta_part p ON p.id = o.part_id WHERE p.layout_id = ?1 \
+                 ORDER BY o.y, o.x",
             )
             .unwrap();
-        let rows: Vec<(String, i64, i64, i64, Option<String>)> = stmt
+        let rows: Vec<(String, i64, i64, i64, Option<String>, Option<String>)> = stmt
             .query_map([lay.id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
             })
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
 
-        assert_eq!(rows.len(), 2);
-        assert!(rows[0].1 < rows[1].1, "y increases down the form");
+        // Per field: a label text object (caption in `content`) then a value field
+        // object (its `binding`), the label to the left on the same row (#60).
+        assert_eq!(rows.len(), 4);
         for row in &rows {
-            assert_eq!(row.0, "field");
             assert!(row.2 > 0 && row.3 > 0, "non-zero w/h");
         }
-        assert_eq!(rows[0].4.as_deref(), Some("Invoices.Number"));
-        assert_eq!(rows[1].4.as_deref(), Some("Invoices.Total"));
+        assert_eq!((rows[0].0.as_str(), rows[0].5.as_deref()), ("text", Some("Number")));
+        assert_eq!((rows[1].0.as_str(), rows[1].4.as_deref()), ("field", Some("Invoices.Number")));
+        assert_eq!((rows[2].0.as_str(), rows[2].5.as_deref()), ("text", Some("Total")));
+        assert_eq!((rows[3].0.as_str(), rows[3].4.as_deref()), ("field", Some("Invoices.Total")));
+        assert!(rows[0].1 == rows[1].1 && rows[2].1 == rows[3].1, "label shares its value's row");
+        assert!(rows[1].1 < rows[3].1, "rows increase down the form");
     }
 
     #[test]

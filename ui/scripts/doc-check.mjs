@@ -82,6 +82,16 @@ try {
     ok('hydrate: hydrated after', d.hydrated === true);
     ok('hydrate: history empty (no undo)', d.canUndo === false && d.canRedo === false);
     eq('hydrate: renderModel deep-equals fixture', d.renderModel, fixture);
+
+    // #60 object kinds project through the store: a text label carries `content`
+    // (no value), a value field carries its value (no content), a shape carries a
+    // server-derived `shapeStyle`.
+    const nameLabel = obj(d.renderModel, 1);
+    const nameValue = obj(d.renderModel, 2);
+    const rect = obj(d.renderModel, 14);
+    ok('kinds: text label projects content only', nameLabel.kind === 'text' && nameLabel.content === 'Name' && nameLabel.value === '');
+    ok('kinds: value field projects value only', nameValue.field === true && nameValue.value === 'Ada' && nameValue.content === '');
+    ok('kinds: shape projects shapeStyle', rect.shape === true && rect.shapeStyle.startsWith('background:#eef') && rect.content === '');
   }
 
   // 2. moveObject → undo restores exact geometry → redo re-applies it.
@@ -223,14 +233,15 @@ try {
     ok('snap: default grid + grid<=0 just rounds', snapToGrid(11) === GRID * Math.round(11 / GRID) && snapToGrid(7.4, 0) === 7);
     ok('clampOrigin: never negative, rounds', clampOrigin(-3) === 0 && clampOrigin(4.6) === 5);
 
-    // Paint order mirrors the fixture's (z,id) ordering: Name(z0,id1),
-    // Note(z0,id7), Email(z5,id2) → [1, 7, 2].
-    eq('paintOrder: ids match LayoutPreview order', objectIdsInPaintOrder(fixture), [1, 7, 2]);
+    // Paint order mirrors the fixture's (z,id) ordering: the z=0 objects by id
+    // (Name label 1, Name value 2, Email label 3, Note 13, rect 14) then the z=5
+    // Email value (4) last → [1, 2, 3, 13, 14, 4].
+    eq('paintOrder: ids match LayoutPreview order', objectIdsInPaintOrder(fixture), [1, 2, 3, 13, 14, 4]);
 
     // Element→id mapping is index-based; fake elements (identity only) suffice.
-    const painted = [{ n: 'a' }, { n: 'b' }, { n: 'c' }];
-    const ids = objectIdsInPaintOrder(fixture); // [1,7,2]
-    eq('elementsToIds: maps selected elements by index', elementsToObjectIds([painted[2], painted[0]], painted, ids), [2, 1]);
+    const painted = [{ n: 'a' }, { n: 'b' }, { n: 'c' }, { n: 'd' }, { n: 'e' }, { n: 'f' }];
+    const ids = objectIdsInPaintOrder(fixture); // [1, 2, 3, 13, 14, 4]
+    eq('elementsToIds: maps selected elements by index', elementsToObjectIds([painted[2], painted[0]], painted, ids), [3, 1]);
     eq('elementsToIds: drops unknown elements', elementsToObjectIds([{ n: 'x' }], painted, ids), []);
   }
 } finally {

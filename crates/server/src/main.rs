@@ -283,22 +283,31 @@ struct PartView {
     objects: Vec<ObjectView>,
 }
 
-/// A positioned object. `field` objects show `label` + live `value`; other
-/// kinds render `value` as plain text. `field_id` is set for bound field
-/// objects so editable views can name the input `f<id>`; `None` otherwise.
-/// `z` is the stacking order (CSS `z-index`); `read_only` suppresses the
-/// editable input even in an editable view (per-object editability, #40/#43).
+/// A positioned object, discriminated by `kind` (#60):
+/// - `field` objects render their live `value` **only** (an input in an editable
+///   view unless read-only); `field_id` names that input `f<id>`. Their caption is
+///   a separate `text` object — `label` is still resolved (for the inspector) but
+///   no longer rendered inline.
+/// - `text` objects render their static `content`.
+/// - shape objects (`shape == true`) render a styled box from `shape_style`
+///   (derived server-side from `props`, so both renderers just interpolate it).
+///
+/// `z` is the stacking order (CSS `z-index`); `read_only` suppresses the editable
+/// input even in an editable view (per-object editability, #40/#43).
 ///
 /// Also the object half of the Layout-Mode read model: the canvas hydrates its
-/// document store from `id`/`kind`/`binding`, but the rendered DOM (askama macro
-/// and the mirroring Svelte `Band` component) uses only the visual/geometry
-/// fields, so Browse and Layout stay byte-identical (#44).
+/// document store from these fields. The rendered DOM (askama macro and the
+/// mirroring Svelte `Band` component) uses only the visual/geometry fields, so
+/// Browse and Layout stay byte-identical (#44). **Field order is the wire
+/// contract** — the editor store's `renderModel` projection mirrors it key-for-key
+/// (doc.svelte.ts `#toView`), so keep the two in lockstep.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ObjectView {
     id: i64,
     kind: &'static str,
     field: bool,
+    shape: bool,
     field_id: Option<i64>,
     x: i64,
     y: i64,
@@ -307,8 +316,10 @@ struct ObjectView {
     z: i64,
     read_only: bool,
     binding: String,
+    content: String,
     label: String,
     value: String,
+    shape_style: String,
 }
 
 #[derive(Template)]
@@ -370,10 +381,14 @@ async fn index(State(st): State<AppState>) -> impl IntoResponse {
     }
 }
 
-/// Resolve a field object's binding to its (label, value) for the current
-/// record. Interim two-segment resolver: the last dot-path segment is the field
-/// name, matched case-insensitively against `by_name` (lowercased field name →
-/// `(display name, value)`). The full relationship resolver replaces this (#11).
+/// Resolve a field object's binding to its (field, field_id, label, value) for the
+/// current record. Interim two-segment resolver: the last dot-path segment is the
+/// field name, matched case-insensitively against `by_name` (lowercased field name
+/// → `(display name, value)`). The full relationship resolver replaces this (#11).
+///
+/// Non-field objects (text / shapes) resolve to no live value — text renders from
+/// its own `content` slot and shapes from `props`, neither of which is
+/// record-dependent (#60). Only the bound value/label come from the record here.
 fn resolve_object(
     o: &ObjectMeta,
     by_name: &HashMap<String, (i64, String, String)>,
@@ -387,9 +402,36 @@ fn resolve_object(
                 None => (true, None, binding.to_string(), String::new()),
             }
         }
-        // non-field objects (text/…) render their binding text, if any
-        _ => (false, None, String::new(), o.binding.clone().unwrap_or_default()),
+        _ => (false, None, String::new(), String::new()),
     }
+}
+
+/// Derive a shape object's inline CSS from its `props` JSON. #49 owns the full
+/// appearance contract; this reads the keys a rect/line/ellipse needs — `fill`,
+/// `stroke`, `strokeWidth`, `radius`. The string is computed once here and carried
+/// in [`ObjectView::shape_style`], so the askama band macro and the Svelte `Band`
+/// both just interpolate it — there is no second derivation to keep byte-equal.
+/// Empty for absent/invalid props (an unstyled shape falls back to its CSS class).
+fn shape_style(props: Option<&str>) -> String {
+    let Some(props) = props else { return String::new() };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(props) else {
+        return String::new();
+    };
+    let mut s = String::new();
+    if let Some(fill) = v.get("fill").and_then(serde_json::Value::as_str) {
+        s.push_str(&format!("background:{fill};"));
+    }
+    if let Some(stroke) = v.get("stroke").and_then(serde_json::Value::as_str) {
+        let width = v
+            .get("strokeWidth")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(1);
+        s.push_str(&format!("border:{width}px solid {stroke};"));
+    }
+    if let Some(radius) = v.get("radius").and_then(serde_json::Value::as_i64) {
+        s.push_str(&format!("border-radius:{radius}px;"));
+    }
+    s
 }
 
 /// A record's field values keyed by lowercased field name → (field id, display
@@ -415,10 +457,23 @@ fn render_part(
         .iter()
         .map(|o| {
             let (field, field_id, label, value) = resolve_object(o, by_name);
+            let shape = o.kind.is_shape();
+            // The text slot is only meaningful for `text` objects; fields/shapes
+            // carry none, so the renderer never reads a stray content.
+            let content = match o.kind {
+                ObjectKind::Text => o.content.clone().unwrap_or_default(),
+                _ => String::new(),
+            };
+            let shape_style = if shape {
+                shape_style(o.props.as_deref())
+            } else {
+                String::new()
+            };
             ObjectView {
                 id: o.id,
                 kind: o.kind.as_str(),
                 field,
+                shape,
                 field_id,
                 x: o.x,
                 y: o.y,
@@ -427,8 +482,10 @@ fn render_part(
                 z: o.z,
                 read_only: o.read_only,
                 binding: o.binding.clone().unwrap_or_default(),
+                content,
                 label,
                 value,
+                shape_style,
             }
         })
         .collect();
@@ -966,6 +1023,7 @@ mod tests {
             id: field_id,
             kind: "field",
             field: true,
+            shape: false,
             field_id: Some(field_id),
             x: 0,
             y: 0,
@@ -974,8 +1032,10 @@ mod tests {
             z: 0,
             read_only,
             binding: format!("T.Field{field_id}"),
+            content: String::new(),
             label: format!("Field {field_id}"),
             value: value.to_string(),
+            shape_style: String::new(),
         }
     }
 
@@ -1177,10 +1237,12 @@ mod tests {
         assert_eq!(actual.trim(), expected.trim(), "golden {name} drifted");
     }
 
-    /// A deterministic layout for parity: the default Customers form, both field
-    /// objects made read-only (so Browse renders the display/non-editing state
-    /// #44 compares), Email lifted to z=5, plus a static `text` object — covering
-    /// fm-field / fm-readonly / z-index / fm-text in one fixture.
+    /// A deterministic layout for parity: the default Customers form (per field a
+    /// label `text` object + a value `field` object, #60), both field objects made
+    /// read-only (so Browse renders the display/non-editing state #44 compares),
+    /// Email lifted to z=5, plus a free static `text` object and a `rect` shape with
+    /// appearance props — covering fm-field / fm-readonly / z-index / fm-text /
+    /// fm-shape and the server-derived shape_style in one fixture.
     fn parity_fixture() -> (Solution, i64) {
         let mut sol = Solution::open_in_memory().unwrap();
         let tid = sol
@@ -1219,8 +1281,18 @@ mod tests {
             .unwrap();
         sol.app
             .execute(
-                "INSERT INTO meta_object(part_id, kind, x, y, w, h, z, binding) \
+                "INSERT INTO meta_object(part_id, kind, x, y, w, h, z, content) \
                  VALUES (?1, 'text', 16, 80, 200, 24, 0, 'Note')",
+                [part_id],
+            )
+            .unwrap();
+        // A rect shape with appearance props — drives the shape kind + the
+        // server-derived shape_style through the byte-equal parity gate.
+        sol.app
+            .execute(
+                "INSERT INTO meta_object(part_id, kind, x, y, w, h, z, props) \
+                 VALUES (?1, 'rect', 230, 16, 64, 64, 0, \
+                 '{\"fill\":\"#eef\",\"stroke\":\"#88a\",\"strokeWidth\":1,\"radius\":4}')",
                 [part_id],
             )
             .unwrap();
@@ -1433,12 +1505,17 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         // Shape sanity (independent of the golden), so a contract change is loud.
         for needle in [
-            r#""width":240"#,
+            r#""width":320"#,
             r#""kind":"field""#,
             r#""kind":"text""#,
+            r#""kind":"rect""#,
             r#""readOnly":true"#,
             r#""binding":"Customers.Name""#,
             r#""value":"Ada""#,
+            r#""content":"Name""#,
+            r#""content":"Note""#,
+            r#""shape":true"#,
+            r#""shapeStyle":"background:#eef;border:1px solid #88a;border-radius:4px;""#,
             r#""z":5"#,
         ] {
             assert!(body.contains(needle), "model JSON missing {needle}\n{body}");

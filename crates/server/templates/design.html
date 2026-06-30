@@ -1,10 +1,17 @@
 {% extends "shell.html" %}
 
+{% block head_extra %}
+{# Built Layout Mode editor styles (Svelte 5 + Vite, served from ui/dist by axum).
+   Present once the frontend is built; harmlessly absent until then. #}
+<link rel="stylesheet" href="/ui/layout-editor.css">
+{% endblock %}
+
 {% block content %}
-<h2>{{ layout }} · Layout mode</h2>
-<p>The pixel-perfect design canvas mounts here (#15 / #24). For now this confirms
-mode routing — you're on <code>/design/{{ layout_id }}</code>. Use the toggle to
-return to Browse.</p>
+{# Mount node for the Svelte 5 editor island (#24). The island reads the layout id
+   from data-layout and talks to the engine over the existing axum endpoints. The
+   canvas itself lands in #15 / #46. #}
+<div id="layout-editor" data-layout="{{ layout_id }}"></div>
+<script type="module" src="/ui/layout-editor.js"></script>
 {% endblock %}
 
 {% block statusbar %}<span>{{ layout }} · Layout mode</span>{% endblock %}

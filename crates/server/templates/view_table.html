@@ -12,10 +12,14 @@
   </thead>
   <tbody>
     {% for r in records %}
-    <tr>
-      {% for c in r.cells %}<td>{{ c }}</td>{% endfor %}
+    <tr class="rec-edit" data-action="/browse/{{ layout_id }}/{{ r.id }}"
+        data-open="/browse/{{ layout_id }}/{{ r.id }}/open"
+        data-revert="/browse/{{ layout_id }}/{{ r.id }}/revert"
+        data-view="table" data-rec="{{ loop.index }}">
+      {% for c in r.cells %}
+      <td><input class="cell-input" name="f{{ c.field_id }}" value="{{ c.value }}" autocomplete="off"></td>
+      {% endfor %}
       <td class="rowactions">
-        <a href="/browse/{{ layout_id }}/{{ r.id }}/edit">edit</a>
         <form class="inline" method="post" action="/browse/{{ layout_id }}/{{ r.id }}/delete"
               onsubmit="return confirm('Delete this record?')">
           <button type="submit" title="Delete">✕</button>

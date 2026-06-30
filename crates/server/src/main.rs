@@ -257,7 +257,14 @@ struct FieldView {
 
 struct RecordView {
     id: i64,
-    cells: Vec<String>,
+    cells: Vec<CellView>,
+}
+
+/// One Table-view cell: the field id (so editable inputs can be named `f<id>`)
+/// and the current value.
+struct CellView {
+    field_id: i64,
+    value: String,
 }
 
 #[derive(Template)]
@@ -485,7 +492,14 @@ async fn browse(
                     .collect(),
                 records: records
                     .into_iter()
-                    .map(|r| RecordView { id: r.id, cells: r.cells })
+                    .map(|r| RecordView {
+                        id: r.id,
+                        cells: fields
+                            .iter()
+                            .zip(r.cells)
+                            .map(|(f, value)| CellView { field_id: f.id, value })
+                            .collect(),
+                    })
                     .collect(),
             };
             Html(tmpl.render().unwrap()).into_response()

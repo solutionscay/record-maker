@@ -9,11 +9,18 @@ Table view, then they'll list here.</p>
 {% else %}
 <div class="fm-list" style="width: {{ width }}px;">
   {% for p in header %}{% call band::band(p, false) %}{% endfor %}
+  {% match chrome.nav %}
+  {% when Some with (nav) %}
   {% for row in rows %}
-  <div class="fm-row{% if row.current %} current{% endif %}" id="rec-{{ row.id }}">
-    {% for p in row.parts %}{% call band::band(p, false) %}{% endfor %}
-  </div>
+  <form class="fm-row rec-edit{% if row.current %} current{% endif %}" id="rec-{{ row.id }}"
+        data-action="/browse/{{ nav.layout_id }}/{{ row.id }}"
+        data-open="/browse/{{ nav.layout_id }}/{{ row.id }}/open"
+        data-revert="/browse/{{ nav.layout_id }}/{{ row.id }}/revert"
+        data-view="list" data-rec="{{ loop.index }}">
+    {% for p in row.parts %}{% call band::band(p, true) %}{% endfor %}
+  </form>
   {% endfor %}
+  {% when None %}{% endmatch %}
   {% for p in footer %}{% call band::band(p, false) %}{% endfor %}
 </div>
 <p class="hint">{{ rows.len() }} record(s) of <strong>{{ table }}</strong>, each a

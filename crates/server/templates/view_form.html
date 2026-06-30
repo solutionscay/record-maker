@@ -7,37 +7,14 @@
 {% when Some with (r) %}
 {% match chrome.nav %}
 {% when Some with (nav) %}
-<form id="recform" class="fm-edit" method="post" action="/browse/{{ nav.layout_id }}/{{ r.id }}"
+<form class="fm-edit rec-edit" data-action="/browse/{{ nav.layout_id }}/{{ r.id }}"
       data-open="/browse/{{ nav.layout_id }}/{{ r.id }}/open"
-      data-revert="/browse/{{ nav.layout_id }}/{{ r.id }}/revert">
-  <input type="hidden" name="view" value="{{ nav.view }}">
-  <input type="hidden" name="rec" value="{{ nav.current }}">
+      data-revert="/browse/{{ nav.layout_id }}/{{ r.id }}/revert"
+      data-view="{{ nav.view }}" data-rec="{{ nav.current }}">
   <div class="fm-canvas" style="width: {{ r.width }}px;">
     {% for p in r.parts %}{% call band::band(p, true) %}{% endfor %}
   </div>
 </form>
-{# Open on focus, commit on leaving the record, revert on Escape (#40). Commits
-   use sendBeacon so they survive the navigation that often triggers them. #}
-<script>
-(function () {
-  var f = document.getElementById('recform');
-  if (!f) return;
-  var open = false;
-  function beacon(url, body) { try { navigator.sendBeacon(url, body); } catch (e) {} }
-  function openRecord() { if (open) return; open = true; beacon(f.dataset.open); }
-  function commit() {
-    if (!open) return; open = false;
-    beacon(f.action, new URLSearchParams(new FormData(f)));
-  }
-  function revert() { if (!open) return; open = false; beacon(f.dataset.revert); location.reload(); }
-  f.addEventListener('focusin', openRecord);
-  f.addEventListener('focusout', function (e) { if (!f.contains(e.relatedTarget)) commit(); });
-  f.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') { e.preventDefault(); commit(); if (document.activeElement) document.activeElement.blur(); }
-    else if (e.key === 'Escape') { e.preventDefault(); revert(); }
-  });
-})();
-</script>
 {% when None %}{% endmatch %}
 <p class="hint">Record #{{ r.id }} of <strong>{{ table }}</strong>, rendered from
 the layout's objects with live values — page through with the record stepper at left.</p>

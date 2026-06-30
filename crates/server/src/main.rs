@@ -53,6 +53,9 @@ struct Flipbook {
     layout_id: i64,
     view: &'static str,
     current: i64,
+    /// Physical id of the record at `current`; `None` when the found set is
+    /// empty. Backs the toolbar's Delete action.
+    current_id: Option<i64>,
     total: i64,
     first_href: String,
     prev_href: String,
@@ -74,12 +77,20 @@ fn clamp_rec(q: &HashMap<String, String>, total: i64) -> i64 {
 
 /// Build the flipbook for record `current` of `total` on `layout_id`/`view`.
 /// Step links preserve the current view and stay clamped to the found set.
-fn flipbook(layout_id: i64, view: &'static str, current: i64, total: i64) -> Flipbook {
+/// `current_id` is the physical id at `current` (for the Delete action).
+fn flipbook(
+    layout_id: i64,
+    view: &'static str,
+    current: i64,
+    current_id: Option<i64>,
+    total: i64,
+) -> Flipbook {
     let href = |n: i64| format!("/browse/{layout_id}?view={view}&rec={n}");
     Flipbook {
         layout_id,
         view,
         current,
+        current_id,
         total,
         first_href: href(1),
         prev_href: href((current - 1).max(1)),
@@ -406,7 +417,8 @@ async fn browse(
     let ids = sol.record_ids(&table).unwrap();
     let total = ids.len() as i64;
     let rec = clamp_rec(&q, total);
-    chrome.nav = Some(flipbook(layout_id, view, rec, total));
+    let current_id = if rec >= 1 { ids.get((rec - 1) as usize).copied() } else { None };
+    chrome.nav = Some(flipbook(layout_id, view, rec, current_id, total));
 
     match view {
         "form" => {
@@ -481,15 +493,20 @@ async fn create_record(
     Path(layout_id): Path<i64>,
     Form(form): Form<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let mut target = format!("/browse/{layout_id}");
     {
         let sol = st.sol.lock().unwrap();
-        if let Some((_lay, table)) = layout_table(&sol, layout_id) {
+        if let Some((lay, table)) = layout_table(&sol, layout_id) {
             let fields = sol.fields(table.id).unwrap();
             let values = collect_values(&fields, &form);
             sol.insert_record(&table, &values).unwrap();
+            // Land on the new record: it sorts last by id (record_ids is ORDER BY id).
+            let total = sol.record_ids(&table).unwrap().len();
+            let view = view_param(&form, &lay.view);
+            target = format!("/browse/{layout_id}?view={view}&rec={total}");
         }
     }
-    Redirect::to(&format!("/browse/{layout_id}"))
+    Redirect::to(&target)
 }
 
 /// Show the edit form for a record, pre-filled with its current values.
@@ -532,18 +549,30 @@ async fn save_record(
     Redirect::to(&format!("/browse/{layout_id}"))
 }
 
-/// Delete a record, then back to the list.
+/// Delete a record, then back to the same view near where you were. The form
+/// carries the current `view` and `rec` so the redirect can preserve both.
 async fn delete_record(
     State(st): State<AppState>,
     Path((layout_id, id)): Path<(i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let mut target = format!("/browse/{layout_id}");
     {
         let sol = st.sol.lock().unwrap();
-        if let Some((_lay, table)) = layout_table(&sol, layout_id) {
+        if let Some((lay, table)) = layout_table(&sol, layout_id) {
             sol.delete_record(&table, id).unwrap();
+            let total = sol.record_ids(&table).unwrap().len() as i64;
+            let view = view_param(&form, &lay.view);
+            target = if total > 0 {
+                // Stay put if possible; clamp into the now-shorter found set.
+                let rec = clamp_rec(&form, total);
+                format!("/browse/{layout_id}?view={view}&rec={rec}")
+            } else {
+                format!("/browse/{layout_id}?view={view}")
+            };
         }
     }
-    Redirect::to(&format!("/browse/{layout_id}"))
+    Redirect::to(&target)
 }
 
 /// Pull `f<field_id>` form values into engine `(field, value)` pairs.

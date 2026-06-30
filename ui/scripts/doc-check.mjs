@@ -213,6 +213,25 @@ try {
     const e = normalize(golden);
     ok('parity: store-rendered DOM equals the golden', a === e, a === e ? '' : `first diff at ${[...a].findIndex((c, i) => c !== e[i])}`);
   }
+
+  // 11. Pure interaction helpers (#46) — snap, paint-order ids, element mapping.
+  {
+    const { snapToGrid, clampOrigin, objectIdsInPaintOrder, elementsToObjectIds, GRID } =
+      await vite.ssrLoadModule('/src/lib/canvas-edit.ts');
+
+    ok('snap: rounds to the nearest grid line', snapToGrid(19, 8) === 16 && snapToGrid(20, 8) === 24);
+    ok('snap: default grid + grid<=0 just rounds', snapToGrid(11) === GRID * Math.round(11 / GRID) && snapToGrid(7.4, 0) === 7);
+    ok('clampOrigin: never negative, rounds', clampOrigin(-3) === 0 && clampOrigin(4.6) === 5);
+
+    // Paint order mirrors the fixture's (z,id) ordering: ids 1, 3, 2.
+    eq('paintOrder: ids match LayoutPreview order', objectIdsInPaintOrder(fixture), [1, 3, 2]);
+
+    // Element→id mapping is index-based; fake elements (identity only) suffice.
+    const painted = [{ n: 'a' }, { n: 'b' }, { n: 'c' }];
+    const ids = objectIdsInPaintOrder(fixture); // [1,3,2]
+    eq('elementsToIds: maps selected elements by index', elementsToObjectIds([painted[2], painted[0]], painted, ids), [2, 1]);
+    eq('elementsToIds: drops unknown elements', elementsToObjectIds([{ n: 'x' }], painted, ids), []);
+  }
 } finally {
   await vite.close();
 }

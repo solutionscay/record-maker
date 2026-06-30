@@ -254,6 +254,31 @@ impl Solution {
         Ok(n)
     }
 
+    /// Persist several objects' geometry atomically (#46) — a group drag/resize
+    /// commits in one transaction so a multi-select transform never half-applies.
+    /// Each item is `(object_id, x, y, w, h)`; every UPDATE is layout-scoped like
+    /// [`Solution::set_object_geometry`], so foreign/unknown ids are no-ops.
+    /// Returns the total number of rows updated.
+    pub fn set_objects_geometry(
+        &mut self,
+        layout_id: i64,
+        items: &[(i64, i64, i64, i64, i64)],
+    ) -> Result<usize> {
+        let tx = self.app.transaction()?;
+        let mut updated = 0usize;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE meta_object SET x=?1, y=?2, w=?3, h=?4 \
+                 WHERE id=?5 AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?6)",
+            )?;
+            for &(id, x, y, w, h) in items {
+                updated += stmt.execute(params![x, y, w, h, id, layout_id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
+
     /// Look up a single layout by id.
     pub fn layout_by_id(&self, id: i64) -> Result<Option<LayoutMeta>> {
         let mut stmt = self
@@ -458,6 +483,41 @@ mod tests {
 
         // An unknown object id is a no-op too.
         assert_eq!(s.set_object_geometry(lay.id, 999_999, 0, 0, 0, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn set_objects_geometry_commits_group_atomically_and_scoped() {
+        // #46 group transform: many objects persist in one transaction; foreign or
+        // unknown ids are skipped, and the count reflects only real updates.
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table(
+            "Customers",
+            &[
+                NewField { name: "Name".into(), kind: FieldKind::Text },
+                NewField { name: "Email".into(), kind: FieldKind::Text },
+            ],
+        )
+        .unwrap();
+        let lay = s.layouts().unwrap()[0].clone();
+        let part = s.parts(lay.id).unwrap()[0].clone();
+        let objs = s.objects(part.id).unwrap();
+        let (a, b) = (objs[0].id, objs[1].id);
+
+        // Move both, plus an unknown id that must be ignored.
+        let n = s
+            .set_objects_geometry(
+                lay.id,
+                &[(a, 10, 20, 100, 24), (b, 30, 40, 100, 24), (999_999, 0, 0, 1, 1)],
+            )
+            .unwrap();
+        assert_eq!(n, 2, "only the two real objects update");
+        let after = s.objects(part.id).unwrap();
+        assert_eq!((after[0].x, after[0].y), (10, 20));
+        assert_eq!((after[1].x, after[1].y), (30, 40));
+
+        // A foreign layout id updates nothing.
+        assert_eq!(s.set_objects_geometry(lay.id + 999, &[(a, 1, 1, 1, 1)]).unwrap(), 0);
+        assert_eq!((s.objects(part.id).unwrap()[0].x, s.objects(part.id).unwrap()[0].y), (10, 20));
     }
 
     #[test]

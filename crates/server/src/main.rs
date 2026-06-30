@@ -640,6 +640,35 @@ async fn update_object_geometry(
     StatusCode::OK.into_response()
 }
 
+/// One object's geometry in a bulk commit (#46): the object id plus its new box.
+#[derive(serde::Deserialize)]
+struct ObjectGeometry {
+    id: i64,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+}
+
+/// Persist a whole group's geometry from the Layout canvas (#46): the canvas
+/// POSTs `[{id,x,y,w,h}, …]` after a multi-select drag/resize and this writes
+/// them in one transaction, each scoped to the layout and clamped like the
+/// single-object commit. Always 200 (unknown ids are simply skipped); the body
+/// is the count actually updated, so the client can detect a stale selection.
+async fn update_objects_geometry(
+    State(st): State<AppState>,
+    Path(layout_id): Path<i64>,
+    Json(items): Json<Vec<ObjectGeometry>>,
+) -> impl IntoResponse {
+    let clamped: Vec<(i64, i64, i64, i64, i64)> = items
+        .iter()
+        .map(|g| (g.id, g.x.max(0), g.y.max(0), g.w.max(1), g.h.max(1)))
+        .collect();
+    let mut sol = st.sol.lock().unwrap();
+    let updated = sol.set_objects_geometry(layout_id, &clamped).unwrap();
+    (StatusCode::OK, updated.to_string()).into_response()
+}
+
 /// Directory holding the built Layout Mode editor bundle (Svelte 5 + Vite static
 /// output), relative to the server's working directory. Empty until the frontend
 /// is built (`cd ui && npm install && npm run build`).
@@ -825,6 +854,7 @@ fn app(state: AppState) -> Router {
         .route("/design/:layout", get(design))
         .route("/design/:layout/model", get(design_model))
         .route("/design/:layout/object/:id/geometry", post(update_object_geometry))
+        .route("/design/:layout/geometry", post(update_objects_geometry))
         .route("/ui/*path", get(ui_asset))
         .with_state(state)
 }
@@ -1163,6 +1193,53 @@ mod tests {
             .await
             .unwrap();
         resp.status()
+    }
+
+    /// #46 group commit: a bulk POST persists every object's geometry in one
+    /// request (scoped + clamped), returns the updated count, and skips unknown ids.
+    #[tokio::test]
+    async fn design_bulk_geometry_persists_group() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        sol.create_table(
+            "Customers",
+            &[
+                NewField { name: "Name".into(), kind: FieldKind::Text },
+                NewField { name: "Email".into(), kind: FieldKind::Text },
+            ],
+        )
+        .unwrap();
+        let layout_id = sol.layouts().unwrap()[0].id;
+        let part = sol.parts(layout_id).unwrap()[0].clone();
+        let objs = sol.objects(part.id).unwrap();
+        let (a, b) = (objs[0].id, objs[1].id);
+        let state = state_for(sol);
+
+        let resp = {
+            use axum::http::Request;
+            use tower::ServiceExt;
+            let body = format!(
+                r#"[{{"id":{a},"x":10,"y":20,"w":100,"h":24}},{{"id":{b},"x":-5,"y":40,"w":100,"h":24}},{{"id":999999,"x":0,"y":0,"w":1,"h":1}}]"#
+            );
+            app(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/design/{layout_id}/geometry"))
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        };
+        assert_eq!(resp.status(), StatusCode::OK);
+        let count = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(String::from_utf8(count.to_vec()).unwrap(), "2", "only real ids count");
+
+        let sol = state.sol.lock().unwrap();
+        let after = sol.objects(part.id).unwrap();
+        assert_eq!((after[0].x, after[0].y), (10, 20));
+        assert_eq!((after[1].x, after[1].y), (0, 40), "negative x clamped to origin");
     }
 
     /// #15 round-trip: POSTing new geometry persists to `meta_object` (scoped to

@@ -47,7 +47,7 @@
 //!   structural contract does not define its shape; it round-trips opaquely.
 
 use anyhow::Result;
-use rusqlite::{params, Transaction};
+use rusqlite::{params, Connection, Transaction};
 
 use crate::Solution;
 
@@ -174,6 +174,24 @@ impl Solution {
             .app
             .prepare("SELECT id, name, table_id, view FROM meta_layout ORDER BY name, id")?;
         let rows = stmt.query_map([], |r| {
+            Ok(LayoutMeta {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                table_id: r.get(2)?,
+                view: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Every layout bound to `table_id`, ordered by id (#57). A table carries one
+    /// layout **per view** (form/list/table) — independent design surfaces that
+    /// happen to bind the same table — so this returns the per-view siblings.
+    pub fn layouts_for_table(&self, table_id: i64) -> Result<Vec<LayoutMeta>> {
+        let mut stmt = self
+            .app
+            .prepare("SELECT id, name, table_id, view FROM meta_layout WHERE table_id=?1 ORDER BY id")?;
+        let rows = stmt.query_map(params![table_id], |r| {
             Ok(LayoutMeta {
                 id: r.get(0)?,
                 name: r.get(1)?,
@@ -330,6 +348,53 @@ pub(crate) fn generate_default_form(
         )?;
     }
     Ok(layout_id)
+}
+
+/// Deep-copy a layout into a new one for a different `view` (#57): clones the
+/// layout row, every part, and every object (geometry/z/read_only/binding/props),
+/// so the new view starts identical to the source but is then edited completely
+/// independently. Returns the new layout id. Runs inside the caller's connection
+/// or transaction (`&Transaction` coerces to `&Connection`).
+pub(crate) fn clone_layout(
+    conn: &Connection,
+    src_layout_id: i64,
+    name: &str,
+    table_id: i64,
+    view: &str,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO meta_layout(name, table_id, view) VALUES (?1, ?2, ?3)",
+        params![name, table_id, view],
+    )?;
+    let new_layout_id = conn.last_insert_rowid();
+
+    // Collect the source parts first (releasing the prepared statement) so the
+    // per-part object copies below can run on the same connection.
+    let parts: Vec<(i64, String, i64, i64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, height, position FROM meta_part WHERE layout_id=?1 ORDER BY position, id",
+        )?;
+        let rows = stmt
+            .query_map(params![src_layout_id], |r| {
+                Ok((r.get(0)?, r.get::<_, String>(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+
+    for (src_part_id, kind, height, position) in parts {
+        conn.execute(
+            "INSERT INTO meta_part(layout_id, kind, height, position) VALUES (?1, ?2, ?3, ?4)",
+            params![new_layout_id, kind, height, position],
+        )?;
+        let new_part_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO meta_object(part_id, kind, x, y, w, h, z, read_only, binding, props) \
+             SELECT ?1, kind, x, y, w, h, z, read_only, binding, props FROM meta_object WHERE part_id=?2",
+            params![new_part_id, src_part_id],
+        )?;
+    }
+    Ok(new_layout_id)
 }
 
 #[cfg(test)]
@@ -518,6 +583,34 @@ mod tests {
         // A foreign layout id updates nothing.
         assert_eq!(s.set_objects_geometry(lay.id + 999, &[(a, 1, 1, 1, 1)]).unwrap(), 0);
         assert_eq!((s.objects(part.id).unwrap()[0].x, s.objects(part.id).unwrap()[0].y), (10, 20));
+    }
+
+    #[test]
+    fn per_view_layouts_are_independent() {
+        // create_table yields three per-view layouts whose parts/objects are
+        // distinct rows, so editing one view never touches another (#57).
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s
+            .create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .unwrap();
+        let layouts = s.layouts_for_table(tid).unwrap();
+        assert_eq!(layouts.len(), 3);
+        let form = layouts.iter().find(|l| l.view == "form").unwrap();
+        let list = layouts.iter().find(|l| l.view == "list").unwrap();
+
+        let form_part = s.parts(form.id).unwrap()[0].clone();
+        let list_part = s.parts(list.id).unwrap()[0].clone();
+        assert_ne!(form_part.id, list_part.id, "parts are distinct rows");
+        let form_obj = s.objects(form_part.id).unwrap()[0].id;
+        let list_obj = s.objects(list_part.id).unwrap()[0].id;
+        assert_ne!(form_obj, list_obj, "objects are distinct rows");
+
+        // Move the Form object; the List sibling must stay put.
+        s.set_object_geometry(form.id, form_obj, 99, 88, 50, 20).unwrap();
+        let f = &s.objects(form_part.id).unwrap()[0];
+        let l = &s.objects(list_part.id).unwrap()[0];
+        assert_eq!((f.x, f.y), (99, 88), "form moved");
+        assert_eq!((l.x, l.y), (16, 16), "list unchanged");
     }
 
     #[test]

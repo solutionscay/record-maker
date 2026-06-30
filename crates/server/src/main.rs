@@ -120,51 +120,73 @@ fn flipbook(
 const VIEWS: [&str; 3] = ["form", "list", "table"];
 
 /// Normalise a `?view=` value to a known view, falling back to the layout's
-/// stored default view (`form` for default forms) when `?view` is absent.
+/// stored view when `?view` is absent. Retained for the record-action handlers'
+/// redirects; Browse itself now renders by the layout's own view (see
+/// [`canonical_view`]), since each view is its own layout (#57).
 fn view_param(q: &HashMap<String, String>, default: &str) -> &'static str {
-    match q.get("view").map(String::as_str).unwrap_or(default) {
+    canonical_view(q.get("view").map(String::as_str).unwrap_or(default))
+}
+
+/// Normalise a stored layout `view` string to one of the three renderers. A
+/// layout's view is now intrinsic — the layout id encodes the view — so Browse
+/// renders by this rather than a `?view=` param (#57).
+fn canonical_view(view: &str) -> &'static str {
+    match view {
         "form" => "form",
         "list" => "list",
         _ => "table",
     }
 }
 
+/// Human label for a stored `view` (the toggle tabs + the Layout-mode status).
+fn view_label(view: &str) -> &'static str {
+    match view {
+        "form" => "Form",
+        "list" => "List",
+        _ => "Table",
+    }
+}
+
 impl Chrome {
-    fn build(
-        sol: &Solution,
-        mode: &'static str,
-        current_layout: Option<i64>,
-        view: Option<&str>,
-    ) -> Self {
+    /// Build the shared chrome. `current` is the layout in focus (its view + table
+    /// drive the toggle and picker). Per #57 a table has one layout **per view**,
+    /// so the view toggle switches among sibling layout ids and the picker lists
+    /// one entry per table (its Form layout is the canonical handle).
+    fn build(sol: &Solution, mode: &'static str, current: Option<&LayoutMeta>) -> Self {
+        let current_table = current.map(|c| c.table_id);
         let layouts = sol
             .layouts()
             .map(|ls| {
                 ls.into_iter()
+                    .filter(|l| l.view == "form")
                     .map(|l| LayoutLink {
-                        selected: Some(l.id) == current_layout,
+                        selected: current_table == Some(l.table_id),
                         id: l.id,
                         name: l.name,
                     })
                     .collect()
             })
             .unwrap_or_default();
-        // The view toggle exists only in Browse, where a layout is open.
-        let view_tabs = match (current_layout, view) {
-            (Some(lid), Some(active)) => VIEWS
-                .iter()
-                .map(|&v| ViewTab {
-                    label: match v {
-                        "form" => "Form",
-                        "list" => "List",
-                        _ => "Table",
-                    },
-                    href: format!("/browse/{lid}?view={v}"),
-                    active: v == active,
-                })
-                .collect(),
-            _ => Vec::new(),
+        // The view toggle switches among the current table's per-view sibling
+        // layouts — each view is its own layout id now. It stays in the current
+        // mode, so Layout mode can design each view (Browse browses each).
+        let view_tabs = match current {
+            Some(cur) => {
+                let siblings = sol.layouts_for_table(cur.table_id).unwrap_or_default();
+                VIEWS
+                    .iter()
+                    .filter_map(|&v| {
+                        siblings.iter().find(|l| l.view == v).map(|l| ViewTab {
+                            label: view_label(v),
+                            href: format!("/{mode}/{}", l.id),
+                            active: cur.view == v,
+                        })
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
         };
-        Chrome { mode, layouts, current_layout, view_tabs, nav: None, editing: false }
+        Chrome { mode, layouts, current_layout: current.map(|c| c.id), view_tabs, nav: None, editing: false }
     }
 }
 
@@ -295,12 +317,16 @@ struct DesignTemplate {
     chrome: Chrome,
     layout_id: i64,
     layout: String,
+    /// Which view this layout designs (`Form`/`List`/`Table`) — shown in the
+    /// status bar so the designer knows which surface they're editing (#57).
+    view: &'static str,
 }
 
-/// Home → the first layout's Browse view.
+/// Home → the first table's Form Browse view (the Form layout is the canonical
+/// landing surface now that each view is its own layout, #57).
 async fn index(State(st): State<AppState>) -> impl IntoResponse {
     let sol = st.sol.lock().unwrap();
-    match sol.layouts().unwrap().into_iter().next() {
+    match sol.layouts().unwrap().into_iter().find(|l| l.view == "form") {
         Some(l) => Redirect::to(&format!("/browse/{}", l.id)).into_response(),
         None => Html("<p>No layouts yet.</p>".to_string()).into_response(),
     }
@@ -458,8 +484,10 @@ async fn browse(
     let Some((lay, table)) = layout_table(&sol, layout_id) else {
         return not_found("layout", layout_id);
     };
-    let view = view_param(&q, &lay.view);
-    let mut chrome = Chrome::build(&sol, "browse", Some(layout_id), Some(view));
+    // Each layout renders in its own intrinsic view; the layout id (not `?view=`)
+    // selects the surface, so Form/List are independent designs (#57).
+    let view = canonical_view(&lay.view);
+    let mut chrome = Chrome::build(&sol, "browse", Some(&lay));
 
     // Found set + flipbook position drive record navigation across all views.
     let ids = sol.record_ids(&table).unwrap();
@@ -541,8 +569,8 @@ async fn design(State(st): State<AppState>, Path(layout_id): Path<i64>) -> impl 
     let Some((lay, _table)) = layout_table(&sol, layout_id) else {
         return not_found("layout", layout_id);
     };
-    let chrome = Chrome::build(&sol, "design", Some(layout_id), None);
-    let tmpl = DesignTemplate { chrome, layout_id, layout: lay.name.clone() };
+    let chrome = Chrome::build(&sol, "design", Some(&lay));
+    let tmpl = DesignTemplate { chrome, layout_id, layout: lay.name.clone(), view: view_label(&lay.view) };
     Html(tmpl.render().unwrap()).into_response()
 }
 
@@ -1193,6 +1221,38 @@ mod tests {
             .await
             .unwrap();
         resp.status()
+    }
+
+    /// #57: a table carries independent per-view layouts. The Browse view toggle
+    /// links to sibling layout ids (not one layout re-rendered via `?view=`), and
+    /// each layout renders in its own view.
+    #[tokio::test]
+    async fn browse_view_tabs_link_to_sibling_layouts_and_render_by_view() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        sol.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .unwrap();
+        let table = sol.table_by_name("Customers").unwrap().unwrap();
+        let fields = sol.fields(table.id).unwrap();
+        sol.insert_record(&table, &[(&fields[0], "Ada".into())]).unwrap();
+        let layouts = sol.layouts_for_table(table.id).unwrap();
+        let form = layouts.iter().find(|l| l.view == "form").unwrap().id;
+        let list = layouts.iter().find(|l| l.view == "list").unwrap().id;
+        let table_l = layouts.iter().find(|l| l.view == "table").unwrap().id;
+        assert!(form != list && list != table_l && form != table_l, "distinct per-view ids");
+        let state = state_for(sol);
+
+        // The Form layout renders the canvas and offers tabs to the SIBLING ids.
+        let (status, html) = get_body(state.clone(), &format!("/browse/{form}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(r#"<div class="fm-canvas""#), "form renders the canvas");
+        assert!(html.contains(&format!(r#"href="/browse/{list}""#)), "List tab → list layout");
+        assert!(html.contains(&format!(r#"href="/browse/{table_l}""#)), "Table tab → table layout");
+
+        // The List layout renders the list surface by its own view, not the canvas.
+        let (status, html) = get_body(state, &format!("/browse/{list}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(r#"class="fm-list""#), "list renders the list surface");
+        assert!(!html.contains(r#"<div class="fm-canvas""#), "list view is not the form canvas");
     }
 
     /// #46 group commit: a bulk POST persists every object's geometry in one

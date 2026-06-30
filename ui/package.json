@@ -5,8 +5,8 @@
   "type": "module",
   "description": "Layout Mode editor island (Svelte 5 runes + Vite, SSR off). Built to a static bundle in ui/dist and served by the embedded axum server on /design/:layout (ADR #42).",
   "scripts": {
-    "dev": "vite",
     "build": "vite build",
+    "watch": "vite build --watch",
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "devDependencies": {

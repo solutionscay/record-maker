@@ -110,9 +110,13 @@ impl Solution {
             field_meta.push((fid, f.name.clone()));
         }
 
-        // Default Form layout (one body part + a field object per field) in the
-        // same transaction, so table + layout are created atomically (#21).
-        crate::layout::generate_default_form(&tx, table_id, name, &field_meta)?;
+        // Default per-view layouts (#21, #57): a Form layout (one body part + a
+        // field object per field), cloned into independent List and Table layouts
+        // — all in the same transaction, so table + layouts are created atomically.
+        // The three start identical but are then designed independently.
+        let form_layout_id = crate::layout::generate_default_form(&tx, table_id, name, &field_meta)?;
+        crate::layout::clone_layout(&tx, form_layout_id, name, table_id, "list")?;
+        crate::layout::clone_layout(&tx, form_layout_id, name, table_id, "table")?;
         tx.commit()?;
 
         // Physical table lives in data.db (a separate connection → a separate step).
@@ -209,12 +213,15 @@ mod tests {
             )
             .unwrap();
 
-        let layouts = s.layouts().unwrap();
-        assert_eq!(layouts.len(), 1);
-        let lay = &layouts[0];
-        assert_eq!(lay.name, "Invoices");
-        assert_eq!(lay.table_id, tid);
-        assert_eq!(lay.view, "form");
+        // Three independent per-view layouts (form/list/table), all bound to the
+        // table and sharing its name (#57).
+        let layouts = s.layouts_for_table(tid).unwrap();
+        assert_eq!(layouts.len(), 3);
+        let mut views: Vec<&str> = layouts.iter().map(|l| l.view.as_str()).collect();
+        views.sort_unstable();
+        assert_eq!(views, ["form", "list", "table"]);
+        assert!(layouts.iter().all(|l| l.name == "Invoices" && l.table_id == tid));
+        let lay = layouts.iter().find(|l| l.view == "form").unwrap();
 
         let body_parts: i64 = s
             .app

@@ -9,10 +9,12 @@
     "watch": "vite build --watch",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "parity": "node scripts/parity-check.mjs",
-    "test": "node scripts/doc-check.mjs"
+    "test": "node scripts/doc-check.mjs",
+    "monitor": "node scripts/monitor.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "playwright-core": "^1.61.1",
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",
     "typescript": "^5.0.0",

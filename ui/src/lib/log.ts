@@ -41,8 +41,29 @@ const COLOR: Record<LogCat, string> = {
   error: '#dc2626',
 };
 
+/** One captured log line — also pushed to `window.__rmLogs` so a driver
+ * (devtools, an automated monitor) can read the trace as structured data instead
+ * of scraping console text. */
+export interface LogEntry {
+  seq: number;
+  t: number;
+  cat: LogCat;
+  message: string;
+  data?: Record<string, unknown>;
+}
+
 let seq = 0;
 const start = typeof performance !== 'undefined' ? performance.now() : 0;
+
+/** Append to the in-page ring buffer (browser only; capped so it can't grow
+ * unbounded during a long session). */
+function buffer(entry: LogEntry): void {
+  if (typeof window === 'undefined') return;
+  const w = window as unknown as { __rmLogs?: LogEntry[] };
+  const buf = w.__rmLogs ?? (w.__rmLogs = []);
+  buf.push(entry);
+  if (buf.length > 2000) buf.shift();
+}
 
 function enabled(): boolean {
   if (typeof window === 'undefined') return false;
@@ -63,6 +84,7 @@ export function llog(cat: LogCat, message: string, data?: Record<string, unknown
   if (!enabled()) return;
   seq += 1;
   const dt = (typeof performance !== 'undefined' ? performance.now() : 0) - start;
+  buffer({ seq, t: Math.round(dt), cat, message, data });
   const head = `%c[layout:${cat}]%c +${dt.toFixed(0)}ms #${seq} ${message}`;
   const tagStyle = `color:#fff;background:${COLOR[cat]};padding:0 4px;border-radius:3px;font-weight:600`;
   const restStyle = 'color:inherit';

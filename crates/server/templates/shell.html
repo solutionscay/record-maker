@@ -98,10 +98,30 @@
   <div class="app">
     <header class="topbar">
       <span class="brand">record-maker</span>
-      <div class="actions" title="Record actions (not wired yet)">
-        <button type="button" class="act" disabled title="Coming soon">+ New</button>
-        <button type="button" class="act" disabled title="Coming soon">Delete</button>
-        <button type="button" class="act" disabled title="Coming soon">Find</button>
+      <div class="actions">
+        {% match chrome.nav %}
+        {% when Some with (nav) %}
+          <form class="inline" method="post" action="/browse/{{ nav.layout_id }}">
+            <input type="hidden" name="view" value="{{ nav.view }}">
+            <button type="submit" class="act" title="Add a new record">+ New</button>
+          </form>
+          {% match nav.current_id %}
+          {% when Some with (cid) %}
+          <form class="inline" method="post" action="/browse/{{ nav.layout_id }}/{{ cid }}/delete"
+                onsubmit="return confirm('Delete record {{ nav.current }} of {{ nav.total }}? This cannot be undone.');">
+            <input type="hidden" name="view" value="{{ nav.view }}">
+            <input type="hidden" name="rec" value="{{ nav.current }}">
+            <button type="submit" class="act" title="Delete the current record">Delete</button>
+          </form>
+          {% when None %}
+          <button type="button" class="act" disabled title="No record to delete">Delete</button>
+          {% endmatch %}
+          <button type="button" class="act" disabled title="Find — coming soon">Find</button>
+        {% when None %}
+          <button type="button" class="act" disabled title="Open a layout to add records">+ New</button>
+          <button type="button" class="act" disabled title="Open a layout to add records">Delete</button>
+          <button type="button" class="act" disabled title="Find — coming soon">Find</button>
+        {% endmatch %}
       </div>
     </header>
 

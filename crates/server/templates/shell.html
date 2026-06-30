@@ -109,6 +109,8 @@
     <header class="topbar">
       <span class="brand">record-maker</span>
       <div class="actions">
+        {# Record actions belong to Browse; Layout mode manages the design, not records. #}
+        {% if chrome.mode == "browse" %}
         {% match chrome.nav %}
         {% when Some with (nav) %}
           <form class="inline" method="post" action="/browse/{{ nav.layout_id }}">
@@ -132,6 +134,11 @@
           <button type="button" class="act" disabled title="Open a layout to add records">Delete</button>
           <button type="button" class="act" disabled title="Find — coming soon">Find</button>
         {% endmatch %}
+        {% else %}
+          <button type="button" class="act" disabled title="Records are managed in Browse mode">+ New</button>
+          <button type="button" class="act" disabled title="Records are managed in Browse mode">Delete</button>
+          <button type="button" class="act" disabled title="Find — coming soon">Find</button>
+        {% endif %}
       </div>
     </header>
 
@@ -158,29 +165,38 @@
         </select>
       </div>
 
+      {# In Browse the stepper navigates records; in Layout mode it navigates
+         layouts (prev/next layout), holding the current view. #}
       {% match chrome.nav %}
       {% when Some with (nav) %}
-      <div class="stepper" title="Record navigation">
+      <div class="stepper" title="{% if chrome.mode == "design" %}Layout navigation{% else %}Record navigation{% endif %}">
         <div class="step-row">
           {% if nav.at_first %}
           <span class="step off">⏮</span><span class="step off">◀</span>
           {% else %}
-          <a class="step" href="{{ nav.first_href }}" title="First record">⏮</a>
-          <a class="step" href="{{ nav.prev_href }}" title="Previous record">◀</a>
+          <a class="step" href="{{ nav.first_href }}" title="First">⏮</a>
+          <a class="step" href="{{ nav.prev_href }}" title="Previous">◀</a>
           {% endif %}
           {% if nav.at_last %}
           <span class="step off">▶</span><span class="step off">⏭</span>
           {% else %}
-          <a class="step" href="{{ nav.next_href }}" title="Next record">▶</a>
-          <a class="step" href="{{ nav.last_href }}" title="Last record">⏭</a>
+          <a class="step" href="{{ nav.next_href }}" title="Next">▶</a>
+          <a class="step" href="{{ nav.last_href }}" title="Last">⏭</a>
           {% endif %}
         </div>
+        {% if chrome.mode == "design" %}
+        <div class="rec-jump">
+          <span class="side-label">Layout</span>
+          <span class="rec-num" aria-label="Current layout">{{ nav.current }}</span>
+        </div>
+        {% else %}
         <form class="rec-jump" method="get" action="/browse/{{ nav.layout_id }}">
           <input type="hidden" name="view" value="{{ nav.view }}">
           <span class="side-label">Record</span>
           <input class="rec-num" type="number" name="rec" min="1" max="{{ nav.total }}"
                  value="{{ nav.current }}" aria-label="Current record — type a number and press Enter">
         </form>
+        {% endif %}
         <div class="rec-total">
           <span class="side-label">Total</span>
           <span class="rec-tnum">{{ nav.total }}</span>

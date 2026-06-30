@@ -1,15 +1,38 @@
 import { mount } from 'svelte';
 import App from './App.svelte';
+import RailTools from './lib/RailTools.svelte';
+import { EditorDoc } from './lib/doc.svelte';
+import type { DesignModel } from './lib/model';
 
-// Mount the Layout Mode editor island into the node the design page renders
-// (<div id="layout-editor" data-layout="…">). The layout id comes from that
-// node's data-layout attribute. The island talks to the engine over the existing
-// axum HTTP endpoints (ADR #42), not Tauri IPC.
-const target = document.getElementById('layout-editor');
+// Layout Mode editor COORDINATOR (#62). It owns the single EditorDoc store and
+// mounts two islands that SHARE it: the canvas into `#layout-editor` (the content
+// area) and the rail tools into `#layout-tools` (the server-rendered sidebar, in
+// design mode only). Both read/write the same store, so a tool armed in the rail
+// drives placement on the canvas and a selection on the canvas drives the rail's
+// style swatches. The store is hydrated once here over the existing axum model
+// endpoint (ADR #42); the canvas reacts to `doc.hydrated`.
+const canvasNode = document.getElementById('layout-editor');
 
-if (target) {
-  mount(App, {
-    target,
-    props: { layoutId: target.dataset.layout ?? '' },
-  });
+if (canvasNode) {
+  const layoutId = canvasNode.dataset.layout ?? '';
+  const doc = new EditorDoc();
+
+  // Fetch + hydrate the shared store. Errors surface through the store so the
+  // canvas can show them.
+  fetch(`/design/${layoutId}/model`)
+    .then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    })
+    .then((data: DesignModel) => doc.hydrate(data))
+    .catch((e: unknown) => doc.setError(e instanceof Error ? e.message : String(e)));
+
+  mount(App, { target: canvasNode, props: { doc, layoutId } });
+
+  // The rail-tools island only exists in design mode (the server renders the node
+  // in the sidebar). Mount it sharing the SAME store.
+  const toolsNode = document.getElementById('layout-tools');
+  if (toolsNode) {
+    mount(RailTools, { target: toolsNode, props: { doc, layoutId } });
+  }
 }

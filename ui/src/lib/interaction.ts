@@ -25,7 +25,10 @@ import Moveable from 'moveable';
 import Selecto from 'selecto';
 
 import type { EditorDoc } from './doc.svelte';
+import type { ObjectView } from './model';
 import { GRID, SNAP_THRESHOLD, clampOrigin, elementsToObjectIds, objectIdsInPaintOrder } from './canvas-edit';
+import { defaultBox, defaultProps, partAtY } from './create';
+import { createObject } from './persist';
 
 export class CanvasInteraction {
   readonly #stage: HTMLElement;
@@ -45,6 +48,11 @@ export class CanvasInteraction {
   /** Object ids moveable currently targets, and a cheap key to dedupe setState. */
   #targetIds = new Set<number>();
   #targetKey = '';
+  /** Canvas zoom factor (#62) — the stage is CSS-scaled by this, so client→model
+   * pointer coordinates divide by it when placing a new object. */
+  #zoom = 1;
+  /** True while a placement POST is in flight, so a second click can't double-place. */
+  #placing = false;
 
   constructor(stage: HTMLElement, doc: EditorDoc, layoutId: string) {
     this.#stage = stage;
@@ -103,6 +111,12 @@ export class CanvasInteraction {
     // Decide, at press time, who owns the gesture:
     this.#selecto.on('dragStart', (e) => {
       const input = e.inputEvent;
+      // A non-pointer tool is armed → this press PLACES an object, not selects.
+      if (this.#doc.activeTool !== 'pointer') {
+        e.stop();
+        void this.#placeAt(input.clientX, input.clientY);
+        return;
+      }
       const target = input.target as Element | null;
       // moveable's own control box (a resize handle / the drag area) → its gesture.
       if (target && this.#moveable.isMoveableElement(target)) {
@@ -143,6 +157,78 @@ export class CanvasInteraction {
     this.#updateTarget();
   }
 
+  /** Tell the interaction layer the current canvas zoom (#62), so client→model
+   * pointer conversion during placement divides by it. */
+  setZoom(zoom: number): void {
+    this.#zoom = zoom > 0 ? zoom : 1;
+  }
+
+  /** Place a new object where the user clicked while a tool is armed (#48). Maps
+   * the client point into model coordinates (undoing the zoom scale), finds the
+   * part under it, POSTs the create, and adds the returned object(s) to the store
+   * as ONE undo step — then disarms back to the pointer tool. A `field` adds both
+   * its value object and its spawned caption label (#60). */
+  async #placeAt(clientX: number, clientY: number): Promise<void> {
+    const tool = this.#doc.activeTool;
+    if (tool === 'pointer' || this.#placing) return;
+    const canvas = this.#canvas();
+    if (!canvas) {
+      this.#doc.setTool('pointer');
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const z = this.#zoom || 1;
+    const cx = Math.max(0, Math.round((clientX - rect.left) / z));
+    const cy = Math.max(0, (clientY - rect.top) / z);
+    const where = partAtY(this.#doc.renderModel, cy);
+    if (!where) {
+      this.#doc.setTool('pointer');
+      return;
+    }
+    const box = defaultBox(tool);
+    const y = Math.max(0, Math.round(where.localY));
+
+    this.#placing = true;
+    try {
+      let views: ObjectView[];
+      if (tool === 'field') {
+        const fieldId = this.#doc.toolFieldId;
+        if (fieldId == null) return; // no field chosen — nothing to bind
+        views = await createObject(this.#layoutId, {
+          partId: where.partId,
+          kind: 'field',
+          x: cx,
+          y,
+          w: box.w,
+          h: box.h,
+          fieldId,
+          rec: this.#doc.rec,
+        });
+      } else {
+        views = await createObject(this.#layoutId, {
+          partId: where.partId,
+          kind: tool,
+          x: cx,
+          y,
+          w: box.w,
+          h: box.h,
+          content: tool === 'text' ? 'Text' : null,
+          props: defaultProps(tool) ?? null,
+          rec: this.#doc.rec,
+        });
+      }
+      for (const v of views) this.#doc.addObject(v, where.partId);
+      this.#doc.mark();
+      const placed = views.at(-1); // the field VALUE (its label sorts before it)
+      if (placed) this.#doc.selectOnly([placed.id]);
+    } catch (e) {
+      this.#doc.setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      this.#placing = false;
+      this.#doc.setTool('pointer');
+    }
+  }
+
   destroy(): void {
     this.#stage.removeEventListener('pointermove', this.#onPointerMove);
     this.#stage.removeEventListener('pointerleave', this.#onPointerLeave);
@@ -176,6 +262,15 @@ export class CanvasInteraction {
    * nothing when idle. Dedupes redundant setState by a target-id key. */
   #updateTarget(): void {
     if (this.#gesturing) return;
+    // A placement tool is armed → the canvas is a drawing surface, not a select/
+    // drag surface: drop moveable's target so a press places instead of grabs.
+    if (this.#doc.activeTool !== 'pointer') {
+      if (this.#targetKey === '') return;
+      this.#targetKey = '';
+      this.#targetIds = new Set();
+      this.#moveable.setState({ target: [], elementGuidelines: [] });
+      return;
+    }
     const sel = [...this.#doc.selection];
     const selSet = new Set(sel);
     let ids: number[];

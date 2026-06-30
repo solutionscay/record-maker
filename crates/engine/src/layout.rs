@@ -191,6 +191,24 @@ pub struct ObjectMeta {
     pub props: Option<String>,
 }
 
+/// A new object to insert on a part (#48, the Create-zone palette). Carries the
+/// structural payload the caller supplies; the engine fills the interim defaults
+/// (`z = 0`, `read_only = false`). `binding`/`content`/`props` follow the per-kind
+/// slot rules in [`ObjectKind`] — a field sets `binding`, a text sets `content`, a
+/// shape sets `props`.
+#[derive(Debug, Clone)]
+pub struct NewObject {
+    pub part_id: i64,
+    pub kind: ObjectKind,
+    pub x: i64,
+    pub y: i64,
+    pub w: i64,
+    pub h: i64,
+    pub binding: Option<String>,
+    pub content: Option<String>,
+    pub props: Option<String>,
+}
+
 impl Solution {
     /// All layouts, ordered by name.
     pub fn layouts(&self) -> Result<Vec<LayoutMeta>> {
@@ -274,6 +292,38 @@ impl Solution {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Read one object by id, **scoped** to `layout_id` (the part must belong to
+    /// the layout). Returns `None` for an unknown/foreign id. Used after a props
+    /// edit to re-derive that object's shape style server-side (#49).
+    pub fn object_by_id(&self, layout_id: i64, object_id: i64) -> Result<Option<ObjectMeta>> {
+        let mut stmt = self.app.prepare(
+            "SELECT id, part_id, kind, x, y, w, h, z, read_only, binding, content, props \
+             FROM meta_object \
+             WHERE id=?1 AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?2)",
+        )?;
+        let mut rows = stmt.query_map(params![object_id, layout_id], |r| {
+            let kind_s: String = r.get(2)?;
+            Ok(ObjectMeta {
+                id: r.get(0)?,
+                part_id: r.get(1)?,
+                kind: ObjectKind::parse(&kind_s).unwrap_or(ObjectKind::Text),
+                x: r.get(3)?,
+                y: r.get(4)?,
+                w: r.get(5)?,
+                h: r.get(6)?,
+                z: r.get(7)?,
+                read_only: r.get::<_, i64>(8)? != 0,
+                binding: r.get(9)?,
+                content: r.get(10)?,
+                props: r.get(11)?,
+            })
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
     /// Persist an object's part-relative geometry (#15) — the canvas commits a
     /// drag/resize through this. Scoped to `layout_id`: the UPDATE only touches an
     /// object that actually belongs to the layout, so a stale or forged id from
@@ -320,6 +370,113 @@ impl Solution {
         }
         tx.commit()?;
         Ok(updated)
+    }
+
+    /// Insert one object on a part of `layout_id` (#48). **Layout-scoped**: the
+    /// part must belong to the layout, otherwise this is a no-op returning `None`
+    /// (so a stale/forged part id can't graft an object onto a foreign layout,
+    /// mirroring the geometry commands' scoping). `z` defaults to 0 and
+    /// `read_only` to false; the new object owns the highest id, so by the
+    /// `(z, id)` paint order it lands in front. Returns the new object id.
+    pub fn create_object(&self, layout_id: i64, o: &NewObject) -> Result<Option<i64>> {
+        if !self.part_in_layout(o.part_id, layout_id)? {
+            return Ok(None);
+        }
+        self.app.execute(
+            "INSERT INTO meta_object(part_id, kind, x, y, w, h, binding, content, props) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![o.part_id, o.kind.as_str(), o.x, o.y, o.w, o.h, o.binding, o.content, o.props],
+        )?;
+        Ok(Some(self.app.last_insert_rowid()))
+    }
+
+    /// Place a value `field` object together with its separate caption `text`
+    /// label (#60) — the same pairing `generate_default_form` emits, but at an
+    /// arbitrary drop point. The label sits to the left of the value on the same
+    /// row (clamped to the band origin). Atomic (both or neither). Layout-scoped
+    /// like [`Solution::create_object`]; returns `(label_id, field_id)` or `None`
+    /// if the part isn't in the layout.
+    pub fn create_field_object(
+        &mut self,
+        layout_id: i64,
+        part_id: i64,
+        binding: &str,
+        label: &str,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+    ) -> Result<Option<(i64, i64)>> {
+        if !self.part_in_layout(part_id, layout_id)? {
+            return Ok(None);
+        }
+        let label_x = (x - 80).max(0);
+        let tx = self.app.transaction()?;
+        tx.execute(
+            "INSERT INTO meta_object(part_id, kind, x, y, w, h, content) \
+             VALUES (?1, 'text', ?2, ?3, 72, ?4, ?5)",
+            params![part_id, label_x, y, h, label],
+        )?;
+        let label_id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO meta_object(part_id, kind, x, y, w, h, binding) \
+             VALUES (?1, 'field', ?2, ?3, ?4, ?5, ?6)",
+            params![part_id, x, y, w, h, binding],
+        )?;
+        let field_id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(Some((label_id, field_id)))
+    }
+
+    /// Append a band to a layout (#48). The new part stacks below the others
+    /// (`position = max(position) + 1`). Returns the new part id.
+    pub fn create_part(&self, layout_id: i64, kind: PartKind, height: i64) -> Result<i64> {
+        let position: i64 = self.app.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM meta_part WHERE layout_id=?1",
+            params![layout_id],
+            |r| r.get(0),
+        )?;
+        self.app.execute(
+            "INSERT INTO meta_part(layout_id, kind, height, position) VALUES (?1, ?2, ?3, ?4)",
+            params![layout_id, kind.as_str(), height, position],
+        )?;
+        Ok(self.app.last_insert_rowid())
+    }
+
+    /// Delete an object from a layout (#48) — the undo of a create, and the Create
+    /// zone's delete. **Layout-scoped**, so a foreign/unknown id is a no-op.
+    /// Returns the number of rows removed (`0` ⇒ no such object in that layout).
+    pub fn delete_object(&self, layout_id: i64, object_id: i64) -> Result<usize> {
+        let n = self.app.execute(
+            "DELETE FROM meta_object \
+             WHERE id=?1 AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?2)",
+            params![object_id, layout_id],
+        )?;
+        Ok(n)
+    }
+
+    /// Persist an object's appearance bag (#49) — the Style zone commits the
+    /// opaque `props` JSON through this. **Layout-scoped** like the geometry
+    /// commands; returns the rows updated (`0` ⇒ no such object in that layout).
+    /// The server re-derives the shape style from these keys on the next read, so
+    /// the write is authoritative.
+    pub fn set_object_props(&self, layout_id: i64, object_id: i64, props: &str) -> Result<usize> {
+        let n = self.app.execute(
+            "UPDATE meta_object SET props=?1 \
+             WHERE id=?2 AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?3)",
+            params![props, object_id, layout_id],
+        )?;
+        Ok(n)
+    }
+
+    /// Whether `part_id` belongs to `layout_id` — the scoping guard the create
+    /// commands share with the geometry commands' `part_id IN (…)` subquery.
+    fn part_in_layout(&self, part_id: i64, layout_id: i64) -> Result<bool> {
+        Ok(self.app.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta_part WHERE id=?1 AND layout_id=?2)",
+            params![part_id, layout_id],
+            |r| r.get(0),
+        )?)
     }
 
     /// Look up a single layout by id.
@@ -434,7 +591,7 @@ pub(crate) fn clone_layout(
 
 #[cfg(test)]
 mod tests {
-    use crate::layout::{ObjectKind, PartKind};
+    use crate::layout::{NewObject, ObjectKind, PartKind};
     use crate::{FieldKind, NewField, Solution};
 
     #[test]
@@ -716,5 +873,145 @@ mod tests {
         assert_eq!((objs[1].z, objs[1].kind, objs[1].read_only), (10, ObjectKind::Field, true));
         assert_eq!(objs[1].binding.as_deref(), Some("top"));
         assert!(objs[1].content.is_none());
+    }
+
+    #[test]
+    fn create_object_inserts_scoped_and_round_trips_payload() {
+        // #48: a shape object inserts onto a body part of the layout, carries its
+        // props, and defaults to z=0 / editable. A foreign part id is a no-op.
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .unwrap();
+        let lay = s.layouts().unwrap()[0].clone();
+        let part = s.parts(lay.id).unwrap()[0].clone();
+        let before = s.objects(part.id).unwrap().len();
+
+        let id = s
+            .create_object(
+                lay.id,
+                &NewObject {
+                    part_id: part.id,
+                    kind: ObjectKind::Rect,
+                    x: 12,
+                    y: 8,
+                    w: 64,
+                    h: 40,
+                    binding: None,
+                    content: None,
+                    props: Some("{\"fill\":\"#abc\"}".into()),
+                },
+            )
+            .unwrap()
+            .expect("created");
+        let objs = s.objects(part.id).unwrap();
+        assert_eq!(objs.len(), before + 1);
+        let made = objs.iter().find(|o| o.id == id).unwrap();
+        assert_eq!((made.kind, made.x, made.y, made.w, made.h, made.z), (ObjectKind::Rect, 12, 8, 64, 40, 0));
+        assert!(!made.read_only);
+        assert_eq!(made.props.as_deref(), Some("{\"fill\":\"#abc\"}"));
+
+        // A part that isn't in this layout ⇒ no-op None, no row added.
+        let other = NewObject {
+            part_id: 999_999,
+            kind: ObjectKind::Rect,
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+            binding: None,
+            content: None,
+            props: None,
+        };
+        assert!(s.create_object(lay.id, &other).unwrap().is_none());
+        assert_eq!(s.objects(part.id).unwrap().len(), before + 1, "no foreign insert");
+    }
+
+    #[test]
+    fn create_field_object_spawns_label_and_value_atomically() {
+        // #60: dropping a field places a value `field` plus a separate caption
+        // `text` label on the same row, the label to the left of the value.
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .unwrap();
+        let lay = s.layouts().unwrap()[0].clone();
+        let part = s.parts(lay.id).unwrap()[0].clone();
+
+        let (label_id, field_id) = s
+            .create_field_object(lay.id, part.id, "Customers.Email", "Email", 120, 40, 200, 24)
+            .unwrap()
+            .expect("created");
+        let objs = s.objects(part.id).unwrap();
+        let label = objs.iter().find(|o| o.id == label_id).unwrap();
+        let field = objs.iter().find(|o| o.id == field_id).unwrap();
+        assert_eq!(label.kind, ObjectKind::Text);
+        assert_eq!(label.content.as_deref(), Some("Email"));
+        assert!(label.binding.is_none());
+        assert_eq!(field.kind, ObjectKind::Field);
+        assert_eq!(field.binding.as_deref(), Some("Customers.Email"));
+        assert!(field.content.is_none());
+        assert!(label.x < field.x, "label sits left of the value");
+        assert_eq!((field.x, field.y), (120, 40));
+
+        // Foreign part ⇒ no-op, nothing inserted.
+        assert!(s
+            .create_field_object(lay.id, 999_999, "Customers.Name", "Name", 0, 0, 1, 1)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn create_part_appends_band_at_next_position() {
+        // #48: a new band stacks below the existing ones.
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .unwrap();
+        let lay = s.layouts().unwrap()[0].clone();
+        let before = s.parts(lay.id).unwrap();
+        let top_pos = before.iter().map(|p| p.position).max().unwrap();
+
+        let pid = s.create_part(lay.id, PartKind::Footer, 48).unwrap();
+        let parts = s.parts(lay.id).unwrap();
+        assert_eq!(parts.len(), before.len() + 1);
+        let made = parts.iter().find(|p| p.id == pid).unwrap();
+        assert_eq!(made.kind, PartKind::Footer);
+        assert_eq!(made.height, 48);
+        assert!(made.position > top_pos, "appended below");
+    }
+
+    #[test]
+    fn delete_object_is_scoped() {
+        // #48: delete removes the row, but only when it belongs to the layout.
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .unwrap();
+        let lay = s.layouts().unwrap()[0].clone();
+        let part = s.parts(lay.id).unwrap()[0].clone();
+        let obj_id = s.objects(part.id).unwrap()[0].id;
+
+        // Foreign layout ⇒ no-op.
+        assert_eq!(s.delete_object(lay.id + 999, obj_id).unwrap(), 0);
+        assert!(s.objects(part.id).unwrap().iter().any(|o| o.id == obj_id));
+        // Real delete removes exactly one row.
+        assert_eq!(s.delete_object(lay.id, obj_id).unwrap(), 1);
+        assert!(!s.objects(part.id).unwrap().iter().any(|o| o.id == obj_id));
+        // Deleting it again is a no-op.
+        assert_eq!(s.delete_object(lay.id, obj_id).unwrap(), 0);
+    }
+
+    #[test]
+    fn set_object_props_persists_scoped() {
+        // #49: props write back to meta_object, layout-scoped.
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .unwrap();
+        let lay = s.layouts().unwrap()[0].clone();
+        let part = s.parts(lay.id).unwrap()[0].clone();
+        let obj_id = s.objects(part.id).unwrap()[0].id;
+
+        assert_eq!(s.set_object_props(lay.id, obj_id, "{\"fill\":\"#123456\"}").unwrap(), 1);
+        let o = s.objects(part.id).unwrap().into_iter().find(|o| o.id == obj_id).unwrap();
+        assert_eq!(o.props.as_deref(), Some("{\"fill\":\"#123456\"}"));
+        // Foreign layout ⇒ no-op.
+        assert_eq!(s.set_object_props(lay.id + 999, obj_id, "{}").unwrap(), 0);
     }
 }

@@ -25,7 +25,6 @@ struct AppState {
 /// Persistent shell context shared by every page (the chrome).
 struct Chrome {
     mode: &'static str, // "browse" | "design"
-    tables: Vec<String>,
     layouts: Vec<LayoutLink>,
     current_layout: Option<i64>,
     /// Form/List/Table tabs for the Browse view toggle; empty in Layout mode.
@@ -47,9 +46,12 @@ struct ViewTab {
     active: bool,
 }
 
-/// Record navigation in the Browse status bar: ⏮ ◀ "N of M" ▶ ⏭ over the
-/// current layout's found set (#23). `current` is 1-based, `0` when empty.
+/// Record navigation for the Browse status sidebar: first/prev/next/last over
+/// the current layout's found set (#23), plus an editable position field.
+/// `current` is 1-based, `0` when empty. `layout_id`/`view` back the jump form.
 struct Flipbook {
+    layout_id: i64,
+    view: &'static str,
     current: i64,
     total: i64,
     first_href: String,
@@ -72,9 +74,11 @@ fn clamp_rec(q: &HashMap<String, String>, total: i64) -> i64 {
 
 /// Build the flipbook for record `current` of `total` on `layout_id`/`view`.
 /// Step links preserve the current view and stay clamped to the found set.
-fn flipbook(layout_id: i64, view: &str, current: i64, total: i64) -> Flipbook {
+fn flipbook(layout_id: i64, view: &'static str, current: i64, total: i64) -> Flipbook {
     let href = |n: i64| format!("/browse/{layout_id}?view={view}&rec={n}");
     Flipbook {
+        layout_id,
+        view,
         current,
         total,
         first_href: href(1),
@@ -106,10 +110,6 @@ impl Chrome {
         current_layout: Option<i64>,
         view: Option<&str>,
     ) -> Self {
-        let tables = sol
-            .tables()
-            .map(|ts| ts.into_iter().map(|t| t.name).collect())
-            .unwrap_or_default();
         let layouts = sol
             .layouts()
             .map(|ls| {
@@ -138,7 +138,7 @@ impl Chrome {
                 .collect(),
             _ => Vec::new(),
         };
-        Chrome { mode, tables, layouts, current_layout, view_tabs, nav: None }
+        Chrome { mode, layouts, current_layout, view_tabs, nav: None }
     }
 }
 

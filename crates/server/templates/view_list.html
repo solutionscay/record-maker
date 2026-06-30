@@ -8,13 +8,13 @@
 Table view, then they'll list here.</p>
 {% else %}
 <div class="fm-list" style="width: {{ width }}px;">
-  {% for p in header %}{% call band::band(p) %}{% endfor %}
+  {% for p in header %}{% call band::band(p, false) %}{% endfor %}
   {% for row in rows %}
   <div class="fm-row{% if row.current %} current{% endif %}" id="rec-{{ row.id }}">
-    {% for p in row.parts %}{% call band::band(p) %}{% endfor %}
+    {% for p in row.parts %}{% call band::band(p, false) %}{% endfor %}
   </div>
   {% endfor %}
-  {% for p in footer %}{% call band::band(p) %}{% endfor %}
+  {% for p in footer %}{% call band::band(p, false) %}{% endfor %}
 </div>
 <p class="hint">{{ rows.len() }} record(s) of <strong>{{ table }}</strong>, each a
 repeated Body band — the record stepper highlights the current row.</p>

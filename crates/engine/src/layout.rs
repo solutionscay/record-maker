@@ -231,6 +231,29 @@ impl Solution {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Persist an object's part-relative geometry (#15) — the canvas commits a
+    /// drag/resize through this. Scoped to `layout_id`: the UPDATE only touches an
+    /// object that actually belongs to the layout, so a stale or forged id from
+    /// another layout is a silent no-op. Returns the number of rows updated (`0`
+    /// ⇒ no such object in that layout). `meta_object` stays the authoritative
+    /// source Browse renders from, so a committed drag round-trips on reload.
+    pub fn set_object_geometry(
+        &self,
+        layout_id: i64,
+        object_id: i64,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+    ) -> Result<usize> {
+        let n = self.app.execute(
+            "UPDATE meta_object SET x=?1, y=?2, w=?3, h=?4 \
+             WHERE id=?5 AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?6)",
+            params![x, y, w, h, object_id, layout_id],
+        )?;
+        Ok(n)
+    }
+
     /// Look up a single layout by id.
     pub fn layout_by_id(&self, id: i64) -> Result<Option<LayoutMeta>> {
         let mut stmt = self
@@ -410,6 +433,31 @@ mod tests {
         assert_eq!((o.x, o.y, o.w, o.h), (1, 2, 3, 4));
         assert_eq!(o.z, 0, "default z");
         assert!(!o.read_only, "default editable");
+    }
+
+    #[test]
+    fn set_object_geometry_persists_and_is_layout_scoped() {
+        // #15 round-trip primitive: geometry writes back to meta_object, scoped to
+        // the owning layout so a foreign/unknown id can never mutate it.
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .unwrap();
+        let lay = s.layouts().unwrap()[0].clone();
+        let part = s.parts(lay.id).unwrap()[0].clone();
+        let obj_id = s.objects(part.id).unwrap()[0].id;
+
+        // A real move updates exactly one row and round-trips.
+        assert_eq!(s.set_object_geometry(lay.id, obj_id, 33, 44, 120, 30).unwrap(), 1);
+        let after = &s.objects(part.id).unwrap()[0];
+        assert_eq!((after.x, after.y, after.w, after.h), (33, 44, 120, 30));
+
+        // A foreign layout id is a no-op (scoped); geometry is unchanged.
+        assert_eq!(s.set_object_geometry(lay.id + 999, obj_id, 1, 1, 1, 1).unwrap(), 0);
+        let still = &s.objects(part.id).unwrap()[0];
+        assert_eq!((still.x, still.y, still.w, still.h), (33, 44, 120, 30));
+
+        // An unknown object id is a no-op too.
+        assert_eq!(s.set_object_geometry(lay.id, 999_999, 0, 0, 0, 0).unwrap(), 0);
     }
 
     #[test]

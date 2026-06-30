@@ -12,7 +12,7 @@ use axum::{
     http::StatusCode,
     response::{Html, IntoResponse, Redirect},
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use record_maker_engine::{
     FieldKind, FieldMeta, LayoutMeta, NewField, ObjectKind, ObjectMeta, PartKind, PartMeta,
@@ -602,6 +602,44 @@ async fn design_model(
     axum::Json(model).into_response()
 }
 
+/// The geometry a Layout-canvas drag/resize commits for one object (#15) —
+/// part-relative px integers mirroring the #43 geometry contract.
+#[derive(serde::Deserialize)]
+struct GeometryUpdate {
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+}
+
+/// Persist one object's new geometry from the Layout canvas (#15): the canvas
+/// POSTs `{x,y,w,h}` after a drag and this writes it to `meta_object`, scoped to
+/// the layout. Coordinates clamp to the canvas origin (no negative part-relative
+/// geometry) and to a 1px minimum size, so a stray value can't push an object off
+/// the top-left or collapse it. 200 on success; 404 when no such object belongs to
+/// the layout. The geometry is authoritative, so Browse shows it on the next read.
+async fn update_object_geometry(
+    State(st): State<AppState>,
+    Path((layout_id, object_id)): Path<(i64, i64)>,
+    Json(geom): Json<GeometryUpdate>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let updated = sol
+        .set_object_geometry(
+            layout_id,
+            object_id,
+            geom.x.max(0),
+            geom.y.max(0),
+            geom.w.max(1),
+            geom.h.max(1),
+        )
+        .unwrap();
+    if updated == 0 {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    StatusCode::OK.into_response()
+}
+
 /// Directory holding the built Layout Mode editor bundle (Svelte 5 + Vite static
 /// output), relative to the server's working directory. Empty until the frontend
 /// is built (`cd ui && npm install && npm run build`).
@@ -786,6 +824,7 @@ fn app(state: AppState) -> Router {
         .route("/browse/:layout/:id/delete", post(delete_record))
         .route("/design/:layout", get(design))
         .route("/design/:layout/model", get(design_model))
+        .route("/design/:layout/object/:id/geometry", post(update_object_geometry))
         .route("/ui/*path", get(ui_asset))
         .with_state(state)
 }
@@ -1107,6 +1146,82 @@ mod tests {
             sol: Arc::new(Mutex::new(sol)),
             locks: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    async fn post_json(state: AppState, uri: &str, body: &str) -> StatusCode {
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let resp = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        resp.status()
+    }
+
+    /// #15 round-trip: POSTing new geometry persists to `meta_object` (scoped to
+    /// the layout) and is visible on the next read; bad ids 404 and change nothing;
+    /// negative coordinates clamp to the canvas origin.
+    #[tokio::test]
+    async fn design_object_geometry_persists_clamps_and_is_scoped() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        sol.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .unwrap();
+        let layout_id = sol.layouts().unwrap()[0].id;
+        let part = sol.parts(layout_id).unwrap()[0].clone();
+        let obj_id = sol.objects(part.id).unwrap()[0].id;
+        let state = state_for(sol);
+
+        let geom = |state: &AppState| {
+            let sol = state.sol.lock().unwrap();
+            let o = &sol.objects(part.id).unwrap()[0];
+            (o.x, o.y, o.w, o.h)
+        };
+
+        // A drag commit persists and round-trips.
+        let status = post_json(
+            state.clone(),
+            &format!("/design/{layout_id}/object/{obj_id}/geometry"),
+            r#"{"x":33,"y":44,"w":120,"h":30}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(geom(&state), (33, 44, 120, 30));
+
+        // Negative coordinates clamp to the origin (and size to a 1px floor).
+        let status = post_json(
+            state.clone(),
+            &format!("/design/{layout_id}/object/{obj_id}/geometry"),
+            r#"{"x":-50,"y":-9,"w":0,"h":-3}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(geom(&state), (0, 0, 1, 1));
+
+        // Unknown object ⇒ 404.
+        let status = post_json(
+            state.clone(),
+            &format!("/design/{layout_id}/object/999999/geometry"),
+            r#"{"x":1,"y":1,"w":1,"h":1}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Foreign layout id ⇒ 404 (scoped); geometry unchanged.
+        let status = post_json(
+            state.clone(),
+            &format!("/design/{}/object/{obj_id}/geometry", layout_id + 999),
+            r#"{"x":5,"y":5,"w":5,"h":5}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(geom(&state), (0, 0, 1, 1));
     }
 
     /// The `/design/:layout/model` JSON is the read contract the canvas hydrates

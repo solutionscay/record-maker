@@ -5,9 +5,17 @@
 <h2>{{ layout }} · Form view</h2>
 {% match record %}
 {% when Some with (r) %}
-<div class="fm-canvas" style="width: {{ r.width }}px;">
-  {% for p in r.parts %}{% call band::band(p) %}{% endfor %}
-</div>
+{% match chrome.nav %}
+{% when Some with (nav) %}
+<form class="fm-edit rec-edit" data-action="/browse/{{ nav.layout_id }}/{{ r.id }}"
+      data-open="/browse/{{ nav.layout_id }}/{{ r.id }}/open"
+      data-revert="/browse/{{ nav.layout_id }}/{{ r.id }}/revert"
+      data-view="{{ nav.view }}" data-rec="{{ nav.current }}">
+  <div class="fm-canvas" style="width: {{ r.width }}px;">
+    {% for p in r.parts %}{% call band::band(p, true) %}{% endfor %}
+  </div>
+</form>
+{% when None %}{% endmatch %}
 <p class="hint">Record #{{ r.id }} of <strong>{{ table }}</strong>, rendered from
 the layout's objects with live values — page through with the record stepper at left.</p>
 {% when None %}

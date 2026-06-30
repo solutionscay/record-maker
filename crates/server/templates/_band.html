@@ -1,13 +1,22 @@
 {# A layout part rendered as a band of absolutely-positioned objects. Shared by
    Form view (#25) and List view (#26) so both render objects identically. #}
-{% macro band(p) %}
+{% macro band(p, editable) %}
 <div class="fm-part" style="height: {{ p.height }}px;">
   {% for o in p.objects %}
   <div class="fm-obj{% if o.field %} fm-field{% endif %}"
        style="left:{{ o.x }}px; top:{{ o.y }}px; width:{{ o.w }}px; height:{{ o.h }}px;">
     {% if o.field %}
     <span class="fm-flabel">{{ o.label }}</span>
+    {% if editable %}
+      {% match o.field_id %}
+      {% when Some with (fid) %}
+      <input class="fm-finput" name="f{{ fid }}" value="{{ o.value }}" autocomplete="off">
+      {% when None %}
+      <span class="fm-fvalue">{{ o.value }}</span>
+      {% endmatch %}
+    {% else %}
     <span class="fm-fvalue">{{ o.value }}</span>
+    {% endif %}
     {% else %}
     <span class="fm-text">{{ o.value }}</span>
     {% endif %}

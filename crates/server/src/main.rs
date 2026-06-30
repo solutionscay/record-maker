@@ -3,12 +3,13 @@
 //! meta_layout **id** (i64). One generic handler set serves every table by
 //! reading metadata — no per-table code.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use askama::Template;
 use axum::{
     extract::{Form, Path, Query, State},
+    http::StatusCode,
     response::{Html, IntoResponse, Redirect},
     routing::{get, post},
     Router,
@@ -20,6 +21,17 @@ use record_maker_engine::{
 #[derive(Clone)]
 struct AppState {
     sol: Arc<Mutex<Solution>>,
+    /// Records currently "open" for editing, keyed `(table_id, record_id)`.
+    /// In-process is enough today (single-user desktop); the open→commit→release
+    /// lifecycle is the point, and the registry is where multi-user lock
+    /// enforcement will later hook in (#40).
+    locks: Arc<Mutex<HashSet<(i64, i64)>>>,
+}
+
+impl AppState {
+    fn lock_held(&self, key: (i64, i64)) -> bool {
+        self.locks.lock().unwrap().contains(&key)
+    }
 }
 
 /// Persistent shell context shared by every page (the chrome).
@@ -31,6 +43,8 @@ struct Chrome {
     view_tabs: Vec<ViewTab>,
     /// Record-navigation flipbook for the Browse status bar; `None` elsewhere.
     nav: Option<Flipbook>,
+    /// True when the current record is open for editing (its lock is held).
+    editing: bool,
 }
 
 struct LayoutLink {
@@ -149,7 +163,7 @@ impl Chrome {
                 .collect(),
             _ => Vec::new(),
         };
-        Chrome { mode, layouts, current_layout, view_tabs, nav: None }
+        Chrome { mode, layouts, current_layout, view_tabs, nav: None, editing: false }
     }
 }
 
@@ -201,9 +215,11 @@ struct PartView {
 }
 
 /// A positioned object. `field` objects show `label` + live `value`; other
-/// kinds render `value` as plain text.
+/// kinds render `value` as plain text. `field_id` is set for bound field
+/// objects so editable views can name the input `f<id>`; `None` otherwise.
 struct ObjectView {
     field: bool,
+    field_id: Option<i64>,
     x: i64,
     y: i64,
     w: i64,
@@ -235,28 +251,18 @@ struct ListRow {
 }
 
 struct FieldView {
-    id: i64,
     name: String,
 }
 
 struct RecordView {
     id: i64,
-    cells: Vec<String>,
+    cells: Vec<CellView>,
 }
 
-#[derive(Template)]
-#[template(path = "edit.html")]
-struct EditTemplate {
-    chrome: Chrome,
-    layout_id: i64,
-    table: String,
-    id: i64,
-    fields: Vec<EditFieldView>,
-}
-
-struct EditFieldView {
-    id: i64,
-    name: String,
+/// One Table-view cell: the field id (so editable inputs can be named `f<id>`)
+/// and the current value.
+struct CellView {
+    field_id: i64,
     value: String,
 }
 
@@ -283,29 +289,29 @@ async fn index(State(st): State<AppState>) -> impl IntoResponse {
 /// `(display name, value)`). The full relationship resolver replaces this (#11).
 fn resolve_object(
     o: &ObjectMeta,
-    by_name: &HashMap<String, (String, String)>,
-) -> (bool, String, String) {
+    by_name: &HashMap<String, (i64, String, String)>,
+) -> (bool, Option<i64>, String, String) {
     match (o.kind.as_str(), o.binding.as_deref()) {
         ("field", Some(binding)) => {
             let seg = binding.rsplit('.').next().unwrap_or(binding).to_lowercase();
             match by_name.get(&seg) {
-                Some((label, value)) => (true, label.clone(), value.clone()),
+                Some((id, label, value)) => (true, Some(*id), label.clone(), value.clone()),
                 // a binding that doesn't resolve yet (e.g. a relationship path)
-                None => (true, binding.to_string(), String::new()),
+                None => (true, None, binding.to_string(), String::new()),
             }
         }
         // non-field objects (text/button/…) render their binding text, if any
-        _ => (false, String::new(), o.binding.clone().unwrap_or_default()),
+        _ => (false, None, String::new(), o.binding.clone().unwrap_or_default()),
     }
 }
 
-/// A record's field values keyed by lowercased field name → (display name,
-/// value) — the lookup `resolve_object` binds against.
-fn by_name_map(fields: &[FieldMeta], cells: Vec<String>) -> HashMap<String, (String, String)> {
+/// A record's field values keyed by lowercased field name → (field id, display
+/// name, value) — the lookup `resolve_object` binds against.
+fn by_name_map(fields: &[FieldMeta], cells: Vec<String>) -> HashMap<String, (i64, String, String)> {
     fields
         .iter()
         .zip(cells)
-        .map(|(f, value)| (f.name.to_lowercase(), (f.name.clone(), value)))
+        .map(|(f, value)| (f.name.to_lowercase(), (f.id, f.name.clone(), value)))
         .collect()
 }
 
@@ -314,15 +320,15 @@ fn by_name_map(fields: &[FieldMeta], cells: Vec<String>) -> HashMap<String, (Str
 fn render_part(
     sol: &Solution,
     part: &PartMeta,
-    by_name: &HashMap<String, (String, String)>,
+    by_name: &HashMap<String, (i64, String, String)>,
 ) -> PartView {
     let objects = sol
         .objects(part.id)
         .unwrap()
         .iter()
         .map(|o| {
-            let (field, label, value) = resolve_object(o, by_name);
-            ObjectView { field, x: o.x, y: o.y, w: o.w, h: o.h, label, value }
+            let (field, field_id, label, value) = resolve_object(o, by_name);
+            ObjectView { field, field_id, x: o.x, y: o.y, w: o.w, h: o.h, label, value }
         })
         .collect();
     PartView { height: part.height, objects }
@@ -419,6 +425,7 @@ async fn browse(
     let rec = clamp_rec(&q, total);
     let current_id = if rec >= 1 { ids.get((rec - 1) as usize).copied() } else { None };
     chrome.nav = Some(flipbook(layout_id, view, rec, current_id, total));
+    chrome.editing = current_id.is_some_and(|cid| st.lock_held((table.id, cid)));
 
     match view {
         "form" => {
@@ -464,11 +471,18 @@ async fn browse(
                 table: table.name.clone(),
                 fields: fields
                     .iter()
-                    .map(|f| FieldView { id: f.id, name: f.name.clone() })
+                    .map(|f| FieldView { name: f.name.clone() })
                     .collect(),
                 records: records
                     .into_iter()
-                    .map(|r| RecordView { id: r.id, cells: r.cells })
+                    .map(|r| RecordView {
+                        id: r.id,
+                        cells: fields
+                            .iter()
+                            .zip(r.cells)
+                            .map(|(f, value)| CellView { field_id: f.id, value })
+                            .collect(),
+                    })
                     .collect(),
             };
             Html(tmpl.render().unwrap()).into_response()
@@ -509,44 +523,61 @@ async fn create_record(
     Redirect::to(&target)
 }
 
-/// Show the edit form for a record, pre-filled with its current values.
-async fn edit_form(
-    State(st): State<AppState>,
-    Path((layout_id, id)): Path<(i64, i64)>,
-) -> impl IntoResponse {
-    let sol = st.sol.lock().unwrap();
-    let Some((_lay, table)) = layout_table(&sol, layout_id) else {
-        return not_found("layout", layout_id);
-    };
-    let fields = sol.fields(table.id).unwrap();
-    let Some(values) = sol.get_record(&table, &fields, id).unwrap() else {
-        return not_found("record", id);
-    };
-    let chrome = Chrome::build(&sol, "browse", Some(layout_id), Some("table"));
-    let fv = fields
-        .iter()
-        .zip(values)
-        .map(|(f, v)| EditFieldView { id: f.id, name: f.name.clone(), value: v })
-        .collect();
-    let tmpl = EditTemplate { chrome, layout_id, table: table.name.clone(), id, fields: fv };
-    Html(tmpl.render().unwrap()).into_response()
-}
-
-/// Save edits to a record, then back to the list.
+/// Commit a record: write the buffered field values, release the edit lock, and
+/// stay on the record. The form carries `view`/`rec` so the redirect lands back
+/// on the same record in the same view (the "commit on exit" half of #40).
 async fn save_record(
     State(st): State<AppState>,
     Path((layout_id, id)): Path<(i64, i64)>,
     Form(form): Form<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let mut target = format!("/browse/{layout_id}");
     {
         let sol = st.sol.lock().unwrap();
-        if let Some((_lay, table)) = layout_table(&sol, layout_id) {
+        if let Some((lay, table)) = layout_table(&sol, layout_id) {
             let fields = sol.fields(table.id).unwrap();
             let values = collect_values(&fields, &form);
             sol.update_record(&table, id, &values).unwrap();
+            st.locks.lock().unwrap().remove(&(table.id, id));
+            let view = view_param(&form, &lay.view);
+            let rec = clamp_rec(&form, sol.record_ids(&table).unwrap().len() as i64);
+            target = format!("/browse/{layout_id}?view={view}&rec={rec}");
         }
     }
-    Redirect::to(&format!("/browse/{layout_id}"))
+    Redirect::to(&target)
+}
+
+/// Open a record for editing: acquire its in-process lock. 200 once held (the
+/// single session may re-open its own lock); 409 if held elsewhere (multi-user,
+/// not reachable yet); 404 for an unknown layout. The "open on focus" half of #40.
+async fn open_record(
+    State(st): State<AppState>,
+    Path((layout_id, id)): Path<(i64, i64)>,
+) -> impl IntoResponse {
+    let table_id = {
+        let sol = st.sol.lock().unwrap();
+        match layout_table(&sol, layout_id) {
+            Some((_lay, table)) => table.id,
+            None => return (StatusCode::NOT_FOUND, "no such layout"),
+        }
+    };
+    st.locks.lock().unwrap().insert((table_id, id));
+    (StatusCode::OK, "open")
+}
+
+/// Revert: release the edit lock without writing (the "Escape" path of #40). The
+/// client discards its buffer and reloads to the committed values.
+async fn revert_record(
+    State(st): State<AppState>,
+    Path((layout_id, id)): Path<(i64, i64)>,
+) -> impl IntoResponse {
+    if let Some(table_id) = {
+        let sol = st.sol.lock().unwrap();
+        layout_table(&sol, layout_id).map(|(_lay, table)| table.id)
+    } {
+        st.locks.lock().unwrap().remove(&(table_id, id));
+    }
+    (StatusCode::OK, "reverted")
 }
 
 /// Delete a record, then back to the same view near where you were. The form
@@ -607,7 +638,8 @@ fn app(state: AppState) -> Router {
         .route("/", get(index))
         .route("/browse/:layout", get(browse).post(create_record))
         .route("/browse/:layout/:id", post(save_record))
-        .route("/browse/:layout/:id/edit", get(edit_form))
+        .route("/browse/:layout/:id/open", post(open_record))
+        .route("/browse/:layout/:id/revert", post(revert_record))
         .route("/browse/:layout/:id/delete", post(delete_record))
         .route("/design/:layout", get(design))
         .with_state(state)
@@ -617,7 +649,10 @@ fn app(state: AppState) -> Router {
 async fn main() {
     let mut sol = Solution::open("./.rm-data").expect("open solution");
     seed(&mut sol).expect("seed");
-    let state = AppState { sol: Arc::new(Mutex::new(sol)) };
+    let state = AppState {
+        sol: Arc::new(Mutex::new(sol)),
+        locks: Arc::new(Mutex::new(HashSet::new())),
+    };
 
     let addr = "127.0.0.1:4317";
     let listener = tokio::net::TcpListener::bind(addr)

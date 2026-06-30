@@ -60,12 +60,11 @@
                  display: flex; align-items: center; gap: .8rem; }
     .collapse { font-size: .72rem; line-height: 1; padding: .1rem .45rem; }
     .status-mode { font-weight: 600; color: #444; }
+    .status-edit { color: #b8860b; font-weight: 600; }
     table { border-collapse: collapse; width: 100%; margin: .5rem 0; }
     th, td { border: 1px solid #ddd; padding: .4rem .6rem; text-align: left; }
     th { background: #f5f5f7; }
     form.inline { margin: 0; }
-    form.newrec { display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; margin-top: .5rem; }
-    label { display: flex; flex-direction: column; font-size: .85rem; gap: .2rem; }
     input { font: inherit; padding: .35rem .5rem; border: 1px solid #888; border-radius: .3rem; }
     button { font: inherit; padding: .4rem .8rem; border-radius: .4rem; border: 1px solid #888; cursor: pointer; background: #fff; }
     .placeholder { max-width: 46rem; color: #555; line-height: 1.5; background: #f7f9fc;
@@ -84,6 +83,17 @@
     .fm-fvalue { flex: 1 1 auto; display: flex; align-items: center; padding: .15rem .45rem;
                  color: #1b1b1f; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .fm-text { display: block; padding: .1rem .2rem; color: #333; }
+    /* Editable field input (Form view, open/commit editing #40). */
+    .fm-edit { margin: 0; }
+    .fm-finput { flex: 1 1 auto; min-width: 0; border: 0; outline: none; font: inherit;
+                 padding: .15rem .45rem; color: #1b1b1f; background: #fff; }
+    .fm-finput:focus { background: #fff7e6; box-shadow: inset 0 0 0 2px #f0c36d; }
+    .rec-edit { margin: 0; }
+    /* Editable Table cells (#40). */
+    td:has(.cell-input) { padding: 0; }
+    .cell-input { width: 100%; box-sizing: border-box; border: 1px solid transparent;
+                  background: transparent; font: inherit; padding: .4rem .6rem; }
+    .cell-input:focus { outline: none; border-color: #f0c36d; background: #fff7e6; }
     /* List view — the Body band repeated per record (#26). */
     .fm-list { position: relative; background: #fff; border: 1px solid #e2e2e2;
                border-radius: 4px; margin: 1rem 0; box-shadow: 0 1px 2px rgba(0,0,0,.04); overflow: hidden; }
@@ -196,8 +206,39 @@
       <button type="button" class="collapse" title="Collapse / expand the sidebar"
               onclick="document.querySelector('.app').classList.toggle('rail-collapsed')">&#10096;&#10097;</button>
       <span class="status-mode">{% if chrome.mode == "browse" %}Browse{% else %}Layout{% endif %}</span>
+      {% if chrome.editing %}<span class="status-edit" title="Record open for editing">&#9679; Editing</span>{% endif %}
       <span class="status-detail">{% block statusbar %}{% endblock %}</span>
     </footer>
   </div>
+  {# Shared inline-edit controller (#40). Any `.rec-edit` element (a record's
+     editor) opens on focus, commits on leaving it or pressing Enter, and reverts
+     on Escape. Works the same in Form, List, and Table views. Commits use
+     sendBeacon so they survive the navigation that often triggers them. #}
+  <script>
+  (function () {
+    function beacon(url, body) { try { return navigator.sendBeacon(url, body); } catch (e) { return false; } }
+    function recordBody(el) {
+      var p = new URLSearchParams();
+      el.querySelectorAll('input[name], select[name], textarea[name]').forEach(function (i) {
+        p.append(i.name, i.value);
+      });
+      if (el.dataset.view) p.append('view', el.dataset.view);
+      if (el.dataset.rec) p.append('rec', el.dataset.rec);
+      return p;
+    }
+    document.querySelectorAll('.rec-edit').forEach(function (el) {
+      var open = false;
+      function openRec() { if (open) return; open = true; beacon(el.dataset.open); }
+      function commit() { if (!open) return; open = false; beacon(el.dataset.action, recordBody(el)); }
+      function revert() { if (!open) return; open = false; beacon(el.dataset.revert); location.reload(); }
+      el.addEventListener('focusin', openRec);
+      el.addEventListener('focusout', function (e) { if (!el.contains(e.relatedTarget)) commit(); });
+      el.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); commit(); if (document.activeElement) document.activeElement.blur(); }
+        else if (e.key === 'Escape') { e.preventDefault(); revert(); }
+      });
+    });
+  })();
+  </script>
 </body>
 </html>

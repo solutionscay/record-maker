@@ -267,22 +267,6 @@ struct CellView {
 }
 
 #[derive(Template)]
-#[template(path = "edit.html")]
-struct EditTemplate {
-    chrome: Chrome,
-    layout_id: i64,
-    table: String,
-    id: i64,
-    fields: Vec<EditFieldView>,
-}
-
-struct EditFieldView {
-    id: i64,
-    name: String,
-    value: String,
-}
-
-#[derive(Template)]
 #[template(path = "design.html")]
 struct DesignTemplate {
     chrome: Chrome,
@@ -539,29 +523,6 @@ async fn create_record(
     Redirect::to(&target)
 }
 
-/// Show the edit form for a record, pre-filled with its current values.
-async fn edit_form(
-    State(st): State<AppState>,
-    Path((layout_id, id)): Path<(i64, i64)>,
-) -> impl IntoResponse {
-    let sol = st.sol.lock().unwrap();
-    let Some((_lay, table)) = layout_table(&sol, layout_id) else {
-        return not_found("layout", layout_id);
-    };
-    let fields = sol.fields(table.id).unwrap();
-    let Some(values) = sol.get_record(&table, &fields, id).unwrap() else {
-        return not_found("record", id);
-    };
-    let chrome = Chrome::build(&sol, "browse", Some(layout_id), Some("table"));
-    let fv = fields
-        .iter()
-        .zip(values)
-        .map(|(f, v)| EditFieldView { id: f.id, name: f.name.clone(), value: v })
-        .collect();
-    let tmpl = EditTemplate { chrome, layout_id, table: table.name.clone(), id, fields: fv };
-    Html(tmpl.render().unwrap()).into_response()
-}
-
 /// Commit a record: write the buffered field values, release the edit lock, and
 /// stay on the record. The form carries `view`/`rec` so the redirect lands back
 /// on the same record in the same view (the "commit on exit" half of #40).
@@ -679,7 +640,6 @@ fn app(state: AppState) -> Router {
         .route("/browse/:layout/:id", post(save_record))
         .route("/browse/:layout/:id/open", post(open_record))
         .route("/browse/:layout/:id/revert", post(revert_record))
-        .route("/browse/:layout/:id/edit", get(edit_form))
         .route("/browse/:layout/:id/delete", post(delete_record))
         .route("/design/:layout", get(design))
         .with_state(state)

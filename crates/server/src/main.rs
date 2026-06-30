@@ -501,6 +501,48 @@ async fn design(State(st): State<AppState>, Path(layout_id): Path<i64>) -> impl 
     Html(tmpl.render().unwrap()).into_response()
 }
 
+/// Directory holding the built Layout Mode editor bundle (Svelte 5 + Vite static
+/// output), relative to the server's working directory. Empty until the frontend
+/// is built (`cd ui && npm install && npm run build`).
+const UI_DIST: &str = "ui/dist";
+
+/// Map a file extension to a content type for the editor bundle. Only the few
+/// kinds Vite emits are listed; anything else falls back to octet-stream.
+fn ui_content_type(path: &str) -> &'static str {
+    match path.rsplit('.').next() {
+        Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("html") => "text/html; charset=utf-8",
+        Some("json") | Some("map") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Serve the built Layout Mode editor bundle from `ui/dist` under the stable
+/// `/ui/...` prefix (ADR #42: the island is a static bundle served by axum). Vite
+/// emits predictable, non-hashed names (`layout-editor.js` / `layout-editor.css`),
+/// so the design page references them by a fixed path. Requests 404 until the
+/// frontend is built. A small `tokio::fs` handler keeps this dependency-free
+/// rather than pulling in a static-file crate.
+async fn ui_asset(Path(path): Path<String>) -> impl IntoResponse {
+    // Reject path traversal and empty segments before touching the filesystem.
+    if path
+        .split('/')
+        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let full = std::path::Path::new(UI_DIST).join(&path);
+    match tokio::fs::read(&full).await {
+        Ok(bytes) => {
+            ([(axum::http::header::CONTENT_TYPE, ui_content_type(&path))], bytes).into_response()
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// Create a record from the new-record form (inputs named `f<field_id>`).
 async fn create_record(
     State(st): State<AppState>,
@@ -642,6 +684,7 @@ fn app(state: AppState) -> Router {
         .route("/browse/:layout/:id/revert", post(revert_record))
         .route("/browse/:layout/:id/delete", post(delete_record))
         .route("/design/:layout", get(design))
+        .route("/ui/*path", get(ui_asset))
         .with_state(state)
 }
 

@@ -12,7 +12,13 @@
   // It reads/writes ONLY through the store + persist helpers; it never touches the
   // parity-checked canvas DOM.
   import type { EditorDoc, ToolKind } from './doc.svelte';
-  import { createPart, setObjectProps as persistProps } from './persist';
+  import {
+    createPart,
+    deletePart as persistDeletePart,
+    setObjectProps as persistProps,
+    setPartHeight as persistPartHeight,
+    setPartKind as persistPartKind,
+  } from './persist';
   import { llog, lerror } from './log';
 
   let { doc, layoutId = '' }: { doc: EditorDoc; layoutId?: string } = $props();
@@ -71,6 +77,8 @@
   let selected = $derived(selectedId === null ? undefined : doc.getObject(selectedId));
   let selectedProps = $derived(parseProps(selected?.props ?? ''));
   let canStyle = $derived(!!selected);
+  let selectedPartId = $derived(doc.selectedPartId);
+  let selectedPart = $derived(selectedPartId === null ? undefined : doc.getPart(selectedPartId));
 
   function parseProps(raw: string): Record<string, unknown> {
     if (!raw) return {};
@@ -102,6 +110,53 @@
     } catch (e) {
       lerror('persist', 'set style failed', e);
       doc.setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // ── Band inspector ──────────────────────────────────────────────────────
+
+  async function setSelectedPartKind(kind: string): Promise<void> {
+    if (!selectedPart) return;
+    const id = selectedPart.id;
+    llog('persist', 'rail: set band kind', { id, kind });
+    doc.setPartKind(id, kind);
+    doc.mark();
+    try {
+      await persistPartKind(layoutId, id, kind);
+    } catch (e) {
+      lerror('persist', 'set band kind failed', e);
+      doc.setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function setSelectedPartHeight(height: number): Promise<void> {
+    if (!selectedPart) return;
+    const id = selectedPart.id;
+    const next = Math.max(doc.minPartHeight(id), Math.round(height || 1));
+    llog('persist', 'rail: set band height', { id, height: next });
+    doc.setPartHeight(id, next);
+    doc.mark();
+    try {
+      await persistPartHeight(layoutId, id, next);
+    } catch (e) {
+      lerror('persist', 'set band height failed', e);
+      doc.setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function deleteSelectedPart(): Promise<void> {
+    if (!selectedPart || busy) return;
+    const id = selectedPart.id;
+    busy = true;
+    llog('persist', 'rail: delete band', { id });
+    try {
+      await persistDeletePart(layoutId, id);
+      doc.removePart(id);
+    } catch (e) {
+      lerror('persist', 'delete band failed', e);
+      doc.setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      busy = false;
     }
   }
 
@@ -183,6 +238,43 @@
 </section>
 
 <section class="le-zone">
+  <span class="side-label">Band</span>
+  <label class="le-control">
+    <span>Kind</span>
+    <select
+      class="le-compact-select"
+      value={selectedPart?.kind ?? partKind}
+      disabled={!selectedPart}
+      onchange={(e) => setSelectedPartKind(e.currentTarget.value)}
+    >
+      {#each PART_KINDS as p (p.id)}
+        <option value={p.id}>{p.label}</option>
+      {/each}
+    </select>
+  </label>
+  <label class="le-control">
+    <span>Height</span>
+    <input
+      type="number"
+      min={selectedPart ? doc.minPartHeight(selectedPart.id) : 1}
+      value={selectedPart?.height ?? 0}
+      disabled={!selectedPart}
+      onchange={(e) => setSelectedPartHeight(Number(e.currentTarget.value))}
+    />
+  </label>
+  <button
+    type="button"
+    class="le-danger-btn"
+    title="Delete selected band"
+    disabled={!selectedPart || busy}
+    onclick={deleteSelectedPart}
+  >Delete band</button>
+  {#if !selectedPart}
+    <span class="le-hint">Select a band to edit it.</span>
+  {/if}
+</section>
+
+<section class="le-zone">
   <span class="side-label">Zoom</span>
   <div class="le-zoom">
     <button type="button" class="le-icon-btn" title="Zoom out" onclick={() => zoomBy(-0.1)}>−</button>
@@ -229,6 +321,13 @@
     font-size: 0.78rem;
     padding: 0.25rem;
   }
+  .le-compact-select {
+    min-width: 0;
+    width: 7rem;
+    font: inherit;
+    font-size: 0.74rem;
+    padding: 0.2rem;
+  }
   .le-part-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 28px;
@@ -249,6 +348,24 @@
   }
   .le-icon-btn:disabled {
     color: #bbb;
+    cursor: not-allowed;
+  }
+  .le-danger-btn {
+    min-height: 28px;
+    padding: 0.25rem 0.4rem;
+    border: 1px solid #d0a5a5;
+    border-radius: 0.35rem;
+    background: #fff;
+    color: #8a1f1f;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.74rem;
+  }
+  .le-danger-btn:hover:not(:disabled) {
+    background: #fff0f0;
+  }
+  .le-danger-btn:disabled {
+    opacity: 0.5;
     cursor: not-allowed;
   }
   .le-control {

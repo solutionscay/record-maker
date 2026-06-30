@@ -26,7 +26,7 @@ import Selecto from 'selecto';
 
 import type { EditorDoc } from './doc.svelte';
 import type { ObjectView } from './model';
-import { GRID, SNAP_THRESHOLD, clampOrigin, elementsToObjectIds, objectIdsInPaintOrder } from './canvas-edit';
+import { GRID, SNAP_THRESHOLD, clampOrigin, elementsToObjectIds, objectIdsInPaintOrder, snapToGrid } from './canvas-edit';
 import { defaultBox, defaultProps, partAtY } from './create';
 import { createObject } from './persist';
 import { llog, lerror } from './log';
@@ -54,6 +54,18 @@ export class CanvasInteraction {
   #zoom = 1;
   /** True while a placement POST is in flight, so a second click can't double-place. */
   #placing = false;
+  #resizeStarts = new Map<
+    number,
+    {
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      direction: number[];
+      clientX: number;
+      clientY: number;
+    }
+  >();
 
   constructor(stage: HTMLElement, doc: EditorDoc, layoutId: string) {
     this.#stage = stage;
@@ -71,6 +83,7 @@ export class CanvasInteraction {
       isDisplaySnapDigit: false,
       elementGuidelines: [],
       origin: false,
+      zoom: this.#zoom,
     });
 
     // ── drag (single + group). Single-target start also makes it the selection. ──
@@ -90,12 +103,16 @@ export class CanvasInteraction {
       llog('resize', 'resizeStart', { id: this.#idForElement(e.target) });
       this.#begin();
       this.#selectFromTarget(e.target);
+      this.#captureResizeStart(e.target, e.direction, e.inputEvent);
     });
-    this.#moveable.on('resize', (e) => this.#applyResize(e.target, e.width, e.height, e.drag.left, e.drag.top));
+    this.#moveable.on('resize', (e) => this.#applyResize(e.target, e.width, e.height, e.drag.left, e.drag.top, e.inputEvent));
     this.#moveable.on('resizeEnd', () => this.#end('resize'));
-    this.#moveable.on('resizeGroupStart', () => this.#begin());
+    this.#moveable.on('resizeGroupStart', (e) => {
+      this.#begin();
+      e.events.forEach((ev) => this.#captureResizeStart(ev.target, ev.direction, ev.inputEvent));
+    });
     this.#moveable.on('resizeGroup', (e) =>
-      e.events.forEach((ev) => this.#applyResize(ev.target, ev.width, ev.height, ev.drag.left, ev.drag.top)),
+      e.events.forEach((ev) => this.#applyResize(ev.target, ev.width, ev.height, ev.drag.left, ev.drag.top, ev.inputEvent)),
     );
     this.#moveable.on('resizeGroupEnd', () => this.#end('resize'));
 
@@ -122,6 +139,14 @@ export class CanvasInteraction {
           clientY: input.clientY,
         });
         e.stop();
+        if (!this.#pointInCanvas(input.clientX, input.clientY)) {
+          llog('place', 'armed click outside canvas ignored', {
+            tool: this.#doc.activeTool,
+            clientX: input.clientX,
+            clientY: input.clientY,
+          });
+          return;
+        }
         void this.#placeAt(input.clientX, input.clientY);
         return;
       }
@@ -167,6 +192,7 @@ export class CanvasInteraction {
 
     this.#stage.addEventListener('pointermove', this.#onPointerMove);
     this.#stage.addEventListener('pointerleave', this.#onPointerLeave);
+    this.#stage.addEventListener('click', this.#onClick);
     llog('init', 'CanvasInteraction ready', { layoutId, painted: this.#paintedElements().length });
   }
 
@@ -182,6 +208,7 @@ export class CanvasInteraction {
     const z = zoom > 0 ? zoom : 1;
     if (z !== this.#zoom) llog('zoom', 'setZoom', { zoom: z });
     this.#zoom = z;
+    this.#moveable.setState({ zoom: z });
   }
 
   /** Place a new object where the user clicked while a tool is armed (#48). Maps
@@ -292,6 +319,7 @@ export class CanvasInteraction {
   destroy(): void {
     this.#stage.removeEventListener('pointermove', this.#onPointerMove);
     this.#stage.removeEventListener('pointerleave', this.#onPointerLeave);
+    this.#stage.removeEventListener('click', this.#onClick);
     this.#moveable.destroy();
     this.#selecto.destroy();
   }
@@ -313,6 +341,27 @@ export class CanvasInteraction {
   #onPointerLeave = (): void => {
     if (this.#gesturing || this.#hoverId === null) return;
     this.#hoverId = null;
+    this.#updateTarget();
+  };
+
+  #onClick = (e: MouseEvent): void => {
+    if (this.#gesturing || this.#doc.activeTool !== 'pointer') return;
+    const target = e.target as Element | null;
+    if (!target || this.#moveable.isMoveableElement(target)) return;
+    if (target.closest('.fm-obj') || target.closest('.le-part-label, .le-part-resize')) return;
+
+    const partEl = (target.closest('.fm-part') ?? null) as HTMLElement | null;
+    if (!partEl) {
+      this.#doc.clearSelection();
+      return;
+    }
+    const id = this.#partIdForElement(partEl);
+    if (id === undefined) {
+      llog('target', 'click on part but id UNRESOLVED', { parts: this.#partElements().length });
+      return;
+    }
+    this.#hoverId = null;
+    this.#doc.selectPart(id);
     this.#updateTarget();
   };
 
@@ -370,6 +419,7 @@ export class CanvasInteraction {
   #begin(): void {
     this.#gesturing = true;
     this.#moved = false;
+    this.#resizeStarts.clear();
   }
 
   /** End a gesture: if it actually changed geometry, seal one undo step and
@@ -382,6 +432,7 @@ export class CanvasInteraction {
       void this.#persistSelection();
     }
     this.#targetKey = ''; // force a re-sync after the gesture
+    this.#resizeStarts.clear();
     this.#updateTarget();
   }
 
@@ -404,7 +455,30 @@ export class CanvasInteraction {
     llog('drag', 'apply move', { id, x: clampOrigin(left), y: clampOrigin(top) });
   }
 
-  #applyResize(target: HTMLElement | SVGElement, width: number, height: number, left: number, top: number): void {
+  #captureResizeStart(target: HTMLElement | SVGElement, direction: number[], inputEvent: Event | undefined): void {
+    const id = this.#idForElement(target);
+    const o = id === undefined ? undefined : this.#doc.getObject(id);
+    const pointer = inputEvent as PointerEvent | MouseEvent | undefined;
+    if (id === undefined || !o || !pointer) return;
+    this.#resizeStarts.set(id, {
+      x: o.x,
+      y: o.y,
+      w: o.w,
+      h: o.h,
+      direction: direction.slice(),
+      clientX: pointer.clientX,
+      clientY: pointer.clientY,
+    });
+  }
+
+  #applyResize(
+    target: HTMLElement | SVGElement,
+    width: number,
+    height: number,
+    left: number,
+    top: number,
+    inputEvent?: Event,
+  ): void {
     const id = this.#idForElement(target);
     if (id === undefined) {
       llog('target', 'resize: target element has NO mapped id — resize is a no-op', {
@@ -414,6 +488,37 @@ export class CanvasInteraction {
       return;
     }
     this.#moved = true;
+    const pointer = inputEvent as PointerEvent | MouseEvent | undefined;
+    const start = this.#resizeStarts.get(id);
+    if (pointer && start) {
+      const dx = (pointer.clientX - start.clientX) / (this.#zoom || 1);
+      const dy = (pointer.clientY - start.clientY) / (this.#zoom || 1);
+      const dirX = Math.sign(start.direction[0] ?? 1);
+      const dirY = Math.sign(start.direction[1] ?? 1);
+      let x = start.x;
+      let y = start.y;
+      let w = start.w;
+      let h = start.h;
+      if (dirX >= 0) {
+        w = snapToGrid(start.w + dx);
+      } else {
+        x = snapToGrid(start.x + dx);
+        w = start.w - (x - start.x);
+      }
+      if (dirY >= 0) {
+        h = snapToGrid(start.h + dy);
+      } else {
+        y = snapToGrid(start.y + dy);
+        h = start.h - (y - start.y);
+      }
+      w = Math.max(1, Math.round(w));
+      h = Math.max(1, Math.round(h));
+      x = clampOrigin(x);
+      y = clampOrigin(y);
+      this.#doc.setObjectGeometry(id, { x, y, w, h });
+      llog('resize', 'apply resize from pointer', { id, w, h, x, y, dx: Math.round(dx), dy: Math.round(dy) });
+      return;
+    }
     this.#doc.setObjectGeometry(id, {
       x: clampOrigin(left),
       y: clampOrigin(top),
@@ -459,9 +564,21 @@ export class CanvasInteraction {
     return this.#stage.querySelector('.fm-canvas');
   }
 
+  #pointInCanvas(clientX: number, clientY: number): boolean {
+    const canvas = this.#canvas();
+    if (!canvas) return false;
+    const r = canvas.getBoundingClientRect();
+    return clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom;
+  }
+
   #paintedElements(): HTMLElement[] {
     const canvas = this.#canvas();
     return canvas ? Array.from(canvas.querySelectorAll<HTMLElement>('.fm-obj')) : [];
+  }
+
+  #partElements(): HTMLElement[] {
+    const canvas = this.#canvas();
+    return canvas ? Array.from(canvas.querySelectorAll<HTMLElement>('.fm-part')) : [];
   }
 
   #elementsToIds(elements: Array<HTMLElement | SVGElement>): number[] {
@@ -478,5 +595,11 @@ export class CanvasInteraction {
     const i = this.#paintedElements().indexOf(el as HTMLElement);
     if (i < 0) return undefined;
     return objectIdsInPaintOrder(this.#doc.renderModel)[i];
+  }
+
+  #partIdForElement(el: Element): number | undefined {
+    const i = this.#partElements().indexOf(el as HTMLElement);
+    if (i < 0) return undefined;
+    return this.#doc.renderModel.parts[i]?.id;
   }
 }

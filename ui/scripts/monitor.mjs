@@ -92,7 +92,15 @@ await step('pickEllipse', async () => {
   await page.waitForTimeout(120);
   return page.$eval('#layout-tools button[title="Ellipse"]', (e) => e.classList.contains('active'));
 });
-const clickRel = { x: 150, y: 60 };
+await step('outsideCanvasClickWhileArmed', async () => {
+  const before = await page.$$eval('.fm-canvas .fm-obj', (els) => els.length);
+  await page.mouse.click(cb.x + cb.width + 260, cb.y + 120);
+  await page.waitForTimeout(250);
+  const after = await page.$$eval('.fm-canvas .fm-obj', (els) => els.length);
+  const active = await page.$eval('#layout-tools button[title="Ellipse"]', (e) => e.classList.contains('active'));
+  return { before, after, active };
+});
+const clickRel = { x: 620, y: 60 };
 obs.clickRel = clickRel;
 await step('placeEllipse', async () => {
   await page.mouse.click(cb.x + clickRel.x, cb.y + clickRel.y);
@@ -126,6 +134,106 @@ await step('objectsAfterResize', () =>
   page.$$eval('.fm-canvas .fm-obj', (els) => els.map((e) => e.getAttribute('style'))),
 );
 await page.screenshot({ path: `${OUT}/04-after-resize.png` });
+
+// Add a band, select it, resize its bottom edge, change its kind, then delete it.
+await step('addBand', async () => {
+  await page.click('#layout-tools button[title="Add band"]');
+  await page.waitForTimeout(300);
+  return page.$$eval('.fm-canvas .fm-part', (els) => els.length);
+});
+await step('partsAfterAdd', () =>
+  page.$$eval('.fm-canvas .fm-part', (els) =>
+    els.map((e) => {
+      const r = e.getBoundingClientRect();
+      return { height: e.style.height, rectH: Math.round(r.height) };
+    }),
+  ),
+);
+await step('bandInspectorAfterAdd', () =>
+  page.$eval('#layout-tools .le-danger-btn', (e) => ({ disabled: e.disabled, title: e.title })),
+);
+await page.screenshot({ path: `${OUT}/05-after-band-add.png` });
+
+await step('resizeBand', async () => {
+  const handles = await page.$$('.le-part-resize');
+  const h = handles.at(-1);
+  if (!h) return { handleFound: false };
+  const hb = await h.boundingBox();
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2 + 42, { steps: 5 });
+  await page.mouse.up();
+  await page.waitForTimeout(350);
+  return { handleFound: true, handleBox: hb };
+});
+await step('partsAfterBandResize', () =>
+  page.$$eval('.fm-canvas .fm-part', (els) =>
+    els.map((e) => {
+      const r = e.getBoundingClientRect();
+      return { height: e.style.height, rectH: Math.round(r.height) };
+    }),
+  ),
+);
+
+await step('setBandKind', async () => {
+  await page.$eval('#layout-tools .le-compact-select', (select) => {
+    select.value = 'footer';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.waitForTimeout(250);
+  return page.$eval('#layout-tools .le-compact-select', (select) => select.value);
+});
+await step('deleteBand', async () => {
+  await page.click('#layout-tools button[title="Delete selected band"]');
+  await page.waitForTimeout(350);
+  return page.$$eval('.fm-canvas .fm-part', (els) => els.length);
+});
+await page.screenshot({ path: `${OUT}/06-after-band-delete.png` });
+
+// Zoomed placement + transform: CSS scale must not distort model coordinates.
+await step('zoomIn', async () => {
+  await page.click('#layout-tools button[title="Zoom in"]');
+  await page.click('#layout-tools button[title="Zoom in"]');
+  await page.waitForTimeout(150);
+  return page.$eval('#layout-tools .le-zoom-num', (e) => e.textContent);
+});
+await step('canvasBoxZoomed', () => page.locator('.fm-canvas').boundingBox());
+const zbox = obs.canvasBoxZoomed;
+const zoomClickRel = { x: 230, y: 100 };
+obs.zoomClickRel = zoomClickRel;
+await step('placeRectZoomed', async () => {
+  await page.click('#layout-tools button[title="Rectangle"]');
+  await page.waitForTimeout(100);
+  await page.mouse.click(zbox.x + zoomClickRel.x * 1.2, zbox.y + zoomClickRel.y * 1.2);
+  await page.waitForTimeout(500);
+  return page.$$eval('.fm-canvas .fm-obj', (els) => els.at(-1)?.getAttribute('style'));
+});
+await step('dragRectZoomed', async () => {
+  const obj = (await page.$$('.fm-canvas .fm-obj')).at(-1);
+  if (!obj) return { objectFound: false };
+  const b = await obj.boundingBox();
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(b.x + b.width / 2 + 48, b.y + b.height / 2 + 24, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(350);
+  return page.$$eval('.fm-canvas .fm-obj', (els) => els.at(-1)?.getAttribute('style'));
+});
+await step('resizeRectZoomed', async () => {
+  const h = await page.$('.moveable-control.moveable-se');
+  if (!h) return { handleFound: false };
+  const hb = await h.boundingBox();
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(hb.x + hb.width / 2 + 48, hb.y + hb.height / 2 + 36, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(350);
+  return {
+    handleFound: true,
+    style: await page.$$eval('.fm-canvas .fm-obj', (els) => els.at(-1)?.getAttribute('style')),
+  };
+});
+await page.screenshot({ path: `${OUT}/07-after-zoom-transform.png` });
 
 // ─────────────────────────────── DUMP ────────────────────────────────────────
 const rmLogs = await page.evaluate(() => window.__rmLogs || []);

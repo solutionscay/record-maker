@@ -443,6 +443,59 @@ impl Solution {
         Ok(self.app.last_insert_rowid())
     }
 
+    /// Read one part by id, scoped to `layout_id`. Returns `None` for an
+    /// unknown/foreign id.
+    pub fn part_by_id(&self, layout_id: i64, part_id: i64) -> Result<Option<PartMeta>> {
+        let mut stmt = self.app.prepare(
+            "SELECT id, layout_id, kind, height, position FROM meta_part \
+             WHERE id=?1 AND layout_id=?2",
+        )?;
+        let mut rows = stmt.query_map(params![part_id, layout_id], |r| {
+            let kind_s: String = r.get(2)?;
+            Ok(PartMeta {
+                id: r.get(0)?,
+                layout_id: r.get(1)?,
+                kind: PartKind::parse(&kind_s).unwrap_or(PartKind::Body),
+                height: r.get(3)?,
+                position: r.get(4)?,
+            })
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Persist a part's band height, scoped to its layout. Returns the number of
+    /// rows updated (`0` ⇒ no such part in that layout).
+    pub fn set_part_height(&self, layout_id: i64, part_id: i64, height: i64) -> Result<usize> {
+        let n = self.app.execute(
+            "UPDATE meta_part SET height=?1 WHERE id=?2 AND layout_id=?3",
+            params![height, part_id, layout_id],
+        )?;
+        Ok(n)
+    }
+
+    /// Persist a part's kind, scoped to its layout. Returns the number of rows
+    /// updated (`0` ⇒ no such part in that layout).
+    pub fn set_part_kind(&self, layout_id: i64, part_id: i64, kind: PartKind) -> Result<usize> {
+        let n = self.app.execute(
+            "UPDATE meta_part SET kind=?1 WHERE id=?2 AND layout_id=?3",
+            params![kind.as_str(), part_id, layout_id],
+        )?;
+        Ok(n)
+    }
+
+    /// Delete a part from a layout. Child objects are removed by the schema's
+    /// cascading foreign key. Returns the number of parts removed.
+    pub fn delete_part(&self, layout_id: i64, part_id: i64) -> Result<usize> {
+        let n = self.app.execute(
+            "DELETE FROM meta_part WHERE id=?1 AND layout_id=?2",
+            params![part_id, layout_id],
+        )?;
+        Ok(n)
+    }
+
     /// Delete an object from a layout (#48) — the undo of a create, and the Create
     /// zone's delete. **Layout-scoped**, so a foreign/unknown id is a no-op.
     /// Returns the number of rows removed (`0` ⇒ no such object in that layout).
@@ -976,6 +1029,33 @@ mod tests {
         assert_eq!(made.kind, PartKind::Footer);
         assert_eq!(made.height, 48);
         assert!(made.position > top_pos, "appended below");
+    }
+
+    #[test]
+    fn part_height_kind_and_delete_are_layout_scoped() {
+        // Part edits are scoped to their owning layout, like object geometry.
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .unwrap();
+        let lay = s.layouts().unwrap()[0].clone();
+        let part = s.parts(lay.id).unwrap()[0].clone();
+        let object_id = s.objects(part.id).unwrap()[0].id;
+
+        assert_eq!(s.set_part_height(lay.id, part.id, 180).unwrap(), 1);
+        assert_eq!(s.part_by_id(lay.id, part.id).unwrap().unwrap().height, 180);
+        assert_eq!(s.set_part_height(lay.id + 999, part.id, 40).unwrap(), 0);
+        assert_eq!(s.part_by_id(lay.id, part.id).unwrap().unwrap().height, 180);
+
+        assert_eq!(s.set_part_kind(lay.id, part.id, PartKind::Footer).unwrap(), 1);
+        assert_eq!(s.part_by_id(lay.id, part.id).unwrap().unwrap().kind, PartKind::Footer);
+        assert_eq!(s.set_part_kind(lay.id + 999, part.id, PartKind::Header).unwrap(), 0);
+        assert_eq!(s.part_by_id(lay.id, part.id).unwrap().unwrap().kind, PartKind::Footer);
+
+        assert_eq!(s.delete_part(lay.id + 999, part.id).unwrap(), 0);
+        assert!(s.objects(part.id).unwrap().iter().any(|o| o.id == object_id));
+        assert_eq!(s.delete_part(lay.id, part.id).unwrap(), 1);
+        assert!(s.part_by_id(lay.id, part.id).unwrap().is_none());
+        assert!(s.objects(part.id).unwrap().is_empty(), "child objects cascade away");
     }
 
     #[test]

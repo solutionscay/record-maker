@@ -50,6 +50,22 @@ export function createPart(layoutId: string, kind: string, height: number): Prom
   return postJson(`/design/${layoutId}/part`, { kind, height });
 }
 
+/** Persist a band's height and return the updated band view. */
+export function setPartHeight(layoutId: string, id: number, height: number): Promise<PartView> {
+  return postJson(`/design/${layoutId}/part/${id}/height`, { height });
+}
+
+/** Persist a band's kind and return the updated band view. */
+export function setPartKind(layoutId: string, id: number, kind: string): Promise<PartView> {
+  return postJson(`/design/${layoutId}/part/${id}/kind`, { kind });
+}
+
+/** Delete a band. Objects in the band are deleted with it. */
+export async function deletePart(layoutId: string, id: number): Promise<void> {
+  const r = await fetch(`/design/${layoutId}/part/${id}/delete`, { method: 'POST' });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+}
+
 /** Delete an object (the undo of a create / the Create-zone delete). */
 export async function deleteObject(layoutId: string, id: number): Promise<void> {
   const r = await fetch(`/design/${layoutId}/object/${id}/delete`, { method: 'POST' });

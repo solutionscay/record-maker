@@ -196,6 +196,7 @@ export class EditorDoc {
   /** Record-resolved render projection, keyed by object id (label/value/…). */
   readonly #resolved = new SvelteMap<number, ObjectResolved>();
   readonly #selection = new SvelteSet<number>();
+  #selectedPartId = $state<number | null>(null);
   #hovered = $state<number | null>(null);
   #rec = $state(0);
   #total = $state(0);
@@ -272,6 +273,7 @@ export class EditorDoc {
     this.#future = [];
     this.#pending = [];
     this.#selection.clear();
+    this.#selectedPartId = null;
     this.#hovered = null;
     this.#error = null;
     this.#hydrated = true;
@@ -305,6 +307,10 @@ export class EditorDoc {
   /** The structural part record for one part. */
   getPart(id: number): Readonly<PartDoc> | undefined {
     return this.#parts.find((p) => p.id === id);
+  }
+
+  get parts(): readonly Readonly<PartDoc>[] {
+    return this.#parts;
   }
 
   /**
@@ -406,6 +412,13 @@ export class EditorDoc {
     this.#commit([{ target: 'part', id, prop: 'height', before: p.height, after: height }]);
   }
 
+  /** Set a part's semantic kind. */
+  setPartKind(id: number, kind: string): void {
+    const p = this.#parts.find((pt) => pt.id === id);
+    if (!p) return;
+    this.#commit([{ target: 'part', id, prop: 'kind', before: p.kind, after: kind }]);
+  }
+
   /** Set an object's appearance bag (#49 / Style zone) — the opaque `props` JSON
    * string, an undoable document change. The canvas's `shapeStyle` is server-
    * derived (single source, [[layout-object-types]]); after persisting, the UI
@@ -434,7 +447,24 @@ export class EditorDoc {
     if (this.#parts.some((p) => p.id === view.id)) return;
     const position = this.#parts.reduce((m, p) => Math.max(m, p.position), -1) + 1;
     this.#parts = [...this.#parts, { id: view.id, kind: view.kind, height: view.height, position }];
+    this.selectPart(view.id);
     llog('store', 'addPart', { id: view.id, kind: view.kind, position });
+  }
+
+  /** Remove a part and all objects it owns from the local document. Part lifecycle
+   * is structural today, matching `addPart`: immediate, not undo-recorded. */
+  removePart(id: number): void {
+    if (!this.#parts.some((p) => p.id === id)) return;
+    this.#parts = this.#parts.filter((p) => p.id !== id);
+    for (const [objectId, o] of [...this.#objects.entries()]) {
+      if (o.partId === id) {
+        this.#objects.delete(objectId);
+        this.#resolved.delete(objectId);
+        this.#selection.delete(objectId);
+      }
+    }
+    if (this.#selectedPartId === id) this.#selectedPartId = null;
+    llog('store', 'removePart', { id });
   }
 
   /** Update just an object's derived `shapeStyle` (session) from a fresh server
@@ -522,18 +552,24 @@ export class EditorDoc {
     return this.#selection;
   }
 
+  get selectedPartId(): number | null {
+    return this.#selectedPartId;
+  }
+
   isSelected(id: number): boolean {
     return this.#selection.has(id);
   }
 
   /** Select one object, replacing the selection unless `additive`. */
   select(id: number, additive = false): void {
+    this.#selectedPartId = null;
     if (!additive) this.#selection.clear();
     this.#selection.add(id);
   }
 
   /** Replace the selection with exactly `ids`. */
   selectOnly(ids: Iterable<number>): void {
+    this.#selectedPartId = null;
     this.#selection.clear();
     for (const id of ids) this.#selection.add(id);
     llog('select', 'selectOnly', { ids: [...this.#selection] });
@@ -541,12 +577,29 @@ export class EditorDoc {
 
   /** Toggle one object's membership in the selection. */
   toggle(id: number): void {
+    this.#selectedPartId = null;
     if (this.#selection.has(id)) this.#selection.delete(id);
     else this.#selection.add(id);
   }
 
   clearSelection(): void {
     this.#selection.clear();
+    this.#selectedPartId = null;
+  }
+
+  selectPart(id: number | null): void {
+    this.#selection.clear();
+    this.#selectedPartId = id === null || this.#parts.some((p) => p.id === id) ? id : null;
+    llog('select', 'selectPart', { id: this.#selectedPartId });
+  }
+
+  /** Lowest legal part height: never clip objects already in the band. */
+  minPartHeight(id: number): number {
+    let min = 1;
+    for (const o of this.#objects.values()) {
+      if (o.partId === id) min = Math.max(min, o.y + o.h);
+    }
+    return min;
   }
 
   // ── session: hover + record ──────────────────────────────────────────────
@@ -727,9 +780,12 @@ export class EditorDoc {
    * scope — this reacts to a document change but is never part of undo history. */
   #selectTouched(step: Step): void {
     this.#selection.clear();
+    this.#selectedPartId = null;
     for (const d of step) {
       if ((d.target === 'object' || d.target === 'life') && this.#objects.has(d.id)) {
         this.#selection.add(d.id);
+      } else if (d.target === 'part' && this.#parts.some((p) => p.id === d.id)) {
+        this.#selectedPartId = d.id;
       }
     }
   }

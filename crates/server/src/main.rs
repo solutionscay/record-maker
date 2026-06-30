@@ -957,6 +957,79 @@ async fn create_design_part(
     axum::Json(PartView { id, kind: kind.as_str(), height, objects: Vec::new() }).into_response()
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartHeightBody {
+    height: i64,
+}
+
+/// Resize a band by setting its stored height. 200 echoes the updated `PartView`;
+/// 404 when no such part belongs to the layout.
+async fn update_part_height(
+    State(st): State<AppState>,
+    Path((layout_id, part_id)): Path<(i64, i64)>,
+    Json(body): Json<PartHeightBody>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let height = body.height.max(1);
+    if sol.set_part_height(layout_id, part_id, height).unwrap() == 0 {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(part) = sol.part_by_id(layout_id, part_id).unwrap() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    axum::Json(PartView {
+        id: part.id,
+        kind: part.kind.as_str(),
+        height: part.height,
+        objects: Vec::new(),
+    })
+    .into_response()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartKindBody {
+    kind: String,
+}
+
+/// Change a band's kind. 400 for an unknown kind; 404 for a foreign/unknown part.
+async fn update_part_kind(
+    State(st): State<AppState>,
+    Path((layout_id, part_id)): Path<(i64, i64)>,
+    Json(body): Json<PartKindBody>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let Some(kind) = PartKind::parse(&body.kind) else {
+        return (StatusCode::BAD_REQUEST, "bad part kind").into_response();
+    };
+    if sol.set_part_kind(layout_id, part_id, kind).unwrap() == 0 {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(part) = sol.part_by_id(layout_id, part_id).unwrap() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    axum::Json(PartView {
+        id: part.id,
+        kind: part.kind.as_str(),
+        height: part.height,
+        objects: Vec::new(),
+    })
+    .into_response()
+}
+
+/// Delete a band from a layout. Child objects are removed with it.
+async fn delete_design_part(
+    State(st): State<AppState>,
+    Path((layout_id, part_id)): Path<(i64, i64)>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    match sol.delete_part(layout_id, part_id).unwrap() {
+        0 => StatusCode::NOT_FOUND.into_response(),
+        _ => StatusCode::OK.into_response(),
+    }
+}
+
 /// Delete an object from a layout (#48) — the Create zone's delete and the undo
 /// of a create. 200 when removed, 404 when no such object belongs to the layout.
 async fn delete_design_object(
@@ -1192,6 +1265,9 @@ fn app(state: AppState) -> Router {
         .route("/design/:layout/model", get(design_model))
         .route("/design/:layout/object", post(create_design_object))
         .route("/design/:layout/part", post(create_design_part))
+        .route("/design/:layout/part/:id/height", post(update_part_height))
+        .route("/design/:layout/part/:id/kind", post(update_part_kind))
+        .route("/design/:layout/part/:id/delete", post(delete_design_part))
         .route("/design/:layout/object/:id/geometry", post(update_object_geometry))
         .route("/design/:layout/object/:id/props", post(update_object_props))
         .route("/design/:layout/object/:id/delete", post(delete_design_object))
@@ -1759,6 +1835,61 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(resp.contains(r#""kind":"footer""#) && resp.contains(r#""height":40"#));
         assert_eq!(state.sol.lock().unwrap().parts(layout_id).unwrap().len(), before + 1);
+    }
+
+    /// Part editing: height/kind/delete round-trip through layout-scoped design
+    /// endpoints, and deleting a band removes its child objects.
+    #[tokio::test]
+    async fn design_part_editing_round_trip() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        sol.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .unwrap();
+        let layout_id = sol.layouts().unwrap()[0].id;
+        let part_id = sol.parts(layout_id).unwrap()[0].id;
+        let state = state_for(sol);
+
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/design/{layout_id}/part/{part_id}/height"),
+            r#"{"height":164}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(resp.contains(r#""height":164"#));
+        assert_eq!(state.sol.lock().unwrap().part_by_id(layout_id, part_id).unwrap().unwrap().height, 164);
+
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/design/{layout_id}/part/{part_id}/kind"),
+            r#"{"kind":"footer"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(resp.contains(r#""kind":"footer""#));
+        assert_eq!(
+            state.sol.lock().unwrap().part_by_id(layout_id, part_id).unwrap().unwrap().kind,
+            PartKind::Footer
+        );
+
+        assert_eq!(
+            post_json(state.clone(), &format!("/design/{}/part/{part_id}/height", layout_id + 999), r#"{"height":1}"#)
+                .await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            post_json(state.clone(), &format!("/design/{layout_id}/part/{part_id}/kind"), r#"{"kind":"bad"}"#)
+                .await,
+            StatusCode::BAD_REQUEST
+        );
+
+        assert!(!state.sol.lock().unwrap().objects(part_id).unwrap().is_empty());
+        assert_eq!(
+            post_json(state.clone(), &format!("/design/{layout_id}/part/{part_id}/delete"), "").await,
+            StatusCode::OK
+        );
+        let sol = state.sol.lock().unwrap();
+        assert!(sol.part_by_id(layout_id, part_id).unwrap().is_none());
+        assert!(sol.objects(part_id).unwrap().is_empty(), "objects deleted with the band");
     }
 
     /// #48 delete + #49 props: a placed object can have its props set (shape style

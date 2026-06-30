@@ -251,7 +251,6 @@ struct ListRow {
 }
 
 struct FieldView {
-    id: i64,
     name: String,
 }
 
@@ -488,7 +487,7 @@ async fn browse(
                 table: table.name.clone(),
                 fields: fields
                     .iter()
-                    .map(|f| FieldView { id: f.id, name: f.name.clone() })
+                    .map(|f| FieldView { name: f.name.clone() })
                     .collect(),
                 records: records
                     .into_iter()

@@ -29,14 +29,6 @@
     {% endfor %}
   </tbody>
 </table>
-
-<h3>New record</h3>
-<form class="newrec" method="post" action="/browse/{{ layout_id }}">
-  {% for f in fields %}
-  <label>{{ f.name }}<input name="f{{ f.id }}"></label>
-  {% endfor %}
-  <button type="submit">Add</button>
-</form>
 {% endblock %}
 
 {% block statusbar %}<span>{{ table }} · Table view</span>{% endblock %}

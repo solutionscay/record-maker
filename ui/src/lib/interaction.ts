@@ -10,6 +10,12 @@
 // store does NOT create a feedback loop. A whole gesture commits as ONE undo step
 // (mark on end) and persists to the engine via the bulk axum contract.
 //
+// Press-drag in one gesture: moveable only drags the element it already targets
+// at mousedown, so we TARGET THE OBJECT UNDER THE CURSOR ON HOVER. By the time
+// you press, moveable is already on it and its native drag starts immediately —
+// no select-then-grab two-step, and no fragile selecto→moveable handoff. A
+// multi-selection keeps the group as the target while you hover its members.
+//
 // Object identity without polluting the parity-checked canvas DOM: the Nth
 // painted `.fm-obj` element maps to the Nth id in renderModel paint order (see
 // canvas-edit.ts), so selections and hits resolve to ids by index — no data-*
@@ -27,12 +33,18 @@ export class CanvasInteraction {
   readonly #layoutId: string;
   readonly #moveable: Moveable;
   readonly #selecto: Selecto;
-  /** True between a gesture's *Start and *End, so reactive re-syncs don't fight
-   * the live transform moveable is driving. */
+
+  /** True between a gesture's *Start and *End, so reactive re-syncs and hover
+   * re-targeting don't fight the live transform moveable is driving. */
   #gesturing = false;
   /** Whether the active gesture actually moved/resized something — gates mark +
    * persist so a plain click (select, no movement) doesn't POST or push undo. */
   #moved = false;
+  /** Object id currently under the cursor (drives hover pre-targeting). */
+  #hoverId: number | null = null;
+  /** Object ids moveable currently targets, and a cheap key to dedupe setState. */
+  #targetIds = new Set<number>();
+  #targetKey = '';
 
   constructor(stage: HTMLElement, doc: EditorDoc, layoutId: string) {
     this.#stage = stage;
@@ -49,12 +61,14 @@ export class CanvasInteraction {
       snapThreshold: SNAP_THRESHOLD,
       isDisplaySnapDigit: false,
       elementGuidelines: [],
-      bounds: { left: 0, top: 0, position: 'css' },
       origin: false,
     });
 
-    // ── drag (single + group) ──
-    this.#moveable.on('dragStart', () => this.#begin());
+    // ── drag (single + group). Single-target start also makes it the selection. ──
+    this.#moveable.on('dragStart', (e) => {
+      this.#begin();
+      this.#selectFromTarget(e.target);
+    });
     this.#moveable.on('drag', (e) => this.#applyMove(e.target, e.left, e.top));
     this.#moveable.on('dragEnd', () => this.#end());
     this.#moveable.on('dragGroupStart', () => this.#begin());
@@ -62,7 +76,10 @@ export class CanvasInteraction {
     this.#moveable.on('dragGroupEnd', () => this.#end());
 
     // ── resize (single + group) — e.drag carries the new left/top for top/left handles ──
-    this.#moveable.on('resizeStart', () => this.#begin());
+    this.#moveable.on('resizeStart', (e) => {
+      this.#begin();
+      this.#selectFromTarget(e.target);
+    });
     this.#moveable.on('resize', (e) => this.#applyResize(e.target, e.width, e.height, e.drag.left, e.drag.top));
     this.#moveable.on('resizeEnd', () => this.#end());
     this.#moveable.on('resizeGroupStart', () => this.#begin());
@@ -87,7 +104,7 @@ export class CanvasInteraction {
     this.#selecto.on('dragStart', (e) => {
       const input = e.inputEvent;
       const target = input.target as Element | null;
-      // moveable's own control box → it's a transform; let moveable have it.
+      // moveable's own control box (a resize handle / the drag area) → its gesture.
       if (target && this.#moveable.isMoveableElement(target)) {
         e.stop();
         return;
@@ -96,40 +113,88 @@ export class CanvasInteraction {
       if (!objEl) return; // empty canvas → selecto runs its marquee
       const id = this.#idForElement(objEl);
       if (id === undefined) return;
-      // Shift adjusts the selection without starting a drag.
+      // Shift toggles selection membership without starting a drag.
       if (input.shiftKey) {
         this.#doc.toggle(id);
         e.stop();
+        this.#updateTarget();
         return;
       }
-      // Already in the selection → moveable drags the (possibly multi-) group.
-      if (this.#doc.isSelected(id)) {
+      // Hover already made this object (or its group) moveable's target → let
+      // moveable drag it in THIS gesture. This is the press-drag-in-one path.
+      if (this.#targetIds.has(id)) {
         e.stop();
         return;
       }
-      // Unselected object: select it AND hand THIS gesture to moveable, so a
-      // press + drag moves it in one motion (no select-then-grab two-step).
+      // Not pre-targeted (e.g. a touch with no hover): select it so the next press
+      // drags. Retarget immediately so it's grabbable.
       this.#doc.selectOnly([id]);
+      this.#updateTarget();
       e.stop();
-      this.#moveable.setState({ target: [objEl] }, () => this.#moveable.dragStart(input));
     });
+
+    this.#stage.addEventListener('pointermove', this.#onPointerMove);
+    this.#stage.addEventListener('pointerleave', this.#onPointerLeave);
   }
 
-  /** Reflect the store's selection (and current geometry) into moveable: target
-   * the selected elements and offer the rest as snap guidelines. Skipped during a
-   * live gesture, which moveable owns. Call this reactively whenever the store's
-   * selection or renderModel changes. */
-  syncSelection(): void {
-    if (this.#gesturing) return;
-    const ids = [...this.#doc.selection];
-    const targets = ids.map((id) => this.#elementForId(id)).filter((el): el is HTMLElement => !!el);
-    const guidelines = this.#paintedElements().filter((el) => !targets.includes(el));
-    this.#moveable.setState({ target: targets, elementGuidelines: guidelines });
+  /** Reconcile moveable's target with the store selection (called reactively when
+   * selection or geometry changes — e.g. after an undo). No-op during a gesture. */
+  refresh(): void {
+    this.#updateTarget();
   }
 
   destroy(): void {
+    this.#stage.removeEventListener('pointermove', this.#onPointerMove);
+    this.#stage.removeEventListener('pointerleave', this.#onPointerLeave);
     this.#moveable.destroy();
     this.#selecto.destroy();
+  }
+
+  // ── hover pre-targeting ──
+
+  #onPointerMove = (e: PointerEvent): void => {
+    if (this.#gesturing) return;
+    const t = e.target as Element | null;
+    // Over moveable's own control box → keep the current target (don't flicker).
+    if (t && this.#moveable.isMoveableElement(t)) return;
+    const objEl = (t?.closest('.fm-obj') ?? null) as HTMLElement | null;
+    const id = objEl ? this.#idForElement(objEl) ?? null : null;
+    if (id === this.#hoverId) return;
+    this.#hoverId = id;
+    this.#updateTarget();
+  };
+
+  #onPointerLeave = (): void => {
+    if (this.#gesturing || this.#hoverId === null) return;
+    this.#hoverId = null;
+    this.#updateTarget();
+  };
+
+  /** Choose moveable's target: the hovered object (so a press grabs it), unless
+   * you're hovering a member of a 2+ selection (then keep the whole group so the
+   * press drags the group). Falls back to the selection when not hovering, and to
+   * nothing when idle. Dedupes redundant setState by a target-id key. */
+  #updateTarget(): void {
+    if (this.#gesturing) return;
+    const sel = [...this.#doc.selection];
+    const selSet = new Set(sel);
+    let ids: number[];
+    if (this.#hoverId !== null && selSet.has(this.#hoverId) && sel.length >= 2) {
+      ids = sel; // hovering a group member → drag the whole group
+    } else if (this.#hoverId !== null) {
+      ids = [this.#hoverId]; // hovering any object → grab just it
+    } else if (sel.length > 0) {
+      ids = sel; // not hovering → keep the selection box up
+    } else {
+      ids = [];
+    }
+    const key = ids.slice().sort((a, b) => a - b).join(',');
+    if (key === this.#targetKey) return;
+    this.#targetKey = key;
+    this.#targetIds = new Set(ids);
+    const targets = ids.map((id) => this.#elementForId(id)).filter((el): el is HTMLElement => !!el);
+    const guidelines = this.#paintedElements().filter((el) => !targets.includes(el));
+    this.#moveable.setState({ target: targets, elementGuidelines: guidelines });
   }
 
   // ── gesture lifecycle ──
@@ -140,14 +205,21 @@ export class CanvasInteraction {
   }
 
   /** End a gesture: if it actually changed geometry, seal one undo step and
-   * persist the moved/resized group; a no-move click does neither. */
+   * persist the moved/resized group; a no-move click does neither. Then re-target. */
   #end(): void {
     this.#gesturing = false;
     if (this.#moved) {
       this.#doc.mark();
       void this.#persistSelection();
     }
-    this.syncSelection();
+    this.#targetKey = ''; // force a re-sync after the gesture
+    this.#updateTarget();
+  }
+
+  /** Make the dragged/resized single target the selection (if it wasn't already). */
+  #selectFromTarget(el: HTMLElement | SVGElement): void {
+    const id = this.#idForElement(el);
+    if (id !== undefined && !this.#doc.isSelected(id)) this.#doc.selectOnly([id]);
   }
 
   #applyMove(target: HTMLElement | SVGElement, left: number, top: number): void {

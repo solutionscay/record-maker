@@ -61,7 +61,7 @@
   $effect(() => {
     void [...doc.selection];
     void doc.renderModel;
-    interaction?.syncSelection();
+    interaction?.refresh();
   });
 </script>
 

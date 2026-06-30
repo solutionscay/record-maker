@@ -29,6 +29,7 @@
 
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import type { DesignModel, FieldChoice, ObjectView, PartView } from './model';
+import { llog } from './log';
 
 // ── document types ──────────────────────────────────────────────────────────
 
@@ -274,6 +275,11 @@ export class EditorDoc {
     this.#hovered = null;
     this.#error = null;
     this.#hydrated = true;
+    llog('store', 'hydrated', {
+      parts: this.#parts.length,
+      objects: this.#objects.size,
+      fields: this.#fields.length,
+    });
   }
 
   // ── document read accessors ──────────────────────────────────────────────
@@ -413,8 +419,12 @@ export class EditorDoc {
    * its owning `partId` (the view carries geometry, not membership). Records a
    * `life` diff so undo deletes it and redo restores it exactly. */
   addObject(view: ObjectView, partId: number): void {
-    if (this.#objects.has(view.id)) return;
+    if (this.#objects.has(view.id)) {
+      llog('store', 'addObject SKIPPED (id already present)', { id: view.id });
+      return;
+    }
     this.#commitLife(view.id, null, this.#snapshotFromView(view, partId));
+    llog('store', 'addObject', { id: view.id, partId, kind: view.kind, x: view.x, y: view.y, w: view.w, h: view.h });
   }
 
   /** Append a band the server just created (#48). A plain document mutation —
@@ -424,6 +434,7 @@ export class EditorDoc {
     if (this.#parts.some((p) => p.id === view.id)) return;
     const position = this.#parts.reduce((m, p) => Math.max(m, p.position), -1) + 1;
     this.#parts = [...this.#parts, { id: view.id, kind: view.kind, height: view.height, position }];
+    llog('store', 'addPart', { id: view.id, kind: view.kind, position });
   }
 
   /** Update just an object's derived `shapeStyle` (session) from a fresh server
@@ -445,6 +456,7 @@ export class EditorDoc {
       resolved: { ...(this.#resolved.get(id) ?? EMPTY_RESOLVED) },
     };
     this.#commitLife(id, snap, null);
+    llog('store', 'removeObject', { id });
   }
 
   /** Refresh an object's SESSION render projection (label/value/shape/shapeStyle)
@@ -524,6 +536,7 @@ export class EditorDoc {
   selectOnly(ids: Iterable<number>): void {
     this.#selection.clear();
     for (const id of ids) this.#selection.add(id);
+    llog('select', 'selectOnly', { ids: [...this.#selection] });
   }
 
   /** Toggle one object's membership in the selection. */
@@ -573,6 +586,7 @@ export class EditorDoc {
   setTool(tool: ToolKind, fieldId: number | null = null): void {
     this.#activeTool = tool;
     this.#toolFieldId = tool === 'field' ? fieldId : null;
+    llog('tool', 'setTool', { tool, fieldId: this.#toolFieldId });
   }
 
   // ── session: canvas zoom (#62 Zoom zone) ─────────────────────────────────

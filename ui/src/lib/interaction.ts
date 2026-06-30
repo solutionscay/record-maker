@@ -29,6 +29,7 @@ import type { ObjectView } from './model';
 import { GRID, SNAP_THRESHOLD, clampOrigin, elementsToObjectIds, objectIdsInPaintOrder } from './canvas-edit';
 import { defaultBox, defaultProps, partAtY } from './create';
 import { createObject } from './persist';
+import { llog, lerror } from './log';
 
 export class CanvasInteraction {
   readonly #stage: HTMLElement;
@@ -74,27 +75,29 @@ export class CanvasInteraction {
 
     // ── drag (single + group). Single-target start also makes it the selection. ──
     this.#moveable.on('dragStart', (e) => {
+      llog('drag', 'dragStart', { id: this.#idForElement(e.target) });
       this.#begin();
       this.#selectFromTarget(e.target);
     });
     this.#moveable.on('drag', (e) => this.#applyMove(e.target, e.left, e.top));
-    this.#moveable.on('dragEnd', () => this.#end());
+    this.#moveable.on('dragEnd', () => this.#end('drag'));
     this.#moveable.on('dragGroupStart', () => this.#begin());
     this.#moveable.on('dragGroup', (e) => e.events.forEach((ev) => this.#applyMove(ev.target, ev.left, ev.top)));
-    this.#moveable.on('dragGroupEnd', () => this.#end());
+    this.#moveable.on('dragGroupEnd', () => this.#end('drag'));
 
     // ── resize (single + group) — e.drag carries the new left/top for top/left handles ──
     this.#moveable.on('resizeStart', (e) => {
+      llog('resize', 'resizeStart', { id: this.#idForElement(e.target) });
       this.#begin();
       this.#selectFromTarget(e.target);
     });
     this.#moveable.on('resize', (e) => this.#applyResize(e.target, e.width, e.height, e.drag.left, e.drag.top));
-    this.#moveable.on('resizeEnd', () => this.#end());
+    this.#moveable.on('resizeEnd', () => this.#end('resize'));
     this.#moveable.on('resizeGroupStart', () => this.#begin());
     this.#moveable.on('resizeGroup', (e) =>
       e.events.forEach((ev) => this.#applyResize(ev.target, ev.width, ev.height, ev.drag.left, ev.drag.top)),
     );
-    this.#moveable.on('resizeGroupEnd', () => this.#end());
+    this.#moveable.on('resizeGroupEnd', () => this.#end('resize'));
 
     // ── marquee multi-select ──
     this.#selecto = new Selecto({
@@ -113,6 +116,11 @@ export class CanvasInteraction {
       const input = e.inputEvent;
       // A non-pointer tool is armed → this press PLACES an object, not selects.
       if (this.#doc.activeTool !== 'pointer') {
+        llog('place', 'press while tool armed', {
+          tool: this.#doc.activeTool,
+          clientX: input.clientX,
+          clientY: input.clientY,
+        });
         e.stop();
         void this.#placeAt(input.clientX, input.clientY);
         return;
@@ -120,15 +128,23 @@ export class CanvasInteraction {
       const target = input.target as Element | null;
       // moveable's own control box (a resize handle / the drag area) → its gesture.
       if (target && this.#moveable.isMoveableElement(target)) {
+        llog('drag', 'press on moveable control box → moveable owns gesture');
         e.stop();
         return;
       }
       const objEl = (target?.closest('.fm-obj') ?? null) as HTMLElement | null;
-      if (!objEl) return; // empty canvas → selecto runs its marquee
+      if (!objEl) {
+        llog('select', 'press on empty canvas → marquee');
+        return; // empty canvas → selecto runs its marquee
+      }
       const id = this.#idForElement(objEl);
-      if (id === undefined) return;
+      if (id === undefined) {
+        llog('target', 'press on object but id UNRESOLVED', { painted: this.#paintedElements().length });
+        return;
+      }
       // Shift toggles selection membership without starting a drag.
       if (input.shiftKey) {
+        llog('select', 'shift-toggle membership', { id });
         this.#doc.toggle(id);
         e.stop();
         this.#updateTarget();
@@ -137,11 +153,13 @@ export class CanvasInteraction {
       // Hover already made this object (or its group) moveable's target → let
       // moveable drag it in THIS gesture. This is the press-drag-in-one path.
       if (this.#targetIds.has(id)) {
+        llog('drag', 'press on pre-targeted object → moveable drags it', { id });
         e.stop();
         return;
       }
       // Not pre-targeted (e.g. a touch with no hover): select it so the next press
       // drags. Retarget immediately so it's grabbable.
+      llog('select', 'press on un-targeted object → select + retarget', { id });
       this.#doc.selectOnly([id]);
       this.#updateTarget();
       e.stop();
@@ -149,6 +167,7 @@ export class CanvasInteraction {
 
     this.#stage.addEventListener('pointermove', this.#onPointerMove);
     this.#stage.addEventListener('pointerleave', this.#onPointerLeave);
+    llog('init', 'CanvasInteraction ready', { layoutId, painted: this.#paintedElements().length });
   }
 
   /** Reconcile moveable's target with the store selection (called reactively when
@@ -160,7 +179,9 @@ export class CanvasInteraction {
   /** Tell the interaction layer the current canvas zoom (#62), so client→model
    * pointer conversion during placement divides by it. */
   setZoom(zoom: number): void {
-    this.#zoom = zoom > 0 ? zoom : 1;
+    const z = zoom > 0 ? zoom : 1;
+    if (z !== this.#zoom) llog('zoom', 'setZoom', { zoom: z });
+    this.#zoom = z;
   }
 
   /** Place a new object where the user clicked while a tool is armed (#48). Maps
@@ -170,9 +191,13 @@ export class CanvasInteraction {
    * its value object and its spawned caption label (#60). */
   async #placeAt(clientX: number, clientY: number): Promise<void> {
     const tool = this.#doc.activeTool;
-    if (tool === 'pointer' || this.#placing) return;
+    if (tool === 'pointer' || this.#placing) {
+      llog('place', 'placeAt ignored', { tool, placing: this.#placing });
+      return;
+    }
     const canvas = this.#canvas();
     if (!canvas) {
+      llog('error', 'placeAt: no .fm-canvas in stage');
       this.#doc.setTool('pointer');
       return;
     }
@@ -180,20 +205,39 @@ export class CanvasInteraction {
     const z = this.#zoom || 1;
     const cx = Math.max(0, Math.round((clientX - rect.left) / z));
     const cy = Math.max(0, (clientY - rect.top) / z);
+    // The single most useful line for "object landed in the wrong place": the
+    // client point, the canvas rect it's measured against, the zoom, and the
+    // resulting MODEL coordinates (the object's top-left, not its centre).
+    llog('place', 'click → model coords', {
+      clientX,
+      clientY,
+      canvasLeft: Math.round(rect.left),
+      canvasTop: Math.round(rect.top),
+      canvasW: Math.round(rect.width),
+      canvasH: Math.round(rect.height),
+      zoom: z,
+      modelX: cx,
+      modelY: Math.round(cy),
+    });
     const where = partAtY(this.#doc.renderModel, cy);
     if (!where) {
+      llog('place', 'no part under the click', { modelY: Math.round(cy) });
       this.#doc.setTool('pointer');
       return;
     }
     const box = defaultBox(tool);
     const y = Math.max(0, Math.round(where.localY));
+    llog('place', 'resolved drop', { tool, partId: where.partId, x: cx, partLocalY: y, w: box.w, h: box.h });
 
     this.#placing = true;
     try {
       let views: ObjectView[];
       if (tool === 'field') {
         const fieldId = this.#doc.toolFieldId;
-        if (fieldId == null) return; // no field chosen — nothing to bind
+        if (fieldId == null) {
+          llog('place', 'field tool armed but no field chosen — nothing to place');
+          return;
+        }
         views = await createObject(this.#layoutId, {
           partId: where.partId,
           kind: 'field',
@@ -217,11 +261,18 @@ export class CanvasInteraction {
           rec: this.#doc.rec,
         });
       }
+      llog('create', 'server created object(s)', {
+        objects: views.map((v) => ({ id: v.id, kind: v.kind, x: v.x, y: v.y, w: v.w, h: v.h })),
+      });
       for (const v of views) this.#doc.addObject(v, where.partId);
       this.#doc.mark();
       const placed = views.at(-1); // the field VALUE (its label sorts before it)
-      if (placed) this.#doc.selectOnly([placed.id]);
+      if (placed) {
+        this.#doc.selectOnly([placed.id]);
+        llog('place', 'added to store + selected — awaiting reactive re-target', { selectedId: placed.id });
+      }
     } catch (e) {
+      lerror('place', 'create failed', e);
       this.#doc.setError(e instanceof Error ? e.message : String(e));
     } finally {
       this.#placing = false;
@@ -269,6 +320,7 @@ export class CanvasInteraction {
       this.#targetKey = '';
       this.#targetIds = new Set();
       this.#moveable.setState({ target: [], elementGuidelines: [] });
+      llog('target', 'tool armed → moveable target cleared');
       return;
     }
     const sel = [...this.#doc.selection];
@@ -290,6 +342,18 @@ export class CanvasInteraction {
     const targets = ids.map((id) => this.#elementForId(id)).filter((el): el is HTMLElement => !!el);
     const guidelines = this.#paintedElements().filter((el) => !targets.includes(el));
     this.#moveable.setState({ target: targets, elementGuidelines: guidelines });
+    // THE key line for "resize does nothing": if `chosenIds` has an id but
+    // `resolvedEls` is fewer, moveable has no element to attach handles to — the
+    // store id didn't map to a painted `.fm-obj` (stale paint order / DOM not yet
+    // committed after a create).
+    llog('target', 'moveable target set', {
+      hoverId: this.#hoverId,
+      selection: sel,
+      chosenIds: ids,
+      resolvedEls: targets.length,
+      paintedCount: this.#paintedElements().length,
+      paintOrderIds: objectIdsInPaintOrder(this.#doc.renderModel),
+    });
   }
 
   // ── gesture lifecycle ──
@@ -301,8 +365,9 @@ export class CanvasInteraction {
 
   /** End a gesture: if it actually changed geometry, seal one undo step and
    * persist the moved/resized group; a no-move click does neither. Then re-target. */
-  #end(): void {
+  #end(kind: 'drag' | 'resize' = 'drag'): void {
     this.#gesturing = false;
+    llog(kind, `${kind}End`, { moved: this.#moved, selection: [...this.#doc.selection] });
     if (this.#moved) {
       this.#doc.mark();
       void this.#persistSelection();
@@ -319,20 +384,39 @@ export class CanvasInteraction {
 
   #applyMove(target: HTMLElement | SVGElement, left: number, top: number): void {
     const id = this.#idForElement(target);
-    if (id === undefined) return;
+    if (id === undefined) {
+      llog('target', 'drag: target element has NO mapped id — move is a no-op', {
+        painted: this.#paintedElements().length,
+      });
+      return;
+    }
     this.#moved = true;
     this.#doc.setObjectGeometry(id, { x: clampOrigin(left), y: clampOrigin(top) });
+    llog('drag', 'apply move', { id, x: clampOrigin(left), y: clampOrigin(top) });
   }
 
   #applyResize(target: HTMLElement | SVGElement, width: number, height: number, left: number, top: number): void {
     const id = this.#idForElement(target);
-    if (id === undefined) return;
+    if (id === undefined) {
+      llog('target', 'resize: target element has NO mapped id — resize is a no-op', {
+        painted: this.#paintedElements().length,
+        paintOrderIds: objectIdsInPaintOrder(this.#doc.renderModel),
+      });
+      return;
+    }
     this.#moved = true;
     this.#doc.setObjectGeometry(id, {
       x: clampOrigin(left),
       y: clampOrigin(top),
       w: Math.max(1, Math.round(width)),
       h: Math.max(1, Math.round(height)),
+    });
+    llog('resize', 'apply resize', {
+      id,
+      w: Math.max(1, Math.round(width)),
+      h: Math.max(1, Math.round(height)),
+      x: clampOrigin(left),
+      y: clampOrigin(top),
     });
   }
 
@@ -344,6 +428,7 @@ export class CanvasInteraction {
       .filter((o): o is NonNullable<typeof o> => !!o)
       .map((o) => ({ id: o.id, x: o.x, y: o.y, w: o.w, h: o.h }));
     if (items.length === 0) return;
+    llog('persist', 'POST geometry', { items });
     try {
       const r = await fetch(`/design/${this.#layoutId}/geometry`, {
         method: 'POST',
@@ -351,10 +436,11 @@ export class CanvasInteraction {
         body: JSON.stringify(items),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      llog('persist', 'geometry saved', { count: items.length });
     } catch (e) {
       // The store already reflects the edit; surface the persist failure rather
       // than tearing down the in-memory state (a reload would reveal divergence).
-      console.error('failed to persist object geometry', e);
+      lerror('persist', 'failed to persist object geometry', e);
     }
   }
 

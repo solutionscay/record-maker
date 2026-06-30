@@ -1,0 +1,61 @@
+// Persistence wrappers for the Layout editor's Create/Style zones (#62/#48/#49).
+// Thin fetch helpers over the design endpoints (ADR #42). The store is the source
+// of truth; these only SYNC server state and return what the server assigns —
+// new object ids (so the store can add the object undoably) and the server-derived
+// shape style (the single source of that derivation, [[layout-object-types]]).
+
+import type { ObjectView, PartView } from './model';
+
+/** The object the Create zone places (#48). For a `field`, `fieldId` names which
+ * field to bind (the server builds the binding + spawns the caption label). `rec`
+ * is the record the canvas shows, so the returned object resolves its live value. */
+export interface NewObjectRequest {
+  partId: number;
+  kind: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  rec?: number;
+  fieldId?: number | null;
+  content?: string | null;
+  props?: Record<string, unknown> | null;
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return (await r.json()) as T;
+}
+
+/** Create an object; returns the created view(s) — a field returns its value
+ * object AND its spawned caption label (#60), other kinds return one. */
+export function createObject(layoutId: string, req: NewObjectRequest): Promise<ObjectView[]> {
+  return postJson(`/design/${layoutId}/object`, req);
+}
+
+/** Append a band; returns its (object-less) part view. */
+export function createPart(layoutId: string, kind: string, height: number): Promise<PartView> {
+  return postJson(`/design/${layoutId}/part`, { kind, height });
+}
+
+/** Delete an object (the undo of a create / the Create-zone delete). */
+export async function deleteObject(layoutId: string, id: number): Promise<void> {
+  const r = await fetch(`/design/${layoutId}/object/${id}/delete`, { method: 'POST' });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+}
+
+/** Commit a props bag (#49); returns the server-derived shape style for the
+ * canvas (empty for a non-shape object). */
+export async function setObjectProps(
+  layoutId: string,
+  id: number,
+  props: Record<string, unknown>,
+): Promise<string> {
+  const res = await postJson<{ shapeStyle: string }>(`/design/${layoutId}/object/${id}/props`, { props });
+  return res.shapeStyle;
+}

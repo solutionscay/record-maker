@@ -1,53 +1,31 @@
 <script lang="ts">
-  // Layout Mode editor island. On mount it fetches the read model from the
-  // engine (ADR #42 HTTP endpoint) and HYDRATES the editor document store (#45)
-  // — the reactive core that owns document/session/presence state and the undo
-  // history. The canvas renders from `doc.renderModel` (a reactive projection of
-  // the store), NOT the raw fetch, so edits re-render reactively. The PURE
-  // <LayoutPreview> emits DOM byte-identical (after normalization) to Browse's
-  // askama band macro (issue #44); its `fm-*` styling is inherited from the
-  // server's shell.html.
+  // Layout Mode editor CANVAS island. The editor document store (#45) is created
+  // and hydrated by the coordinator (main.ts) and SHARED with the rail-tools
+  // island, so both surfaces read/write ONE store (issue #62). This component owns
+  // only the canvas: it renders from `doc.renderModel` (a reactive projection of
+  // the store) and stands up the interaction layer (#46).
   //
-  // The interaction layer (#46) is wired as editor chrome: a CanvasInteraction
-  // binds moveable (drag/resize/snap/group) + selecto (marquee multi-select) to
-  // the store and persists committed geometry via the bulk axum contract. It
-  // attaches its own listeners to the stage wrapper and never touches the pure
-  // <LayoutPreview> DOM, so the #44 parity golden is untouched.
-  import type { DesignModel } from './lib/model';
-  import { EditorDoc } from './lib/doc.svelte';
+  // The PURE <LayoutPreview> emits DOM byte-identical (after normalization) to
+  // Browse's askama band macro (#44); its `fm-*` styling is inherited from the
+  // server's shell.html. Zoom (#62) is a viewport concern: the `.le-workspace`
+  // wrapper is CSS-scaled, while moveable hosts on the UNSCALED `.le-stage` so its
+  // control box stays crisp; the interaction layer is told the zoom so pointer
+  // placement maps back to model coordinates.
+  import type { EditorDoc } from './lib/doc.svelte';
   import { CanvasInteraction } from './lib/interaction';
   import LayoutPreview from './lib/LayoutPreview.svelte';
 
-  let { layoutId = '' }: { layoutId?: string } = $props();
+  let { doc, layoutId = '' }: { doc: EditorDoc; layoutId?: string } = $props();
 
-  const doc = new EditorDoc();
-  let error = $state<string | null>(null);
   let stage = $state<HTMLElement>();
 
-  $effect(() => {
-    let cancelled = false;
-    fetch(`/design/${layoutId}/model`)
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data: DesignModel) => {
-        if (!cancelled) doc.hydrate(data);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) error = e instanceof Error ? e.message : String(e);
-      });
-    return () => {
-      cancelled = true;
-    };
-  });
-
   // Stand the interaction layer up once the canvas is in the DOM; tear it down on
-  // unmount / layout change. moveable + selecto bind to the store, not this island.
+  // unmount. moveable + selecto bind to the shared store, not this island.
   let interaction: CanvasInteraction | null = null;
   $effect(() => {
     if (!doc.hydrated || !stage) return;
     const ix = new CanvasInteraction(stage, doc, layoutId);
+    ix.setZoom(doc.zoom);
     interaction = ix;
     return () => {
       ix.destroy();
@@ -55,21 +33,34 @@
     };
   });
 
-  // Keep moveable's control box in sync with the store: re-run on any selection
-  // or geometry change (e.g. an undo while the selection holds). The controller
-  // ignores syncs during a live gesture, which it owns.
+  // Keep moveable's control box in sync with the store: re-run on any selection,
+  // geometry, or active-tool change (arming a tool drops the target so a press
+  // places instead of grabs). The controller ignores syncs during a live gesture.
   $effect(() => {
     void [...doc.selection];
     void doc.renderModel;
+    void doc.activeTool;
     interaction?.refresh();
+  });
+
+  // Push the current zoom into the interaction layer so placement coordinates
+  // compensate for the CSS scale.
+  $effect(() => {
+    interaction?.setZoom(doc.zoom);
   });
 </script>
 
-{#if error}
-  <p class="layout-editor-msg layout-editor-error">Failed to load layout: {error}</p>
+{#if doc.error}
+  <p class="layout-editor-msg layout-editor-error">Failed to load layout: {doc.error}</p>
 {:else if doc.hydrated}
-  <div class="le-stage" bind:this={stage}>
-    <LayoutPreview model={doc.renderModel} />
+  <div
+    class="le-stage"
+    class:placing={doc.activeTool !== 'pointer'}
+    bind:this={stage}
+  >
+    <div class="le-workspace" style={`transform: scale(${doc.zoom}); transform-origin: top left;`}>
+      <LayoutPreview model={doc.renderModel} />
+    </div>
   </div>
 {:else}
   <p class="layout-editor-msg">Loading…</p>
@@ -91,9 +82,22 @@
   .le-stage {
     position: relative;
     touch-action: none;
+    overflow: auto;
+    min-height: calc(100vh - 8rem);
+  }
+  /* The zoom layer: transform scales the canvas without reflowing the chrome.
+     `width: max-content` keeps it sized to the canvas. */
+  .le-workspace {
+    width: max-content;
   }
   .le-stage :global(.fm-obj) {
     cursor: move;
     user-select: none;
+  }
+  /* A tool is armed → the canvas is a placement surface: show a crosshair and
+     stop objects advertising "move". */
+  .le-stage.placing,
+  .le-stage.placing :global(.fm-obj) {
+    cursor: crosshair;
   }
 </style>

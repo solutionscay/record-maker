@@ -38,12 +38,23 @@ export interface ObjectView {
   binding: string;
   /** Static text of a `text` object (its own slot); empty for field/shape objects. */
   content: string;
+  /** Raw appearance bag JSON the Style zone edits (#49); empty when unset. Carried
+   * alongside the server-derived `shapeStyle` so the inspector reads/writes the
+   * underlying `fill`/`stroke`/… keys while the canvas renders from `shapeStyle`. */
+  props: string;
   /** Resolved field label (kept for the inspector; no longer rendered inline). */
   label: string;
   /** Live field value (shown in the `fm-fvalue` span); empty for non-fields. */
   value: string;
   /** Server-derived inline CSS for a shape's appearance; empty for non-shapes. */
   shapeStyle: string;
+}
+
+/** A bindable field on the layout's primary table — the Field tool's dropdown
+ * choices (#48/#62). Mirrors the server's `FieldChoice`. */
+export interface FieldChoice {
+  id: number;
+  name: string;
 }
 
 /** One layout part (band) and the objects it contains, ordered back→front. */
@@ -68,6 +79,8 @@ export interface DesignModel {
   total: number;
   /** Canvas width in px. */
   width: number;
+  /** The primary table's fields — what the Create zone's Field tool offers. */
+  fields: FieldChoice[];
   /** Layout parts, rendered top→bottom in array order. */
   parts: PartView[];
 }

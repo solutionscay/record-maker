@@ -28,7 +28,7 @@
 // drag bind onto it without reshaping the store.
 
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
-import type { DesignModel, ObjectView, PartView } from './model';
+import type { DesignModel, FieldChoice, ObjectView, PartView } from './model';
 
 // ── document types ──────────────────────────────────────────────────────────
 
@@ -52,6 +52,8 @@ export interface ObjectDoc {
   binding: string;
   /** Static text of a `text` object — its own slot, distinct from `binding`. */
   content: string;
+  /** Opaque appearance bag JSON (#49) — what the Style zone edits; empty if unset. */
+  props: string;
 }
 
 /** A layout part/band — the structural part contract (#43): id/kind/height plus
@@ -65,6 +67,13 @@ export interface PartDoc {
 }
 
 // ── session types ───────────────────────────────────────────────────────────
+
+/** The Create-zone tool palette (#62/#48). `pointer` is the select/drag tool
+ * (the canvas's default behaviour); every other value ARMS the canvas so the next
+ * click places that object kind. A `field` placement also needs a bound field —
+ * carried in [`EditorDoc.toolFieldId`]. Part bands are added by a separate rail
+ * action (they stack, not click-placed), so they are not a placement tool. */
+export type ToolKind = 'pointer' | 'text' | 'line' | 'rect' | 'ellipse' | 'field';
 
 /** The server-resolved render projection of an object (#44/#60): whether it is a
  * bound `field` (its field id, label, live value) or a `shape` (its derived
@@ -118,18 +127,31 @@ export type ObjectProp =
   | 'readOnly'
   | 'binding'
   | 'content'
+  | 'props'
   | 'kind'
   | 'partId';
 
 /** The part properties a part diff may target. */
 export type PartProp = 'height' | 'position' | 'kind';
 
-/** One reversible change to document state. `before`/`after` are the EXACT prior
- * and next primitive values, so a revert restores geometry/props byte-for-byte
- * (the "undo restores exact geometry" guarantee, #45). */
+/** A whole object captured for an insert/delete diff — its document record plus
+ * the session render projection, so undo of a delete (or redo of a create) brings
+ * the object back EXACTLY, value/style and all, without a re-hydrate. */
+export interface ObjectSnapshot {
+  doc: ObjectDoc;
+  resolved: ObjectResolved;
+}
+
+/** One reversible change to document state. A `prop` diff carries the EXACT prior
+ * and next primitive values (so a revert restores geometry/props byte-for-byte —
+ * the "undo restores exact geometry" guarantee, #45). A `life` diff is a whole
+ * object appearing/disappearing: `before`/`after` are the full snapshot or `null`
+ * (insert = null→snapshot, delete = snapshot→null), so create/delete are atomic
+ * undo steps (#48). */
 export type Diff =
   | { target: 'object'; id: number; prop: ObjectProp; before: Primitive; after: Primitive }
-  | { target: 'part'; id: number; prop: PartProp; before: Primitive; after: Primitive };
+  | { target: 'part'; id: number; prop: PartProp; before: Primitive; after: Primitive }
+  | { target: 'life'; id: number; before: ObjectSnapshot | null; after: ObjectSnapshot | null };
 
 /** One atomic undo step: an ordered group of diffs that undo/redo together.
  * `mark()` seals the open group into a step — an atomic stopping point. */
@@ -177,6 +199,19 @@ export class EditorDoc {
   #rec = $state(0);
   #total = $state(0);
   #hydrated = $state(false);
+  /** The primary table's fields, for the Create zone's Field tool (#62). Refreshed
+   * on hydrate; UI-only, never undoable. */
+  #fields = $state<FieldChoice[]>([]);
+  /** Active Create-zone tool (#62). `pointer` is select/drag; any other value arms
+   * the canvas to place that kind on the next click. */
+  #activeTool = $state<ToolKind>('pointer');
+  /** The field a `field`-tool placement binds (the rail's field dropdown). */
+  #toolFieldId = $state<number | null>(null);
+  /** Canvas zoom factor (#62 Zoom zone): 1 = 100%. A viewport concern — applied as
+   * a CSS scale on the stage, never persisted, never undoable. */
+  #zoom = $state(1);
+  /** Last hydration/load error, surfaced in the editor chrome. */
+  #error = $state<string | null>(null);
 
   // ── presence scope (multi-user seam; no behaviour yet) ──
   readonly #presence = new SvelteMap<string, PeerPresence>();
@@ -195,6 +230,7 @@ export class EditorDoc {
     this.#width = model.width;
     this.#rec = model.rec;
     this.#total = model.total;
+    this.#fields = model.fields.slice();
 
     this.#objects.clear();
     this.#resolved.clear();
@@ -216,6 +252,7 @@ export class EditorDoc {
           readOnly: o.readOnly,
           binding: o.binding,
           content: o.content,
+          props: o.props,
         });
         this.#resolved.set(o.id, {
           field: o.field,
@@ -235,6 +272,7 @@ export class EditorDoc {
     this.#pending = [];
     this.#selection.clear();
     this.#hovered = null;
+    this.#error = null;
     this.#hydrated = true;
   }
 
@@ -288,6 +326,7 @@ export class EditorDoc {
       rec: this.#rec,
       total: this.#total,
       width: this.#width,
+      fields: this.#fields,
       parts,
     };
   }
@@ -310,6 +349,7 @@ export class EditorDoc {
       readOnly: o.readOnly,
       binding: o.binding,
       content: o.content,
+      props: o.props,
       label: r.label,
       value: r.value,
       shapeStyle: r.shapeStyle,
@@ -358,6 +398,68 @@ export class EditorDoc {
     const p = this.#parts.find((pt) => pt.id === id);
     if (!p) return;
     this.#commit([{ target: 'part', id, prop: 'height', before: p.height, after: height }]);
+  }
+
+  /** Set an object's appearance bag (#49 / Style zone) — the opaque `props` JSON
+   * string, an undoable document change. The canvas's `shapeStyle` is server-
+   * derived (single source, [[layout-object-types]]); after persisting, the UI
+   * calls [`EditorDoc.refreshResolved`] with the server's view to update it. */
+  setObjectProps(id: number, props: string): void {
+    this.setProp(id, 'props', props);
+  }
+
+  /** Add an object the server just created (#48) as one undoable insert step. The
+   * caller supplies the object's `ObjectView` (resolved value/style and all) plus
+   * its owning `partId` (the view carries geometry, not membership). Records a
+   * `life` diff so undo deletes it and redo restores it exactly. */
+  addObject(view: ObjectView, partId: number): void {
+    if (this.#objects.has(view.id)) return;
+    this.#commitLife(view.id, null, this.#snapshotFromView(view, partId));
+  }
+
+  /** Append a band the server just created (#48). A plain document mutation —
+   * part lifecycle is not (yet) in the undo model the way objects are; a band-add
+   * is rare and structural. Derives the new part's `position` as bottom-most. */
+  addPart(view: PartView): void {
+    if (this.#parts.some((p) => p.id === view.id)) return;
+    const position = this.#parts.reduce((m, p) => Math.max(m, p.position), -1) + 1;
+    this.#parts = [...this.#parts, { id: view.id, kind: view.kind, height: view.height, position }];
+  }
+
+  /** Update just an object's derived `shapeStyle` (session) from a fresh server
+   * derivation — the response to a Style-zone props commit. Keeps the single
+   * source of shape-style derivation on the server ([[layout-object-types]]). */
+  setShapeStyle(id: number, shapeStyle: string): void {
+    const r = this.#resolved.get(id);
+    if (!r) return;
+    this.#resolved.set(id, { ...r, shapeStyle });
+  }
+
+  /** Remove an object (#48 delete / undo of a create) as one undoable delete step.
+   * No-op if the object is unknown. */
+  removeObject(id: number): void {
+    const o = this.#objects.get(id);
+    if (!o) return;
+    const snap: ObjectSnapshot = {
+      doc: { ...o },
+      resolved: { ...(this.#resolved.get(id) ?? EMPTY_RESOLVED) },
+    };
+    this.#commitLife(id, snap, null);
+  }
+
+  /** Refresh an object's SESSION render projection (label/value/shape/shapeStyle)
+   * from a fresh server view — e.g. after a props edit re-derives the shape style
+   * server-side. Document state and undo history are untouched (session scope). */
+  refreshResolved(view: ObjectView): void {
+    if (!this.#objects.has(view.id)) return;
+    this.#resolved.set(view.id, {
+      field: view.field,
+      shape: view.shape,
+      fieldId: view.fieldId,
+      label: view.label,
+      value: view.value,
+      shapeStyle: view.shapeStyle,
+    });
   }
 
   // ── undo history: marks, undo, redo ──────────────────────────────────────
@@ -452,6 +554,49 @@ export class EditorDoc {
     return this.#total;
   }
 
+  // ── session: create-tool palette + field choices (#62 Create zone) ───────
+
+  get fields(): readonly FieldChoice[] {
+    return this.#fields;
+  }
+
+  get activeTool(): ToolKind {
+    return this.#activeTool;
+  }
+
+  get toolFieldId(): number | null {
+    return this.#toolFieldId;
+  }
+
+  /** Arm a Create-zone tool. `pointer` returns the canvas to select/drag; for the
+   * `field` tool, `fieldId` is the field a placement binds (ignored otherwise). */
+  setTool(tool: ToolKind, fieldId: number | null = null): void {
+    this.#activeTool = tool;
+    this.#toolFieldId = tool === 'field' ? fieldId : null;
+  }
+
+  // ── session: canvas zoom (#62 Zoom zone) ─────────────────────────────────
+
+  get zoom(): number {
+    return this.#zoom;
+  }
+
+  /** Set the canvas zoom factor, clamped to 25%–400% and rounded to whole percents
+   * so the readout and the CSS scale never drift. */
+  setZoom(z: number): void {
+    this.#zoom = Math.min(4, Math.max(0.25, Math.round(z * 100) / 100));
+  }
+
+  // ── session: lifecycle error ─────────────────────────────────────────────
+
+  get error(): string | null {
+    return this.#error;
+  }
+
+  setError(message: string | null): void {
+    this.#error = message;
+  }
+
   // ── presence (multi-user seam) ───────────────────────────────────────────
 
   get peers(): ReadonlyMap<string, PeerPresence> {
@@ -489,10 +634,25 @@ export class EditorDoc {
     this.#pending.push(...real);
   }
 
-  /** Write a single document property to `value` — the one place state mutates.
-   * Used by both apply (→ after) and revert (→ before); updates are immutable
-   * replacements so SvelteMap / `$state` reads stay reactive. */
-  #set(d: Diff, value: Primitive): void {
+  /** Apply + record a single `life` (insert/delete) diff. Mirrors `#commit`: a
+   * fresh edit clears the redo branch, then the snapshot is applied and the diff
+   * joins the open group so a create/delete is one atomic undo step (#48). */
+  #commitLife(id: number, before: ObjectSnapshot | null, after: ObjectSnapshot | null): void {
+    if (this.#future.length > 0) this.#future = [];
+    const d: Diff = { target: 'life', id, before, after };
+    this.#set(d, after);
+    this.#pending.push(d);
+  }
+
+  /** Write a single document change to `value` — the one place state mutates. Used
+   * by both apply (→ after) and revert (→ before); updates are immutable
+   * replacements so SvelteMap / `$state` reads stay reactive. A `life` value is a
+   * whole-object snapshot (insert) or `null` (delete). */
+  #set(d: Diff, value: Primitive | ObjectSnapshot | null): void {
+    if (d.target === 'life') {
+      this.#applyLife(d.id, value as ObjectSnapshot | null);
+      return;
+    }
     if (d.target === 'object') {
       const o = this.#objects.get(d.id);
       if (!o) return;
@@ -506,11 +666,57 @@ export class EditorDoc {
     }
   }
 
-  /** Session-side: after an undo/redo, select the objects the step touched, so
-   * the user sees what changed. Selection is session scope — this reacts to a
-   * document change but is never itself part of the undo history. */
+  /** Apply a `life` diff: a `null` snapshot deletes the object (and drops its
+   * resolved projection + selection); a snapshot (re)creates it exactly. */
+  #applyLife(id: number, snap: ObjectSnapshot | null): void {
+    if (snap === null) {
+      this.#objects.delete(id);
+      this.#resolved.delete(id);
+      this.#selection.delete(id);
+    } else {
+      this.#objects.set(id, { ...snap.doc });
+      this.#resolved.set(id, { ...snap.resolved });
+    }
+  }
+
+  /** Build an insert snapshot from a server `ObjectView` (resolved value/style and
+   * all) plus its owning `partId` (the view carries geometry, not membership). */
+  #snapshotFromView(view: ObjectView, partId: number): ObjectSnapshot {
+    return {
+      doc: {
+        id: view.id,
+        partId,
+        kind: view.kind,
+        x: view.x,
+        y: view.y,
+        w: view.w,
+        h: view.h,
+        z: view.z,
+        readOnly: view.readOnly,
+        binding: view.binding,
+        content: view.content,
+        props: view.props,
+      },
+      resolved: {
+        field: view.field,
+        shape: view.shape,
+        fieldId: view.fieldId,
+        label: view.label,
+        value: view.value,
+        shapeStyle: view.shapeStyle,
+      },
+    };
+  }
+
+  /** Session-side: after an undo/redo, select the objects the step touched that
+   * still exist (an undone insert leaves nothing to select). Selection is session
+   * scope — this reacts to a document change but is never part of undo history. */
   #selectTouched(step: Step): void {
     this.#selection.clear();
-    for (const d of step) if (d.target === 'object') this.#selection.add(d.id);
+    for (const d of step) {
+      if ((d.target === 'object' || d.target === 'life') && this.#objects.has(d.id)) {
+        this.#selection.add(d.id);
+      }
+    }
   }
 }

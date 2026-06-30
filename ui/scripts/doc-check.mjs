@@ -212,6 +212,54 @@ try {
     eq('rehydrate: renderModel back to fixture', d.renderModel, fixture);
   }
 
+  // 9b. Structural create/delete + props are undoable (#48/#49). addObject and
+  //     removeObject are `life` diffs (one atomic step); setObjectProps is a doc
+  //     change. All round-trip through undo/redo exactly.
+  {
+    const d = new EditorDoc();
+    d.hydrate(fresh());
+    const partId = fixture.parts[0].id;
+    const count = () => d.renderModel.parts[0].objects.length;
+    const before = count();
+
+    // create
+    const newRect = {
+      id: 99, kind: 'rect', field: false, shape: true, fieldId: null,
+      x: 200, y: 10, w: 40, h: 40, z: 0, readOnly: false,
+      binding: '', content: '', props: '{"fill":"#abc"}',
+      label: '', value: '', shapeStyle: 'background:#abc;',
+    };
+    d.addObject(newRect, partId);
+    d.mark();
+    ok('create: object added + canUndo', obj(d.renderModel, 99) !== undefined && count() === before + 1 && d.canUndo === true);
+    d.undo();
+    ok('create: undo removes it', obj(d.renderModel, 99) === undefined && count() === before);
+    d.redo();
+    const redone = obj(d.renderModel, 99);
+    ok('create: redo restores it exactly', redone !== undefined && redone.shapeStyle === 'background:#abc;' && redone.props === '{"fill":"#abc"}');
+
+    // delete (the fixture rect, id 14) → undo brings it back exactly
+    const d2 = new EditorDoc();
+    d2.hydrate(fresh());
+    d2.removeObject(14);
+    d2.mark();
+    ok('delete: object removed', obj(d2.renderModel, 14) === undefined);
+    d2.undo();
+    const back = obj(d2.renderModel, 14);
+    ok('delete: undo restores it exactly', back !== undefined && back.shapeStyle.startsWith('background:#eef'));
+
+    // props edit → undoable document change (shapeStyle is session/server-derived,
+    // so the doc props are the undo truth here)
+    const d3 = new EditorDoc();
+    d3.hydrate(fresh());
+    const props0 = obj(d3.renderModel, 14).props;
+    d3.setObjectProps(14, '{"fill":"#000000"}');
+    d3.mark();
+    ok('props: doc props updated', obj(d3.renderModel, 14).props === '{"fill":"#000000"}');
+    d3.undo();
+    ok('props: undo restores props', obj(d3.renderModel, 14).props === props0);
+  }
+
   // 10. Full loop: store.renderModel → <LayoutPreview> SSR === committed golden.
   {
     const mod = await vite.ssrLoadModule('/src/lib/LayoutPreview.svelte');

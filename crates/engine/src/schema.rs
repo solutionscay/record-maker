@@ -9,10 +9,16 @@ use rusqlite::Connection;
 /// APPEND-ONLY: never edit or reorder a migration that has shipped. The whole
 /// point (ADR-0004) is that the contract evolves by adding migrations, never by
 /// silently changing an existing one.
-const MIGRATIONS: &[(&str, &str)] = &[(
-    "0001_init_meta",
-    include_str!("migrations/0001_init_meta.sql"),
-)];
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001_init_meta",
+        include_str!("migrations/0001_init_meta.sql"),
+    ),
+    (
+        "0002_layout_contract",
+        include_str!("migrations/0002_layout_contract.sql"),
+    ),
+];
 
 /// Schema version this build targets (the number of migrations defined).
 pub fn target_version() -> u32 {

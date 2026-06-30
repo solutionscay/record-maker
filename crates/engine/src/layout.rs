@@ -1,6 +1,50 @@
-//! Layout metadata read accessors. The canonical `LayoutMeta` lives here and is
+//! Layout metadata read accessors **and the structural Layout-Mode contract**
+//! (#43). The canonical `LayoutMeta`/`PartMeta`/`ObjectMeta` live here and are
 //! reused by every consumer (Browse rendering, mode routing, the design canvas)
 //! — defined exactly once (see Build Plan: engine accessor ledger).
+//!
+//! # The structural contract — every property the canvas reads/writes
+//!
+//! A layout is `meta_layout` → ordered `meta_part` bands → each band holds
+//! `meta_object` controls positioned **relative to that band**. The canvas
+//! edits these and Browse renders them; this is the permanent metadata model
+//! (ADR-0001/0003/0004). Appearance/styling (fill, border, fonts, colour) is a
+//! *separate* contract owned by #49 and carried in [`ObjectMeta::props`]; this
+//! module defines only the **structure**.
+//!
+//! ## Layout ([`LayoutMeta`])
+//! - `table_id` — the primary table the layout binds to (ADR-0003: no table
+//!   occurrences; bindings are dot-paths from this table).
+//! - `view` — default Browse view: `form` | `list` | `table`.
+//!
+//! ## Part / band ([`PartMeta`], [`PartKind`])
+//! - `kind` — `header` | `body` | `footer` | `subsummary` | `grandsummary`.
+//!   Governs *where* and *how often* the band renders: header/footer/summary
+//!   bands render once per page; `body` repeats once per record in List/Table.
+//! - `height` — band height in pixels. **Resize semantics:** the designer sets
+//!   it by dragging the band's bottom boundary in Layout mode; it cannot shrink
+//!   below the bottom edge of its lowest object (content is never clipped by a
+//!   resize). Stored as the authoritative height; Browse lays the band out at
+//!   exactly this height.
+//! - `position` — band order top→bottom within the layout (`0` = topmost).
+//!
+//! ## Object / control ([`ObjectMeta`], [`ObjectKind`])
+//! - `kind` — `field` (data-bound: label + live value) or `text` (static label).
+//!   See [`ObjectKind`] for how each renders.
+//! - `x`, `y`, `w`, `h` — geometry in pixels, **relative to the owning part's
+//!   top-left** (the frozen geometry contract, #25). `x`/`y` are measured from
+//!   the band origin, not the page; `w`/`h` are the object's box.
+//! - `z` — stacking order **within the part**, for overlapping objects. Objects
+//!   paint back→front by `(z asc, id asc)` and carry an explicit CSS `z-index`,
+//!   so overlap is deterministic regardless of insertion order. Higher = front.
+//! - `read_only` — per-object Browse editability (#40/#43). When `true`, Browse
+//!   renders the value as a non-editable display instead of an input. Default
+//!   `false` (editable). Editability is the object's property, identical across
+//!   Form/List — not a per-view toggle.
+//! - `binding` — dot-path expression to a field (`Customers.Name`) or related
+//!   field (`Invoice.bill_to.name`), resolved against the layout's table.
+//! - `props` — JSON bag reserved for appearance/style and misc (#49). The
+//!   structural contract does not define its shape; it round-trips opaquely.
 
 use anyhow::Result;
 use rusqlite::{params, Transaction};
@@ -17,29 +61,108 @@ pub struct LayoutMeta {
     pub view: String,
 }
 
+/// The kind of a layout part (band). Determines where the band renders and how
+/// often: `Header`/`Footer`/`SubSummary`/`GrandSummary` render once per page,
+/// while `Body` repeats once per record in List/Table view. The closed set the
+/// canvas and engine agree on (#43); stored as text in `meta_part.kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartKind {
+    Header,
+    Body,
+    Footer,
+    SubSummary,
+    GrandSummary,
+}
+
+impl PartKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PartKind::Header => "header",
+            PartKind::Body => "body",
+            PartKind::Footer => "footer",
+            PartKind::SubSummary => "subsummary",
+            PartKind::GrandSummary => "grandsummary",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "header" => PartKind::Header,
+            "body" => PartKind::Body,
+            "footer" => PartKind::Footer,
+            "subsummary" => PartKind::SubSummary,
+            "grandsummary" => PartKind::GrandSummary,
+            _ => return None,
+        })
+    }
+}
+
+/// The kind of a layout object, and how each renders:
+/// - `Field` — a **data-bound** control: shows the bound field's label and its
+///   live value (an editable input in Browse unless the object is read-only).
+/// - `Text` — **static** text/label content (never editable).
+///
+/// The closed set the canvas and engine agree on today (#43); stored as text in
+/// `meta_object.kind`. Further kinds (button / portal / image / line) join this
+/// enum when their rendering lands, so the set stays exactly what can render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectKind {
+    Field,
+    Text,
+}
+
+impl ObjectKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ObjectKind::Field => "field",
+            ObjectKind::Text => "text",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "field" => ObjectKind::Field,
+            "text" => ObjectKind::Text,
+            _ => return None,
+        })
+    }
+
+    /// Whether this kind is data-bound (resolves a `binding` to a live value).
+    pub fn is_field(self) -> bool {
+        matches!(self, ObjectKind::Field)
+    }
+}
+
 /// A layout part (band): header|body|footer|subsummary|grandsummary. Parts stack
-/// in `position` order; an object's geometry is relative to its part (#25).
+/// in `position` order; an object's geometry is relative to its part (#25). See
+/// the module-level contract for `height`/resize semantics.
 #[derive(Debug, Clone)]
 pub struct PartMeta {
     pub id: i64,
     pub layout_id: i64,
-    pub kind: String,
+    pub kind: PartKind,
     pub height: i64,
     pub position: i64,
 }
 
-/// An object on a part: absolute, **part-relative** geometry (the frozen
-/// geometry contract) plus a dot-path `binding` like `Customers.Name`. The same
-/// objects are rendered live by Browse (#25/#26) and edited by the canvas (#15).
+/// An object on a part: **part-relative** geometry (the frozen geometry
+/// contract) with explicit `z` stacking and a per-object `read_only` flag, plus
+/// a dot-path `binding` like `Customers.Name`. The same objects are rendered
+/// live by Browse (#25/#26) and edited by the canvas (#15). See the module-level
+/// contract for the meaning of every field.
 #[derive(Debug, Clone)]
 pub struct ObjectMeta {
     pub id: i64,
     pub part_id: i64,
-    pub kind: String,
+    pub kind: ObjectKind,
     pub x: i64,
     pub y: i64,
     pub w: i64,
     pub h: i64,
+    /// Stacking order within the part; higher paints in front. See module docs.
+    pub z: i64,
+    /// When `true`, Browse renders a non-editable value instead of an input.
+    pub read_only: bool,
     pub binding: Option<String>,
     pub props: Option<String>,
 }
@@ -61,17 +184,19 @@ impl Solution {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Parts of a layout, stacked in `position` order (#25).
+    /// Parts of a layout, stacked in `position` order (#25). An unrecognised
+    /// stored `kind` falls back to `Body` (mirrors `FieldMeta`'s lenient parse).
     pub fn parts(&self, layout_id: i64) -> Result<Vec<PartMeta>> {
         let mut stmt = self.app.prepare(
             "SELECT id, layout_id, kind, height, position FROM meta_part \
              WHERE layout_id=?1 ORDER BY position, id",
         )?;
         let rows = stmt.query_map(params![layout_id], |r| {
+            let kind_s: String = r.get(2)?;
             Ok(PartMeta {
                 id: r.get(0)?,
                 layout_id: r.get(1)?,
-                kind: r.get(2)?,
+                kind: PartKind::parse(&kind_s).unwrap_or(PartKind::Body),
                 height: r.get(3)?,
                 position: r.get(4)?,
             })
@@ -79,23 +204,28 @@ impl Solution {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Objects on a part, in stacking order (#25).
+    /// Objects on a part, in **stacking order** — back→front by `(z, id)` so
+    /// overlapping objects paint deterministically (#25/#43). An unrecognised
+    /// stored `kind` falls back to `Text` (rendered, never editable).
     pub fn objects(&self, part_id: i64) -> Result<Vec<ObjectMeta>> {
         let mut stmt = self.app.prepare(
-            "SELECT id, part_id, kind, x, y, w, h, binding, props FROM meta_object \
-             WHERE part_id=?1 ORDER BY id",
+            "SELECT id, part_id, kind, x, y, w, h, z, read_only, binding, props \
+             FROM meta_object WHERE part_id=?1 ORDER BY z, id",
         )?;
         let rows = stmt.query_map(params![part_id], |r| {
+            let kind_s: String = r.get(2)?;
             Ok(ObjectMeta {
                 id: r.get(0)?,
                 part_id: r.get(1)?,
-                kind: r.get(2)?,
+                kind: ObjectKind::parse(&kind_s).unwrap_or(ObjectKind::Text),
                 x: r.get(3)?,
                 y: r.get(4)?,
                 w: r.get(5)?,
                 h: r.get(6)?,
-                binding: r.get(7)?,
-                props: r.get(8)?,
+                z: r.get(7)?,
+                read_only: r.get::<_, i64>(8)? != 0,
+                binding: r.get(9)?,
+                props: r.get(10)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -156,6 +286,7 @@ pub(crate) fn generate_default_form(
 
 #[cfg(test)]
 mod tests {
+    use crate::layout::{ObjectKind, PartKind};
     use crate::{FieldKind, NewField, Solution};
 
     #[test]
@@ -175,15 +306,18 @@ mod tests {
 
         let parts = s.parts(lay.id).unwrap();
         assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0].kind, "body");
+        assert_eq!(parts[0].kind, PartKind::Body);
         assert!(parts[0].height > 0);
 
         let objs = s.objects(parts[0].id).unwrap();
         assert_eq!(objs.len(), 2);
         for o in &objs {
-            assert_eq!(o.kind, "field");
+            assert_eq!(o.kind, ObjectKind::Field);
             assert_eq!(o.part_id, parts[0].id);
             assert!(o.w > 0 && o.h > 0 && o.x >= 0 && o.y >= 0);
+            // Default-form objects are editable and unstacked (the interim default).
+            assert_eq!(o.z, 0);
+            assert!(!o.read_only);
         }
         assert_eq!(objs[0].binding.as_deref(), Some("Customers.Name"));
         assert_eq!(objs[1].binding.as_deref(), Some("Customers.Email"));
@@ -219,5 +353,98 @@ mod tests {
         let one = s.layout_by_id(ls[0].id).unwrap().unwrap();
         assert_eq!(one.id, ls[0].id);
         assert!(s.layout_by_id(999_999).unwrap().is_none());
+    }
+
+    #[test]
+    fn enum_round_trip_is_total() {
+        // Every contract kind survives as_str → parse unchanged.
+        for k in [
+            PartKind::Header,
+            PartKind::Body,
+            PartKind::Footer,
+            PartKind::SubSummary,
+            PartKind::GrandSummary,
+        ] {
+            assert_eq!(PartKind::parse(k.as_str()), Some(k));
+        }
+        for k in [ObjectKind::Field, ObjectKind::Text] {
+            assert_eq!(ObjectKind::parse(k.as_str()), Some(k));
+        }
+        assert!(PartKind::parse("nope").is_none());
+        assert!(ObjectKind::parse("nope").is_none());
+        assert!(ObjectKind::Field.is_field() && !ObjectKind::Text.is_field());
+    }
+
+    #[test]
+    fn migration_adds_z_and_read_only_with_editable_defaults() {
+        // 0002 must be applied (both migrations ran) and backfill existing-style
+        // rows: an object inserted without z/read_only is unstacked + editable.
+        let s = Solution::open_in_memory().unwrap();
+        assert!(s.schema_version().unwrap() >= 2, "0002 applied");
+
+        s.app
+            .execute("INSERT INTO meta_table(name, phys_name) VALUES ('T','t_x')", [])
+            .unwrap();
+        let tid = s.app.last_insert_rowid();
+        s.app
+            .execute("INSERT INTO meta_layout(name, table_id) VALUES ('T', ?1)", [tid])
+            .unwrap();
+        let lid = s.app.last_insert_rowid();
+        s.app
+            .execute(
+                "INSERT INTO meta_part(layout_id, kind, height) VALUES (?1, 'body', 80)",
+                [lid],
+            )
+            .unwrap();
+        let pid = s.app.last_insert_rowid();
+        // Insert the pre-0002 way (no z / read_only) — the defaults must backfill.
+        s.app
+            .execute(
+                "INSERT INTO meta_object(part_id, kind, x, y, w, h, binding) \
+                 VALUES (?1, 'field', 1, 2, 3, 4, 'T.f')",
+                [pid],
+            )
+            .unwrap();
+
+        let o = &s.objects(pid).unwrap()[0];
+        assert_eq!((o.x, o.y, o.w, o.h), (1, 2, 3, 4));
+        assert_eq!(o.z, 0, "default z");
+        assert!(!o.read_only, "default editable");
+    }
+
+    #[test]
+    fn objects_paint_back_to_front_and_round_trip_read_only() {
+        // z-order is the overlap contract: objects() returns back→front by (z,id),
+        // and the per-object read_only flag round-trips exactly.
+        let s = Solution::open_in_memory().unwrap();
+        s.app
+            .execute("INSERT INTO meta_table(name, phys_name) VALUES ('T','t_x')", [])
+            .unwrap();
+        let tid = s.app.last_insert_rowid();
+        s.app
+            .execute("INSERT INTO meta_layout(name, table_id) VALUES ('T', ?1)", [tid])
+            .unwrap();
+        let lid = s.app.last_insert_rowid();
+        s.app
+            .execute("INSERT INTO meta_part(layout_id, kind) VALUES (?1, 'body')", [lid])
+            .unwrap();
+        let pid = s.app.last_insert_rowid();
+
+        // Insert front-most first (z=10) so id order and z order disagree.
+        s.app
+            .execute(
+                "INSERT INTO meta_object(part_id, kind, z, read_only, binding) \
+                 VALUES (?1, 'field', 10, 1, 'top'), (?1, 'text', 0, 0, 'back')",
+                [pid],
+            )
+            .unwrap();
+
+        let objs = s.objects(pid).unwrap();
+        assert_eq!(objs.len(), 2);
+        // Lower z paints first (back); read_only and kind both round-trip.
+        assert_eq!(objs[0].binding.as_deref(), Some("back"));
+        assert_eq!((objs[0].z, objs[0].kind, objs[0].read_only), (0, ObjectKind::Text, false));
+        assert_eq!(objs[1].binding.as_deref(), Some("top"));
+        assert_eq!((objs[1].z, objs[1].kind, objs[1].read_only), (10, ObjectKind::Field, true));
     }
 }

@@ -15,7 +15,8 @@ use axum::{
     Router,
 };
 use record_maker_engine::{
-    FieldKind, FieldMeta, LayoutMeta, NewField, ObjectMeta, PartMeta, Solution, TableMeta,
+    FieldKind, FieldMeta, LayoutMeta, NewField, ObjectKind, ObjectMeta, PartKind, PartMeta,
+    Solution, TableMeta,
 };
 
 #[derive(Clone)]
@@ -217,6 +218,8 @@ struct PartView {
 /// A positioned object. `field` objects show `label` + live `value`; other
 /// kinds render `value` as plain text. `field_id` is set for bound field
 /// objects so editable views can name the input `f<id>`; `None` otherwise.
+/// `z` is the stacking order (CSS `z-index`); `read_only` suppresses the
+/// editable input even in an editable view (per-object editability, #40/#43).
 struct ObjectView {
     field: bool,
     field_id: Option<i64>,
@@ -224,6 +227,8 @@ struct ObjectView {
     y: i64,
     w: i64,
     h: i64,
+    z: i64,
+    read_only: bool,
     label: String,
     value: String,
 }
@@ -291,8 +296,8 @@ fn resolve_object(
     o: &ObjectMeta,
     by_name: &HashMap<String, (i64, String, String)>,
 ) -> (bool, Option<i64>, String, String) {
-    match (o.kind.as_str(), o.binding.as_deref()) {
-        ("field", Some(binding)) => {
+    match (o.kind, o.binding.as_deref()) {
+        (ObjectKind::Field, Some(binding)) => {
             let seg = binding.rsplit('.').next().unwrap_or(binding).to_lowercase();
             match by_name.get(&seg) {
                 Some((id, label, value)) => (true, Some(*id), label.clone(), value.clone()),
@@ -300,7 +305,7 @@ fn resolve_object(
                 None => (true, None, binding.to_string(), String::new()),
             }
         }
-        // non-field objects (text/button/…) render their binding text, if any
+        // non-field objects (text/…) render their binding text, if any
         _ => (false, None, String::new(), o.binding.clone().unwrap_or_default()),
     }
 }
@@ -328,7 +333,18 @@ fn render_part(
         .iter()
         .map(|o| {
             let (field, field_id, label, value) = resolve_object(o, by_name);
-            ObjectView { field, field_id, x: o.x, y: o.y, w: o.w, h: o.h, label, value }
+            ObjectView {
+                field,
+                field_id,
+                x: o.x,
+                y: o.y,
+                w: o.w,
+                h: o.h,
+                z: o.z,
+                read_only: o.read_only,
+                label,
+                value,
+            }
         })
         .collect();
     PartView { height: part.height, objects }
@@ -386,10 +402,15 @@ fn build_list(
     let no_record = HashMap::new();
     let (mut header, mut footer, mut body_parts) = (Vec::new(), Vec::new(), Vec::new());
     for p in sol.parts(layout_id).unwrap() {
-        match p.kind.as_str() {
-            "body" => body_parts.push(p),
-            "footer" | "grandsummary" => footer.push(render_part(sol, &p, &no_record)),
-            _ => header.push(render_part(sol, &p, &no_record)), // header/title/subsummary
+        match p.kind {
+            PartKind::Body => body_parts.push(p),
+            PartKind::Footer | PartKind::GrandSummary => {
+                footer.push(render_part(sol, &p, &no_record))
+            }
+            // header / sub-summary render once above the rows.
+            PartKind::Header | PartKind::SubSummary => {
+                header.push(render_part(sol, &p, &no_record))
+            }
         }
     }
 
@@ -703,4 +724,156 @@ async fn main() {
         .expect("bind listener");
     println!("record-maker → http://{addr}");
     axum::serve(listener, app(state)).await.expect("serve");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bare Form chrome with a flipbook present (the band only renders inside
+    /// the `<form>`, which requires `chrome.nav` to be `Some`).
+    fn form_chrome() -> Chrome {
+        Chrome {
+            mode: "browse",
+            layouts: Vec::new(),
+            current_layout: Some(1),
+            view_tabs: Vec::new(),
+            nav: Some(flipbook(1, "form", 1, Some(1), 1)),
+            editing: false,
+        }
+    }
+
+    fn field_obj(field_id: i64, value: &str, read_only: bool) -> ObjectView {
+        ObjectView {
+            field: true,
+            field_id: Some(field_id),
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 24,
+            z: 0,
+            read_only,
+            label: format!("Field {field_id}"),
+            value: value.to_string(),
+        }
+    }
+
+    /// The #43 acceptance: a read-only object renders a non-editable value, while
+    /// an editable object in the same (editable) Form view renders an input.
+    #[test]
+    fn read_only_object_renders_value_editable_object_renders_input() {
+        let part = PartView {
+            height: 60,
+            objects: vec![
+                field_obj(1, "EDITABLE_VAL", false),
+                field_obj(2, "READONLY_VAL", true),
+            ],
+        };
+        let tmpl = FormTemplate {
+            chrome: form_chrome(),
+            layout: "L".into(),
+            table: "T".into(),
+            record: Some(FormRecord { id: 1, width: 200, parts: vec![part] }),
+        };
+        let html = tmpl.render().unwrap();
+
+        // Editable object → an input bound to f1 carrying its value.
+        assert!(
+            html.contains(r#"name="f1""#) && html.contains(r#"value="EDITABLE_VAL""#),
+            "editable object should render an input"
+        );
+        // Read-only object → no input for f2; its value shows in a read-only span.
+        assert!(
+            !html.contains(r#"name="f2""#),
+            "read-only object must not render an editable input"
+        );
+        assert!(
+            html.contains("fm-readonly") && html.contains("READONLY_VAL"),
+            "read-only object should render its value as a non-editable span"
+        );
+    }
+
+    /// z-order reaches the DOM as an explicit CSS `z-index` so overlap is
+    /// deterministic regardless of source order.
+    #[test]
+    fn object_z_order_renders_as_css_z_index() {
+        let mut o = field_obj(1, "v", false);
+        o.z = 7;
+        let tmpl = FormTemplate {
+            chrome: form_chrome(),
+            layout: "L".into(),
+            table: "T".into(),
+            record: Some(FormRecord {
+                id: 1,
+                width: 200,
+                parts: vec![PartView { height: 60, objects: vec![o] }],
+            }),
+        };
+        assert!(tmpl.render().unwrap().contains("z-index:7"));
+    }
+
+    /// End-to-end through the real route: a default form is all-editable, but
+    /// once a field object is flagged read-only the Browse Form view stops
+    /// rendering an input for it (and keeps the input for editable fields) — the
+    /// #43 read-only flag honored by Browse, wired engine → handler → template.
+    #[tokio::test]
+    async fn browse_form_honors_per_object_read_only_end_to_end() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt; // for `oneshot`
+
+        let mut sol = Solution::open_in_memory().unwrap();
+        let tid = sol
+            .create_table(
+                "Customers",
+                &[
+                    NewField { name: "Name".into(), kind: FieldKind::Text },
+                    NewField { name: "Email".into(), kind: FieldKind::Text },
+                ],
+            )
+            .unwrap();
+        let table = sol.table_by_name("Customers").unwrap().unwrap();
+        let fields = sol.fields(tid).unwrap();
+        let (name_fid, email_fid) = (fields[0].id, fields[1].id);
+        sol.insert_record(
+            &table,
+            &[(&fields[0], "Ada".into()), (&fields[1], "ada@x.com".into())],
+        )
+        .unwrap();
+        let layout_id = sol.layouts().unwrap()[0].id;
+        // Flag the Name object read-only (what the Layout canvas will do, #47).
+        sol.app
+            .execute(
+                "UPDATE meta_object SET read_only=1 WHERE binding='Customers.Name'",
+                [],
+            )
+            .unwrap();
+
+        let state = AppState {
+            sol: Arc::new(Mutex::new(sol)),
+            locks: Arc::new(Mutex::new(HashSet::new())),
+        };
+        let req = Request::builder()
+            .uri(format!("/browse/{layout_id}?view=form"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app(state).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+
+        // Read-only Name: value shown, but no editable input bound to it.
+        assert!(html.contains("Ada"), "read-only value still rendered");
+        assert!(
+            !html.contains(&format!(r#"name="f{name_fid}""#)),
+            "read-only field must not render an input"
+        );
+        assert!(html.contains("fm-readonly"), "read-only object marked in markup");
+        // Editable Email: input present.
+        assert!(
+            html.contains(&format!(r#"name="f{email_fid}""#))
+                && html.contains(r#"value="ada@x.com""#),
+            "editable field still renders an input"
+        );
+    }
 }

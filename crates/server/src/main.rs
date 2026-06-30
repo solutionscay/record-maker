@@ -116,6 +116,44 @@ fn flipbook(
     }
 }
 
+/// Build the Layout-mode stepper: prev/next steps through the **logical layouts**
+/// (one per table, in picker order) while holding the current view, so the
+/// designer flips between layouts the way the record stepper flips records (#57).
+/// In Layout mode the pagination control navigates layouts, not records.
+fn layout_stepper(sol: &Solution, current: &LayoutMeta) -> Option<Flipbook> {
+    let view = canonical_view(&current.view);
+    // Each table (its Form layout is the canonical handle) → that table's layout
+    // for the CURRENT view, so stepping holds the view axis steady.
+    let steps: Vec<i64> = sol
+        .layouts()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| l.view == "form")
+        .filter_map(|l| {
+            sol.layouts_for_table(l.table_id)
+                .ok()?
+                .into_iter()
+                .find(|s| s.view == view)
+                .map(|s| s.id)
+        })
+        .collect();
+    let idx = steps.iter().position(|&id| id == current.id)?;
+    let href = |i: usize| format!("/design/{}", steps[i]);
+    Some(Flipbook {
+        layout_id: current.id,
+        view,
+        current: idx as i64 + 1,
+        current_id: None,
+        total: steps.len() as i64,
+        first_href: href(0),
+        prev_href: href(idx.saturating_sub(1)),
+        next_href: href((idx + 1).min(steps.len() - 1)),
+        last_href: href(steps.len() - 1),
+        at_first: idx == 0,
+        at_last: idx + 1 >= steps.len(),
+    })
+}
+
 /// The three Browse views, in toggle order. The frozen `?view=` contract (#20).
 const VIEWS: [&str; 3] = ["form", "list", "table"];
 
@@ -569,7 +607,9 @@ async fn design(State(st): State<AppState>, Path(layout_id): Path<i64>) -> impl 
     let Some((lay, _table)) = layout_table(&sol, layout_id) else {
         return not_found("layout", layout_id);
     };
-    let chrome = Chrome::build(&sol, "design", Some(&lay));
+    let mut chrome = Chrome::build(&sol, "design", Some(&lay));
+    // Keep the pagination control in Layout mode — repurposed to step layouts.
+    chrome.nav = layout_stepper(&sol, &lay);
     let tmpl = DesignTemplate { chrome, layout_id, layout: lay.name.clone(), view: view_label(&lay.view) };
     Html(tmpl.render().unwrap()).into_response()
 }
@@ -1253,6 +1293,28 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(html.contains(r#"class="fm-list""#), "list renders the list surface");
         assert!(!html.contains(r#"<div class="fm-canvas""#), "list view is not the form canvas");
+    }
+
+    /// #57 Layout-mode chrome: the view toggle stays (switching which view you
+    /// DESIGN, via /design/ siblings) and the pagination control is repurposed to
+    /// step layouts; record actions are Browse-only.
+    #[tokio::test]
+    async fn design_mode_keeps_view_toggle_and_layout_stepper() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        sol.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .unwrap();
+        let table = sol.table_by_name("Customers").unwrap().unwrap();
+        let layouts = sol.layouts_for_table(table.id).unwrap();
+        let form = layouts.iter().find(|l| l.view == "form").unwrap().id;
+        let list = layouts.iter().find(|l| l.view == "list").unwrap().id;
+        let (status, html) = get_body(state_for(sol), &format!("/design/{form}")).await;
+        assert_eq!(status, StatusCode::OK);
+        // View toggle present, switching which view you DESIGN (links into /design/).
+        assert!(html.contains(&format!(r#"href="/design/{list}""#)), "view toggle → design the List layout");
+        // Pagination control repurposed to layout navigation.
+        assert!(html.contains("Layout navigation"), "stepper navigates layouts in design mode");
+        // Record actions don't belong in Layout mode.
+        assert!(html.contains(r#"title="Records are managed in Browse mode""#), "no record actions in layout mode");
     }
 
     /// #46 group commit: a bulk POST persists every object's geometry in one

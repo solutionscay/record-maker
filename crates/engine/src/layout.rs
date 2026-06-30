@@ -202,36 +202,6 @@ impl Solution {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Backfill the per-view layout split (#57) on open: for every table that has
-    /// a `form` layout but is missing a `list` or `table` sibling, clone the form
-    /// (its parts + objects) into the missing view. Idempotent — tables already
-    /// holding all three views are left untouched, so this is safe to run on every
-    /// open. New tables get all three up front in [`Solution::create_table`].
-    pub fn ensure_view_layouts(&mut self) -> Result<()> {
-        let tables = self.tables()?;
-        let tx = self.app.transaction()?;
-        for table in &tables {
-            let existing: Vec<(i64, String)> = {
-                let mut stmt = tx.prepare("SELECT id, view FROM meta_layout WHERE table_id=?1")?;
-                let rows = stmt
-                    .query_map(params![table.id], |r| Ok((r.get(0)?, r.get::<_, String>(1)?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
-            };
-            let Some(form_id) = existing.iter().find(|(_, v)| v == "form").map(|(id, _)| *id) else {
-                continue; // no form to clone from — leave as-is
-            };
-            for view in ["list", "table"] {
-                if existing.iter().any(|(_, v)| v == view) {
-                    continue;
-                }
-                clone_layout(&tx, form_id, &table.name, table.id, view)?;
-            }
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Parts of a layout, stacked in `position` order (#25). An unrecognised
     /// stored `kind` falls back to `Body` (mirrors `FieldMeta`'s lenient parse).
     pub fn parts(&self, layout_id: i64) -> Result<Vec<PartMeta>> {
@@ -641,47 +611,6 @@ mod tests {
         let l = &s.objects(list_part.id).unwrap()[0];
         assert_eq!((f.x, f.y), (99, 88), "form moved");
         assert_eq!((l.x, l.y), (16, 16), "list unchanged");
-    }
-
-    #[test]
-    fn ensure_view_layouts_backfills_missing_views_idempotently() {
-        // A pre-#57 table (form layout only) gains list/table siblings — cloned
-        // with their objects — and a second run is a no-op.
-        let mut s = Solution::open_in_memory().unwrap();
-        s.app
-            .execute("INSERT INTO meta_table(name, phys_name) VALUES ('Old','t_1')", [])
-            .unwrap();
-        let tid = s.app.last_insert_rowid();
-        s.app
-            .execute("INSERT INTO meta_layout(name, table_id, view) VALUES ('Old', ?1, 'form')", [tid])
-            .unwrap();
-        let lid = s.app.last_insert_rowid();
-        s.app
-            .execute("INSERT INTO meta_part(layout_id, kind, height, position) VALUES (?1,'body',80,0)", [lid])
-            .unwrap();
-        let pid = s.app.last_insert_rowid();
-        s.app
-            .execute(
-                "INSERT INTO meta_object(part_id, kind, x, y, w, h, binding) \
-                 VALUES (?1,'field',16,16,200,24,'Old.Name')",
-                [pid],
-            )
-            .unwrap();
-
-        assert_eq!(s.layouts_for_table(tid).unwrap().len(), 1);
-        s.ensure_view_layouts().unwrap();
-        let after = s.layouts_for_table(tid).unwrap();
-        assert_eq!(after.len(), 3);
-        for view in ["list", "table"] {
-            let l = after.iter().find(|l| l.view == view).unwrap();
-            let p = &s.parts(l.id).unwrap()[0];
-            let objs = s.objects(p.id).unwrap();
-            assert_eq!(objs.len(), 1);
-            assert_eq!(objs[0].binding.as_deref(), Some("Old.Name"));
-        }
-        // Idempotent.
-        s.ensure_view_layouts().unwrap();
-        assert_eq!(s.layouts_for_table(tid).unwrap().len(), 3);
     }
 
     #[test]

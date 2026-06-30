@@ -41,10 +41,7 @@ impl Solution {
 
     fn finish(mut app: Connection, data: Connection) -> Result<Self> {
         schema::migrate(&mut app)?;
-        let mut sol = Self { app, data };
-        // Backfill the per-view layout split (#57) for any table predating it.
-        sol.ensure_view_layouts()?;
-        Ok(sol)
+        Ok(Self { app, data })
     }
 
     /// Current metadata schema version of this solution's `app.db`.

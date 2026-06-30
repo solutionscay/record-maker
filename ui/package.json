@@ -8,7 +8,8 @@
     "build": "vite build",
     "watch": "vite build --watch",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "parity": "node scripts/parity-check.mjs"
+    "parity": "node scripts/parity-check.mjs",
+    "test": "node scripts/doc-check.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.0",

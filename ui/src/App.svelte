@@ -1,39 +1,54 @@
 <script lang="ts">
-  // Placeholder island for Layout Mode. The real design canvas (drag/resize via
-  // moveable + selecto, plus the document/history store) lands in #15 / #46 —
-  // this only proves the Svelte 5 (runes) + Vite toolchain mounts inside the
-  // existing shell chrome and can read the layout id handed in by the page.
+  // Layout Mode editor island. On mount it fetches the read model from the
+  // engine (ADR #42 HTTP endpoint) and hands it to the PURE <LayoutPreview>,
+  // which renders the canvas client-side — DOM byte-identical (after
+  // normalization) to Browse's askama band macro (issue #44). The canvas
+  // `fm-*` styling is inherited from the server's shell.html; this component
+  // only owns its own editor-chrome classes below.
+  import type { DesignModel } from './lib/model';
+  import LayoutPreview from './lib/LayoutPreview.svelte';
+
   let { layoutId = '' }: { layoutId?: string } = $props();
 
-  // A trivial rune so the runes compiler path is exercised by the scaffold.
-  let mounted = $state(false);
+  let model = $state<DesignModel | null>(null);
+  let error = $state<string | null>(null);
+
   $effect(() => {
-    mounted = true;
+    let cancelled = false;
+    fetch(`/design/${layoutId}/model`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data: DesignModel) => {
+        if (!cancelled) model = data;
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) error = e instanceof Error ? e.message : String(e);
+      });
+    return () => {
+      cancelled = true;
+    };
   });
 </script>
 
-<section class="layout-editor">
-  <h2>Layout Mode — layout {layoutId}</h2>
-  <p class="status">
-    Svelte&nbsp;5 island mounted{mounted ? '.' : '…'} The design canvas arrives in
-    a later issue (#15 / #46).
-  </p>
-</section>
+{#if error}
+  <p class="layout-editor-msg layout-editor-error">Failed to load layout: {error}</p>
+{:else if model}
+  <LayoutPreview {model} />
+{:else}
+  <p class="layout-editor-msg">Loading…</p>
+{/if}
 
 <style>
-  .layout-editor {
-    border: 1px dashed #cbd5e1;
-    border-radius: 0.5rem;
-    padding: 1rem 1.25rem;
-    background: #f7f9fc;
-    color: #1b1b1f;
-  }
-  .layout-editor h2 {
-    margin: 0 0 0.4rem;
-    font-size: 1.05rem;
-  }
-  .layout-editor .status {
+  /* Editor chrome only — must NOT define any fm-* class (those live in the
+     server's shell.html and are inherited by the design page). */
+  .layout-editor-msg {
     margin: 0;
     color: #555;
+    font: 0.9rem system-ui, sans-serif;
+  }
+  .layout-editor-error {
+    color: #b00020;
   }
 </style>

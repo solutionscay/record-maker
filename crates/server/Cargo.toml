@@ -13,6 +13,7 @@ axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs"] }
 askama = "0.12"
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
 record-maker-engine = { path = "../engine" }
 
 [dev-dependencies]

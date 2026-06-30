@@ -210,7 +210,15 @@ struct FormRecord {
 }
 
 /// A part band; objects are positioned **relative to it** (geometry contract).
+/// Also the part half of the Layout-Mode read model (`/design/:layout/model`):
+/// the Svelte canvas renders from the same fields the askama band macro uses, so
+/// `id`/`kind` are carried for the editor's document store (#45) without changing
+/// the rendered DOM.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PartView {
+    id: i64,
+    kind: &'static str,
     height: i64,
     objects: Vec<ObjectView>,
 }
@@ -220,7 +228,16 @@ struct PartView {
 /// objects so editable views can name the input `f<id>`; `None` otherwise.
 /// `z` is the stacking order (CSS `z-index`); `read_only` suppresses the
 /// editable input even in an editable view (per-object editability, #40/#43).
+///
+/// Also the object half of the Layout-Mode read model: the canvas hydrates its
+/// document store from `id`/`kind`/`binding`, but the rendered DOM (askama macro
+/// and the mirroring Svelte `Band` component) uses only the visual/geometry
+/// fields, so Browse and Layout stay byte-identical (#44).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ObjectView {
+    id: i64,
+    kind: &'static str,
     field: bool,
     field_id: Option<i64>,
     x: i64,
@@ -229,6 +246,7 @@ struct ObjectView {
     h: i64,
     z: i64,
     read_only: bool,
+    binding: String,
     label: String,
     value: String,
 }
@@ -334,6 +352,8 @@ fn render_part(
         .map(|o| {
             let (field, field_id, label, value) = resolve_object(o, by_name);
             ObjectView {
+                id: o.id,
+                kind: o.kind.as_str(),
                 field,
                 field_id,
                 x: o.x,
@@ -342,12 +362,13 @@ fn render_part(
                 h: o.h,
                 z: o.z,
                 read_only: o.read_only,
+                binding: o.binding.clone().unwrap_or_default(),
                 label,
                 value,
             }
         })
         .collect();
-    PartView { height: part.height, objects }
+    PartView { id: part.id, kind: part.kind.as_str(), height: part.height, objects }
 }
 
 /// Canvas width for a layout: the rightmost object edge + a margin. Geometry is
@@ -511,7 +532,10 @@ async fn browse(
     }
 }
 
-/// Layout (design) mode — placeholder until the canvas lands (#15/#24).
+/// Layout (design) mode shell. Renders the chrome + the Svelte editor mount node;
+/// the canvas itself is drawn client-side by the editor, which fetches geometry
+/// from [`design_model`] (#44) and renders objects from the same fields the
+/// askama band macro uses, so Browse and Layout stay pixel-identical.
 async fn design(State(st): State<AppState>, Path(layout_id): Path<i64>) -> impl IntoResponse {
     let sol = st.sol.lock().unwrap();
     let Some((lay, _table)) = layout_table(&sol, layout_id) else {
@@ -520,6 +544,62 @@ async fn design(State(st): State<AppState>, Path(layout_id): Path<i64>) -> impl 
     let chrome = Chrome::build(&sol, "design", Some(layout_id), None);
     let tmpl = DesignTemplate { chrome, layout_id, layout: lay.name.clone() };
     Html(tmpl.render().unwrap()).into_response()
+}
+
+/// The Layout-Mode read model (#44): the layout's parts/objects with resolved
+/// labels + live values for record `?rec=N` (1-based; defaults to the first
+/// record, blank values when the table is empty — geometry is record-independent,
+/// so an empty table still has a designable canvas). The Svelte canvas renders
+/// from this over the same axum contract Browse uses (ADR #42). `render_part` is
+/// the single server-side resolver shared with Browse, so values/bindings can
+/// never diverge between the two surfaces; only the DOM emission is mirrored
+/// client-side (and guarded by a parity test).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesignModel {
+    layout_id: i64,
+    rec: i64,
+    total: i64,
+    width: i64,
+    parts: Vec<PartView>,
+}
+
+async fn design_model(
+    State(st): State<AppState>,
+    Path(layout_id): Path<i64>,
+    Query(q): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let Some((_lay, table)) = layout_table(&sol, layout_id) else {
+        return not_found("layout", layout_id);
+    };
+    let ids = sol.record_ids(&table).unwrap();
+    let total = ids.len() as i64;
+    let rec = clamp_rec(&q, total);
+    let fields = sol.fields(table.id).unwrap();
+    // Bind to the record at `rec` when present; otherwise render geometry blank.
+    let by_name = if rec >= 1 {
+        match sol.get_record(&table, &fields, ids[(rec - 1) as usize]).unwrap() {
+            Some(cells) => by_name_map(&fields, cells),
+            None => HashMap::new(),
+        }
+    } else {
+        HashMap::new()
+    };
+    let parts = sol
+        .parts(layout_id)
+        .unwrap()
+        .iter()
+        .map(|p| render_part(&sol, p, &by_name))
+        .collect();
+    let model = DesignModel {
+        layout_id,
+        rec,
+        total,
+        width: layout_canvas_width(&sol, layout_id),
+        parts,
+    };
+    axum::Json(model).into_response()
 }
 
 /// Directory holding the built Layout Mode editor bundle (Svelte 5 + Vite static
@@ -705,6 +785,7 @@ fn app(state: AppState) -> Router {
         .route("/browse/:layout/:id/revert", post(revert_record))
         .route("/browse/:layout/:id/delete", post(delete_record))
         .route("/design/:layout", get(design))
+        .route("/design/:layout/model", get(design_model))
         .route("/ui/*path", get(ui_asset))
         .with_state(state)
 }
@@ -745,6 +826,8 @@ mod tests {
 
     fn field_obj(field_id: i64, value: &str, read_only: bool) -> ObjectView {
         ObjectView {
+            id: field_id,
+            kind: "field",
             field: true,
             field_id: Some(field_id),
             x: 0,
@@ -753,6 +836,7 @@ mod tests {
             h: 24,
             z: 0,
             read_only,
+            binding: format!("T.Field{field_id}"),
             label: format!("Field {field_id}"),
             value: value.to_string(),
         }
@@ -763,6 +847,8 @@ mod tests {
     #[test]
     fn read_only_object_renders_value_editable_object_renders_input() {
         let part = PartView {
+            id: 1,
+            kind: "body",
             height: 60,
             objects: vec![
                 field_obj(1, "EDITABLE_VAL", false),
@@ -806,7 +892,7 @@ mod tests {
             record: Some(FormRecord {
                 id: 1,
                 width: 200,
-                parts: vec![PartView { height: 60, objects: vec![o] }],
+                parts: vec![PartView { id: 1, kind: "body", height: 60, objects: vec![o] }],
             }),
         };
         assert!(tmpl.render().unwrap().contains("z-index:7"));
@@ -875,5 +961,189 @@ mod tests {
                 && html.contains(r#"value="ada@x.com""#),
             "editable field still renders an input"
         );
+    }
+
+    // ---- #44 shared-renderer parity oracle --------------------------------
+    //
+    // The Layout canvas (Svelte) renders objects from the same fields the askama
+    // band macro uses. These tests pin BOTH ends of that to committed goldens:
+    //   - `canvas.parity.html`  — the canonical band DOM (this macro is the spec).
+    //   - `canvas.fixture.json` — the exact `/design/:layout/model` response.
+    // The Svelte side (ui/) renders `LayoutPreview` from the SAME fixture JSON and
+    // asserts it normalizes to the SAME canvas golden, so neither renderer can
+    // drift. `normalize_html` is the shared contract — keep it byte-equal to the
+    // JS copy in `ui/scripts/parity-check.mjs`.
+    //
+    // Run `REGEN=1 cargo test -p record-maker-server` to (re)generate the goldens
+    // from the live macro/endpoint output after an intentional DOM change.
+
+    /// Strip HTML comments, collapse whitespace runs to one space, then drop
+    /// spaces adjacent to tag boundaries. This absorbs (1) Svelte 5 SSR hydration
+    /// markers like `<!--[-->`/`<!---->` (the macro emits none, so stripping is a
+    /// no-op on the Browse side) and (2) harmless indentation/newline differences,
+    /// while preserving text content and attribute strings. The JS copy in
+    /// `ui/scripts/parity-check.mjs` MUST stay byte-equivalent to this.
+    fn normalize_html(s: &str) -> String {
+        // 1. remove `<!-- ... -->` comments.
+        let mut decommented = String::with_capacity(s.len());
+        let mut rest = s;
+        loop {
+            match rest.find("<!--") {
+                None => {
+                    decommented.push_str(rest);
+                    break;
+                }
+                Some(i) => {
+                    decommented.push_str(&rest[..i]);
+                    match rest[i..].find("-->") {
+                        Some(j) => rest = &rest[i + j + 3..],
+                        None => break,
+                    }
+                }
+            }
+        }
+        // 2. collapse whitespace runs to a single space.
+        let mut collapsed = String::with_capacity(decommented.len());
+        let mut prev_ws = false;
+        for c in decommented.chars() {
+            if c.is_whitespace() {
+                if !prev_ws {
+                    collapsed.push(' ');
+                }
+                prev_ws = true;
+            } else {
+                collapsed.push(c);
+                prev_ws = false;
+            }
+        }
+        // 3. drop spaces adjacent to tag boundaries.
+        collapsed.replace("> ", ">").replace(" <", "<").trim().to_string()
+    }
+
+    fn golden_path(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../ui/tests")
+            .join(name)
+    }
+
+    /// Assert `actual` equals the committed golden, or (re)write it under `REGEN`.
+    fn assert_or_regen(name: &str, actual: &str) {
+        let path = golden_path(name);
+        if std::env::var("REGEN").is_ok() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, actual).unwrap();
+            eprintln!("[REGEN] wrote {}", path.display());
+            return;
+        }
+        let expected = std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("missing golden {name}; run `REGEN=1 cargo test`"));
+        assert_eq!(actual.trim(), expected.trim(), "golden {name} drifted");
+    }
+
+    /// A deterministic layout for parity: the default Customers form, both field
+    /// objects made read-only (so Browse renders the display/non-editing state
+    /// #44 compares), Email lifted to z=5, plus a static `text` object — covering
+    /// fm-field / fm-readonly / z-index / fm-text in one fixture.
+    fn parity_fixture() -> (Solution, i64) {
+        let mut sol = Solution::open_in_memory().unwrap();
+        let tid = sol
+            .create_table(
+                "Customers",
+                &[
+                    NewField { name: "Name".into(), kind: FieldKind::Text },
+                    NewField { name: "Email".into(), kind: FieldKind::Text },
+                ],
+            )
+            .unwrap();
+        let table = sol.table_by_name("Customers").unwrap().unwrap();
+        let fields = sol.fields(tid).unwrap();
+        sol.insert_record(
+            &table,
+            &[(&fields[0], "Ada".into()), (&fields[1], "ada@example.com".into())],
+        )
+        .unwrap();
+        let layout_id = sol.layouts().unwrap()[0].id;
+        sol.app
+            .execute("UPDATE meta_object SET read_only=1 WHERE binding='Customers.Name'", [])
+            .unwrap();
+        sol.app
+            .execute(
+                "UPDATE meta_object SET read_only=1, z=5 WHERE binding='Customers.Email'",
+                [],
+            )
+            .unwrap();
+        let part_id: i64 = sol
+            .app
+            .query_row(
+                "SELECT id FROM meta_part WHERE layout_id=?1 AND kind='body'",
+                [layout_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        sol.app
+            .execute(
+                "INSERT INTO meta_object(part_id, kind, x, y, w, h, z, binding) \
+                 VALUES (?1, 'text', 16, 80, 200, 24, 0, 'Note')",
+                [part_id],
+            )
+            .unwrap();
+        (sol, layout_id)
+    }
+
+    async fn get_body(state: AppState, uri: &str) -> (StatusCode, String) {
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let resp = app(state)
+            .oneshot(Request::builder().uri(uri).body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    fn state_for(sol: Solution) -> AppState {
+        AppState {
+            sol: Arc::new(Mutex::new(sol)),
+            locks: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// The `/design/:layout/model` JSON is the read contract the canvas hydrates
+    /// from; pin it to a committed fixture so the Svelte side renders the same
+    /// model. Also sanity-checks the shape inline.
+    #[tokio::test]
+    async fn design_model_endpoint_matches_committed_fixture() {
+        let (sol, layout_id) = parity_fixture();
+        let (status, body) = get_body(state_for(sol), &format!("/design/{layout_id}/model?rec=1")).await;
+        assert_eq!(status, StatusCode::OK);
+        // Shape sanity (independent of the golden), so a contract change is loud.
+        for needle in [
+            r#""width":240"#,
+            r#""kind":"field""#,
+            r#""kind":"text""#,
+            r#""readOnly":true"#,
+            r#""binding":"Customers.Name""#,
+            r#""value":"Ada""#,
+            r#""z":5"#,
+        ] {
+            assert!(body.contains(needle), "model JSON missing {needle}\n{body}");
+        }
+        assert_or_regen("canvas.fixture.json", &body);
+    }
+
+    /// Browse renders the parity fixture's canvas; this is the canonical band DOM
+    /// the Svelte `LayoutPreview` must reproduce (the macro is the spec).
+    #[tokio::test]
+    async fn browse_canvas_matches_parity_golden() {
+        let (sol, layout_id) = parity_fixture();
+        let (status, html) = get_body(state_for(sol), &format!("/browse/{layout_id}?view=form")).await;
+        assert_eq!(status, StatusCode::OK);
+        // The form holds exactly one `.fm-canvas`; slice it out up to `</form>`.
+        let start = html.find(r#"<div class="fm-canvas""#).expect("canvas present");
+        let end = start + html[start..].find("</form>").expect("form closes");
+        let canvas = normalize_html(&html[start..end]);
+        assert!(canvas.starts_with(r#"<div class="fm-canvas""#) && canvas.ends_with("</div>"));
+        assert_or_regen("canvas.parity.html", &canvas);
     }
 }

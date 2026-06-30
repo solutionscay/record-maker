@@ -14,6 +14,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs"] }
 askama = "0.12"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
+# Already in the tree via axum's `json` feature, so this resolves from the lock
+# without a new fetch. Used to read shape appearance keys out of `meta_object.props`.
+serde_json = "1"
 record-maker-engine = { path = "../engine" }
 
 [dev-dependencies]

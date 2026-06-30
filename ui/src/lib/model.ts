@@ -4,14 +4,22 @@
 // macro from this same model. These interfaces mirror the FROZEN contract;
 // keep field names in sync with the server's serialized shape.
 
-/** One absolutely-positioned object on a layout part (a field or static text). */
+/** One absolutely-positioned object on a layout part (#60): a bound `field`
+ * (renders its value only), a static `text` label (renders `content`), or a
+ * `shape` (`rect`/`line`/`ellipse`, renders a styled box from `shapeStyle`).
+ *
+ * Field ORDER mirrors the server's `ObjectView` serialization exactly; the editor
+ * store's `renderModel` projection rebuilds these objects key-for-key so the
+ * #44 fixture deep-equals (doc-check). Keep the two in lockstep. */
 export interface ObjectView {
   /** Stable object id; used as the keyed-each key. */
   id: number;
-  /** Object kind, e.g. `"field"` or `"text"`. */
+  /** Object kind: `"field"`, `"text"`, or a shape (`"rect"`/`"line"`/`"ellipse"`). */
   kind: string;
-  /** True when the object is a bound field (renders label + value spans). */
+  /** True when the object is a bound field (renders its value only). */
   field: boolean;
+  /** True when the object is a drawn shape (renders a styled box from `shapeStyle`). */
+  shape: boolean;
   /** Field id when `field` is true, else null. */
   fieldId: number | null;
   /** Left offset in px. */
@@ -26,12 +34,16 @@ export interface ObjectView {
   z: number;
   /** Per-object read-only flag (adds `fm-readonly`). */
   readOnly: boolean;
-  /** Data binding expression, e.g. `"Customers.Name"`. */
+  /** Data binding expression, e.g. `"Customers.Name"` (field objects). */
   binding: string;
-  /** Field label (shown in the `fm-flabel` span); may be empty. */
+  /** Static text of a `text` object (its own slot); empty for field/shape objects. */
+  content: string;
+  /** Resolved field label (kept for the inspector; no longer rendered inline). */
   label: string;
-  /** Display value (shown in the `fm-fvalue` / `fm-text` span). */
+  /** Live field value (shown in the `fm-fvalue` span); empty for non-fields. */
   value: string;
+  /** Server-derived inline CSS for a shape's appearance; empty for non-shapes. */
+  shapeStyle: string;
 }
 
 /** One layout part (band) and the objects it contains, ordered back→front. */

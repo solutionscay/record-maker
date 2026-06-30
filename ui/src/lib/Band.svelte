@@ -3,9 +3,12 @@
   // mirrors the server's askama `_band.html` macro exactly so the client-side
   // canvas DOM is byte-identical (after normalization) to Browse's render.
   //
-  // The canvas is display-only: a field ALWAYS renders its value span (no
-  // inputs ever in Layout Mode), regardless of readOnly. All `fm-*` styling
-  // comes from the inherited shell.html CSS — this component defines none.
+  // The canvas is display-only and renders each object by kind (#60): a `field`
+  // renders its VALUE span only (no inputs ever in Layout Mode, regardless of
+  // readOnly) — its caption is a separate `text` object; a shape renders a styled
+  // box from its server-derived `shapeStyle`; any other object is static `text`
+  // from its `content` slot. All `fm-*` styling comes from the inherited
+  // shell.html CSS — this component defines none.
   import type { ObjectView, PartView } from './model';
 
   let { part }: { part: PartView } = $props();
@@ -26,9 +29,11 @@
   {#each part.objects as o (o.id)}
     <div class={objClass(o)} style={objStyle(o)}>
       {#if o.field}
-        <span class="fm-flabel">{o.label}</span><span class="fm-fvalue">{o.value}</span>
+        <span class="fm-fvalue">{o.value}</span>
+      {:else if o.shape}
+        <div class="fm-shape fm-{o.kind}" style={o.shapeStyle}></div>
       {:else}
-        <span class="fm-text">{o.value}</span>
+        <span class="fm-text">{o.content}</span>
       {/if}
     </div>
   {/each}

@@ -35,7 +35,8 @@ import type { DesignModel, ObjectView, PartView } from './model';
 /** The structural sub-contract of an object that the store OWNS and the undo
  * history tracks — exactly the frozen #43 properties plus the owning part.
  * Geometry is part-relative px integers; `binding` is the dot-path expression;
- * `kind` is `'field' | 'text'` (kept as a string to mirror the open contract). */
+ * `content` is the static-text slot of a `text` object; `kind` is `'field' |
+ * 'text' | 'rect' | 'line' | 'ellipse'` (a string, mirroring the open contract). */
 export interface ObjectDoc {
   id: number;
   /** Owning part id (object membership in a part is carried here, not by a list). */
@@ -49,6 +50,8 @@ export interface ObjectDoc {
   z: number;
   readOnly: boolean;
   binding: string;
+  /** Static text of a `text` object — its own slot, distinct from `binding`. */
+  content: string;
 }
 
 /** A layout part/band — the structural part contract (#43): id/kind/height plus
@@ -63,19 +66,30 @@ export interface PartDoc {
 
 // ── session types ───────────────────────────────────────────────────────────
 
-/** The record-dependent projection of an object: whether it renders as a bound
- * field, its field id, label, and live value — all resolved server-side for the
- * current record (#44). This is NOT part of the document contract: it is
- * refreshed wholesale on hydrate / record change and never enters the undo
- * history. Kept beside the document object only so the canvas can render. */
+/** The server-resolved render projection of an object (#44/#60): whether it is a
+ * bound `field` (its field id, label, live value) or a `shape` (its derived
+ * appearance `shapeStyle`) — all decided server-side (the value/label for the
+ * current record; the shape flag/style from kind+props). This is NOT part of the
+ * document contract: it is refreshed wholesale on hydrate / record change and
+ * never enters the undo history. Kept beside the document object only so the
+ * canvas can render. */
 export interface ObjectResolved {
   field: boolean;
+  shape: boolean;
   fieldId: number | null;
   label: string;
   value: string;
+  shapeStyle: string;
 }
 
-const EMPTY_RESOLVED: ObjectResolved = { field: false, fieldId: null, label: '', value: '' };
+const EMPTY_RESOLVED: ObjectResolved = {
+  field: false,
+  shape: false,
+  fieldId: null,
+  label: '',
+  value: '',
+  shapeStyle: '',
+};
 
 // ── presence types ──────────────────────────────────────────────────────────
 
@@ -95,7 +109,17 @@ type Primitive = number | string | boolean | null;
 /** The object properties an object diff may target — the editable structural
  * contract only. The record-resolved projection fields are deliberately absent,
  * so a value/label refresh can never be mistaken for a user edit. */
-export type ObjectProp = 'x' | 'y' | 'w' | 'h' | 'z' | 'readOnly' | 'binding' | 'kind' | 'partId';
+export type ObjectProp =
+  | 'x'
+  | 'y'
+  | 'w'
+  | 'h'
+  | 'z'
+  | 'readOnly'
+  | 'binding'
+  | 'content'
+  | 'kind'
+  | 'partId';
 
 /** The part properties a part diff may target. */
 export type PartProp = 'height' | 'position' | 'kind';
@@ -191,12 +215,15 @@ export class EditorDoc {
           z: o.z,
           readOnly: o.readOnly,
           binding: o.binding,
+          content: o.content,
         });
         this.#resolved.set(o.id, {
           field: o.field,
+          shape: o.shape,
           fieldId: o.fieldId,
           label: o.label,
           value: o.value,
+          shapeStyle: o.shapeStyle,
         });
       }
     });
@@ -265,12 +292,15 @@ export class EditorDoc {
     };
   }
 
+  // Key order MUST match the server's ObjectView serde output (main.rs), since
+  // doc-check deep-equals renderModel against the committed fixture JSON.
   #toView(o: ObjectDoc): ObjectView {
     const r = this.#resolved.get(o.id) ?? EMPTY_RESOLVED;
     return {
       id: o.id,
       kind: o.kind,
       field: r.field,
+      shape: r.shape,
       fieldId: r.fieldId,
       x: o.x,
       y: o.y,
@@ -279,8 +309,10 @@ export class EditorDoc {
       z: o.z,
       readOnly: o.readOnly,
       binding: o.binding,
+      content: o.content,
       label: r.label,
       value: r.value,
+      shapeStyle: r.shapeStyle,
     };
   }
 

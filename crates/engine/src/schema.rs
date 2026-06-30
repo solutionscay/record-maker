@@ -18,6 +18,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0002_layout_contract",
         include_str!("migrations/0002_layout_contract.sql"),
     ),
+    (
+        "0003_object_content",
+        include_str!("migrations/0003_object_content.sql"),
+    ),
 ];
 
 /// Schema version this build targets (the number of migrations defined).

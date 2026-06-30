@@ -13,6 +13,7 @@
   // parity-checked canvas DOM.
   import type { EditorDoc, ToolKind } from './doc.svelte';
   import { createPart, setObjectProps as persistProps } from './persist';
+  import { llog, lerror } from './log';
 
   let { doc, layoutId = '' }: { doc: EditorDoc; layoutId?: string } = $props();
 
@@ -44,6 +45,7 @@
   // ── Create zone ──────────────────────────────────────────────────────────
 
   function pickTool(t: ToolKind): void {
+    llog('tool', 'rail: pick tool', { tool: t, fieldId });
     doc.setTool(t, t === 'field' ? fieldId : null);
   }
   function onFieldChange(): void {
@@ -52,9 +54,11 @@
   async function addPart(): Promise<void> {
     if (busy) return;
     busy = true;
+    llog('create', 'rail: add band', { kind: partKind });
     try {
       doc.addPart(await createPart(layoutId, partKind, 80));
     } catch (e) {
+      lerror('create', 'add band failed', e);
       doc.setError(e instanceof Error ? e.message : String(e));
     } finally {
       busy = false;
@@ -87,6 +91,7 @@
   async function setStyle(key: string, value: string | number): Promise<void> {
     if (selectedId === null) return;
     const next = { ...selectedProps, [key]: value };
+    llog('persist', 'rail: set style', { id: selectedId, key, value });
     // Optimistic + undoable document change; the canvas's shapeStyle then refreshes
     // from the server's single-source derivation.
     doc.setObjectProps(selectedId, JSON.stringify(next));
@@ -95,6 +100,7 @@
       const shapeStyle = await persistProps(layoutId, selectedId, next);
       doc.setShapeStyle(selectedId, shapeStyle);
     } catch (e) {
+      lerror('persist', 'set style failed', e);
       doc.setError(e instanceof Error ? e.message : String(e));
     }
   }

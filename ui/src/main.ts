@@ -3,6 +3,7 @@ import App from './App.svelte';
 import RailTools from './lib/RailTools.svelte';
 import { EditorDoc } from './lib/doc.svelte';
 import type { DesignModel } from './lib/model';
+import { llog, lerror } from './lib/log';
 
 // Layout Mode editor COORDINATOR (#62). It owns the single EditorDoc store and
 // mounts two islands that SHARE it: the canvas into `#layout-editor` (the content
@@ -16,6 +17,7 @@ const canvasNode = document.getElementById('layout-editor');
 if (canvasNode) {
   const layoutId = canvasNode.dataset.layout ?? '';
   const doc = new EditorDoc();
+  llog('init', 'coordinator start', { layoutId });
 
   // Fetch + hydrate the shared store. Errors surface through the store so the
   // canvas can show them.
@@ -25,7 +27,10 @@ if (canvasNode) {
       return r.json();
     })
     .then((data: DesignModel) => doc.hydrate(data))
-    .catch((e: unknown) => doc.setError(e instanceof Error ? e.message : String(e)));
+    .catch((e: unknown) => {
+      lerror('init', 'model fetch failed', e);
+      doc.setError(e instanceof Error ? e.message : String(e));
+    });
 
   mount(App, { target: canvasNode, props: { doc, layoutId } });
 
@@ -35,4 +40,5 @@ if (canvasNode) {
   if (toolsNode) {
     mount(RailTools, { target: toolsNode, props: { doc, layoutId } });
   }
+  llog('init', 'islands mounted', { canvas: true, rail: !!toolsNode });
 }

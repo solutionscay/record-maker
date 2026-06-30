@@ -5,6 +5,7 @@
 // shape style (the single source of that derivation, [[layout-object-types]]).
 
 import type { ObjectView, PartView } from './model';
+import { llog } from './log';
 
 /** The object the Create zone places (#48). For a `field`, `fieldId` names which
  * field to bind (the server builds the binding + spawns the caption label). `rec`
@@ -23,13 +24,19 @@ export interface NewObjectRequest {
 }
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {
+  llog('persist', `POST ${url}`, { body });
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return (await r.json()) as T;
+  if (!r.ok) {
+    llog('error', `POST ${url} → HTTP ${r.status}`);
+    throw new Error(`HTTP ${r.status}`);
+  }
+  const json = (await r.json()) as T;
+  llog('persist', `POST ${url} ✓`, { response: json });
+  return json;
 }
 
 /** Create an object; returns the created view(s) — a field returns its value

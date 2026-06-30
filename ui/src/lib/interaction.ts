@@ -30,6 +30,9 @@ export class CanvasInteraction {
   /** True between a gesture's *Start and *End, so reactive re-syncs don't fight
    * the live transform moveable is driving. */
   #gesturing = false;
+  /** Whether the active gesture actually moved/resized something — gates mark +
+   * persist so a plain click (select, no movement) doesn't POST or push undo. */
+  #moved = false;
 
   constructor(stage: HTMLElement, doc: EditorDoc, layoutId: string) {
     this.#stage = stage;
@@ -78,23 +81,37 @@ export class CanvasInteraction {
       hitRate: 0,
       toggleContinueSelect: 'shift',
     });
-    // Live-update the store selection as the marquee adds/removes objects.
+    // A marquee over empty canvas live-updates the store selection.
     this.#selecto.on('select', (e) => this.#doc.selectOnly(this.#elementsToIds(e.selected)));
-    // A press that lands on a moveable handle or an already-selected object is a
-    // transform, not a marquee — let moveable take it.
+    // Decide, at press time, who owns the gesture:
     this.#selecto.on('dragStart', (e) => {
-      const target = e.inputEvent.target as Element | null;
-      const objEl = target?.closest('.fm-obj') ?? null;
-      const onSelected = objEl ? this.#doc.isSelected(this.#idForElement(objEl) ?? -1) : false;
-      if ((target && this.#moveable.isMoveableElement(target)) || onSelected) e.stop();
-    });
-    // If a marquee began on an empty spot but ended on a selection, hand the same
-    // gesture to moveable so click-drag-in-one feels native.
-    this.#selecto.on('selectEnd', (e) => {
-      if (!e.isDragStart) return;
-      const els = e.selected as HTMLElement[];
-      e.inputEvent.preventDefault();
-      this.#moveable.setState({ target: els }, () => this.#moveable.dragStart(e.inputEvent));
+      const input = e.inputEvent;
+      const target = input.target as Element | null;
+      // moveable's own control box → it's a transform; let moveable have it.
+      if (target && this.#moveable.isMoveableElement(target)) {
+        e.stop();
+        return;
+      }
+      const objEl = (target?.closest('.fm-obj') ?? null) as HTMLElement | null;
+      if (!objEl) return; // empty canvas → selecto runs its marquee
+      const id = this.#idForElement(objEl);
+      if (id === undefined) return;
+      // Shift adjusts the selection without starting a drag.
+      if (input.shiftKey) {
+        this.#doc.toggle(id);
+        e.stop();
+        return;
+      }
+      // Already in the selection → moveable drags the (possibly multi-) group.
+      if (this.#doc.isSelected(id)) {
+        e.stop();
+        return;
+      }
+      // Unselected object: select it AND hand THIS gesture to moveable, so a
+      // press + drag moves it in one motion (no select-then-grab two-step).
+      this.#doc.selectOnly([id]);
+      e.stop();
+      this.#moveable.setState({ target: [objEl] }, () => this.#moveable.dragStart(input));
     });
   }
 
@@ -119,25 +136,31 @@ export class CanvasInteraction {
 
   #begin(): void {
     this.#gesturing = true;
+    this.#moved = false;
   }
 
-  /** End a gesture: seal one undo step and persist the moved/resized group. */
+  /** End a gesture: if it actually changed geometry, seal one undo step and
+   * persist the moved/resized group; a no-move click does neither. */
   #end(): void {
     this.#gesturing = false;
-    this.#doc.mark();
-    void this.#persistSelection();
+    if (this.#moved) {
+      this.#doc.mark();
+      void this.#persistSelection();
+    }
     this.syncSelection();
   }
 
   #applyMove(target: HTMLElement | SVGElement, left: number, top: number): void {
     const id = this.#idForElement(target);
     if (id === undefined) return;
+    this.#moved = true;
     this.#doc.setObjectGeometry(id, { x: clampOrigin(left), y: clampOrigin(top) });
   }
 
   #applyResize(target: HTMLElement | SVGElement, width: number, height: number, left: number, top: number): void {
     const id = this.#idForElement(target);
     if (id === undefined) return;
+    this.#moved = true;
     this.#doc.setObjectGeometry(id, {
       x: clampOrigin(left),
       y: clampOrigin(top),

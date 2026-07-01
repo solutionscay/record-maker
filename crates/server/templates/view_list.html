@@ -16,6 +16,7 @@ Table view, then they'll list here.</p>
         data-action="/browse/{{ nav.layout_id }}/{{ row.id }}"
         data-open="/browse/{{ nav.layout_id }}/{{ row.id }}/open"
         data-revert="/browse/{{ nav.layout_id }}/{{ row.id }}/revert"
+        data-layout="{{ nav.layout_id }}"
         data-view="list" data-rec="{{ loop.index }}">
     {% for p in row.parts %}{% call band::band(p, true) %}{% endfor %}
   </form>
@@ -23,8 +24,6 @@ Table view, then they'll list here.</p>
   {% when None %}{% endmatch %}
   {% for p in footer %}{% call band::band(p, false) %}{% endfor %}
 </div>
-<p class="hint">{{ rows.len() }} record(s) of <strong>{{ table }}</strong>, each a
-repeated Body band — the record stepper highlights the current row.</p>
 {% endif %}
 {% endblock %}
 

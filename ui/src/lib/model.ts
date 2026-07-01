@@ -83,6 +83,8 @@ export interface DesignModel {
   total: number;
   /** Canvas width in px. */
   width: number;
+  /** The layout's Browse view (`form` | `list` | `table`); gates summary bands. */
+  view: string;
   /** The primary table's fields — what the Create zone's Field tool offers. */
   fields: FieldChoice[];
   /** Layout parts, rendered top→bottom in array order. */

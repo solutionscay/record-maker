@@ -183,6 +183,9 @@ export class EditorDoc {
   /** Canvas width (px). Server-derived (max object right edge + margin, #44); the
    * store keeps the hydrated value — recomputing it is the engine's job (#15). */
   #width = $state(0);
+  /** The layout's Browse view (`form` | `list` | `table`). Gates summary part
+   * kinds (a form allows only header/body/footer, Issue 3). Hydrated, never edited. */
+  #view = $state('');
   /** Flat object map, keyed by object id — the store's primary document table. */
   readonly #objects = new SvelteMap<number, ObjectDoc>();
   /** Parts in `position` order. Replaced immutably on edit so reads stay reactive. */
@@ -236,6 +239,7 @@ export class EditorDoc {
   hydrate(model: DesignModel): void {
     this.#layoutId = model.layoutId;
     this.#width = model.width;
+    this.#view = model.view ?? '';
     this.#rec = model.rec;
     this.#total = model.total;
     this.#fields = model.fields.slice();
@@ -302,6 +306,12 @@ export class EditorDoc {
     return this.#width;
   }
 
+  /** The layout's Browse view (`form` | `list` | `table`) — the UI gates summary
+   * part kinds on it (Issue 3). Empty until hydrated. */
+  get view(): string {
+    return this.#view;
+  }
+
   get hydrated(): boolean {
     return this.#hydrated;
   }
@@ -346,6 +356,7 @@ export class EditorDoc {
       rec: this.#rec,
       total: this.#total,
       width: this.#width,
+      view: this.#view,
       fields: this.#fields,
       parts,
     };
@@ -459,6 +470,20 @@ export class EditorDoc {
     this.#parts = [...this.#parts, { id: view.id, kind: view.kind, height: view.height, position }];
     this.selectPart(view.id);
     llog('store', 'addPart', { id: view.id, kind: view.kind, position });
+  }
+
+  /** Resync part positions after a server reorder (#Issue 4 `move_part`). Takes the
+   * server's `[{id, position}]` and rewrites each matching `PartDoc.position`; the
+   * part array is replaced immutably so reads stay reactive, and `renderModel`'s
+   * position sort reflows the canvas. A plain structural mutation like
+   * `addPart`/`removePart` — NOT undo-recorded. Unknown ids are ignored. */
+  applyPartPositions(list: { id: number; position: number }[]): void {
+    if (list.length === 0) return;
+    const byId = new Map(list.map((p) => [p.id, p.position]));
+    this.#parts = this.#parts.map((p) =>
+      byId.has(p.id) ? { ...p, position: byId.get(p.id)! } : p,
+    );
+    llog('store', 'applyPartPositions', { list });
   }
 
   /** Remove a part and all objects it owns from the local document. Part lifecycle

@@ -350,6 +350,30 @@ impl Solution {
         Ok(n)
     }
 
+    /// Move an object to a different band on the SAME layout (cross-band drag,
+    /// #46): update its `part_id` and part-relative origin in one write. Both the
+    /// object and the target part must belong to `layout_id`, else it's a no-op
+    /// returning 0 (mirroring the geometry commands' scoping, so a stale/forged
+    /// part id can't graft the object onto a foreign layout). Returns rows updated.
+    pub fn set_object_part(
+        &self,
+        layout_id: i64,
+        object_id: i64,
+        part_id: i64,
+        x: i64,
+        y: i64,
+    ) -> Result<usize> {
+        if !self.part_in_layout(part_id, layout_id)? {
+            return Ok(0);
+        }
+        let n = self.app.execute(
+            "UPDATE meta_object SET part_id=?1, x=?2, y=?3 \
+             WHERE id=?4 AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?5)",
+            params![part_id, x, y, object_id, layout_id],
+        )?;
+        Ok(n)
+    }
+
     /// Persist several objects' geometry atomically (#46) — a group drag/resize
     /// commits in one transaction so a multi-select transform never half-applies.
     /// Each item is `(object_id, x, y, w, h)`; every UPDATE is layout-scoped like
@@ -447,6 +471,7 @@ impl Solution {
     /// header/body/footer in their structural slots and places summary bands
     /// around the body instead of blindly appending.
     pub fn create_part(&self, layout_id: i64, kind: PartKind, height: i64) -> Result<i64> {
+        self.reject_form_summary(layout_id, kind)?;
         let parts = self.parts(layout_id)?;
         self.validate_part_create(&parts, kind)?;
         let position = self.insertion_position(&parts, kind);
@@ -500,6 +525,7 @@ impl Solution {
         if current.kind == PartKind::Body && kind != PartKind::Body {
             bail!("a layout must keep exactly one body part");
         }
+        self.reject_form_summary(layout_id, kind)?;
         let parts = self.parts(layout_id)?;
         self.validate_part_kind_change(&parts, part_id, kind)?;
         let n = self.app.execute(
@@ -523,6 +549,69 @@ impl Solution {
             params![part_id, layout_id],
         )?;
         Ok(n)
+    }
+
+    /// Move a summary band up or down within its layout, staying strictly between
+    /// the header and footer (Issue 4). **Only** `SubSummary`/`GrandSummary` parts
+    /// move — any other target is a no-op returning `0`. The band swaps its
+    /// `position` with the adjacent part in the requested direction (previous when
+    /// `up`, next when down), but the move is refused (no-op, `0`) when there is no
+    /// neighbour, or the neighbour is the `Header` (moving up) or `Footer` (moving
+    /// down) — so a summary can never rise above the header or sink below the
+    /// footer. Layout-scoped like the other part commands; the swap runs in a
+    /// transaction so positions never half-update. Returns the rows changed (`0` =
+    /// no move, `2` = swapped).
+    pub fn move_part(&mut self, layout_id: i64, part_id: i64, up: bool) -> Result<usize> {
+        let parts = self.parts(layout_id)?; // ordered by (position, id)
+        let Some(idx) = parts.iter().position(|p| p.id == part_id) else {
+            return Ok(0);
+        };
+        let part = &parts[idx];
+        if !matches!(part.kind, PartKind::SubSummary | PartKind::GrandSummary) {
+            return Ok(0);
+        }
+        let neighbor = if up {
+            if idx == 0 {
+                return Ok(0);
+            }
+            &parts[idx - 1]
+        } else {
+            if idx + 1 >= parts.len() {
+                return Ok(0);
+            }
+            &parts[idx + 1]
+        };
+        if (up && neighbor.kind == PartKind::Header) || (!up && neighbor.kind == PartKind::Footer) {
+            return Ok(0);
+        }
+        let (a_id, a_pos) = (part.id, part.position);
+        let (b_id, b_pos) = (neighbor.id, neighbor.position);
+        let tx = self.app.transaction()?;
+        tx.execute(
+            "UPDATE meta_part SET position=?1 WHERE id=?2 AND layout_id=?3",
+            params![b_pos, a_id, layout_id],
+        )?;
+        tx.execute(
+            "UPDATE meta_part SET position=?1 WHERE id=?2 AND layout_id=?3",
+            params![a_pos, b_id, layout_id],
+        )?;
+        tx.commit()?;
+        Ok(2)
+    }
+
+    /// Form layouts allow only header/body/footer — summary bands are a List/Table
+    /// feature (Issue 3). Reject creating or converting to a summary when the
+    /// owning layout renders as a form (defense in depth; the client greys these
+    /// options out too).
+    fn reject_form_summary(&self, layout_id: i64, kind: PartKind) -> Result<()> {
+        if matches!(kind, PartKind::SubSummary | PartKind::GrandSummary) {
+            if let Some(lay) = self.layout_by_id(layout_id)? {
+                if lay.view == "form" {
+                    bail!("a form layout allows only header, body, and footer parts");
+                }
+            }
+        }
+        Ok(())
     }
 
     fn validate_part_create(&self, parts: &[PartMeta], kind: PartKind) -> Result<()> {
@@ -1342,7 +1431,13 @@ mod tests {
             }],
         )
         .unwrap();
-        let lay = s.layouts().unwrap()[0].clone();
+        // Summaries are a List/Table feature (Issue 3), so exercise the List view.
+        let lay = s
+            .layouts()
+            .unwrap()
+            .into_iter()
+            .find(|l| l.view == "list")
+            .unwrap();
         let before = s.parts(lay.id).unwrap();
         let footer_pos = before
             .iter()
@@ -1376,7 +1471,13 @@ mod tests {
             }],
         )
         .unwrap();
-        let lay = s.layouts().unwrap()[0].clone();
+        // Summaries are a List/Table feature (Issue 3), so exercise the List view.
+        let lay = s
+            .layouts()
+            .unwrap()
+            .into_iter()
+            .find(|l| l.view == "list")
+            .unwrap();
         let body = body_part(&s, lay.id);
         let part_id = s.create_part(lay.id, PartKind::SubSummary, 80).unwrap();
         let part = s.part_by_id(lay.id, part_id).unwrap().unwrap();
@@ -1429,7 +1530,13 @@ mod tests {
             }],
         )
         .unwrap();
-        let lay = s.layouts().unwrap()[0].clone();
+        // Grand summaries are a List/Table feature (Issue 3): use the List view.
+        let lay = s
+            .layouts()
+            .unwrap()
+            .into_iter()
+            .find(|l| l.view == "list")
+            .unwrap();
 
         assert!(s.create_part(lay.id, PartKind::Body, 40).is_err());
         assert!(s.create_part(lay.id, PartKind::Header, 40).is_err());
@@ -1568,5 +1675,123 @@ mod tests {
         let field = unchanged.iter().find(|o| o.id == field_id).unwrap();
         assert_eq!(field.binding.as_deref(), Some("Customers.Email"));
         assert!(field.read_only);
+    }
+
+    #[test]
+    fn form_layout_rejects_summary_parts_but_list_allows_them() {
+        // Issue 3: a form is header/body/footer only. Creating or converting to a
+        // sub/grand summary on a form is refused; List/Table still allow them.
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s
+            .create_table(
+                "Customers",
+                &[NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                }],
+            )
+            .unwrap();
+        let layouts = s.layouts_for_table(tid).unwrap();
+        let form = layouts.iter().find(|l| l.view == "form").unwrap();
+        let list = layouts.iter().find(|l| l.view == "list").unwrap();
+
+        // A form rejects creating a summary band of either kind.
+        assert!(s.create_part(form.id, PartKind::SubSummary, 40).is_err());
+        assert!(s.create_part(form.id, PartKind::GrandSummary, 40).is_err());
+        // A form rejects converting an existing band to a summary.
+        let form_footer = s
+            .parts(form.id)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.kind == PartKind::Footer)
+            .unwrap();
+        assert!(s
+            .set_part_kind(form.id, form_footer.id, PartKind::SubSummary)
+            .is_err());
+        assert!(s
+            .set_part_kind(form.id, form_footer.id, PartKind::GrandSummary)
+            .is_err());
+
+        // A list allows both create and convert-to-summary.
+        assert!(s.create_part(list.id, PartKind::SubSummary, 40).is_ok());
+        assert!(s.create_part(list.id, PartKind::GrandSummary, 40).is_ok());
+        let list_footer = s
+            .parts(list.id)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.kind == PartKind::Footer)
+            .unwrap();
+        assert!(s
+            .set_part_kind(list.id, list_footer.id, PartKind::SubSummary)
+            .is_ok());
+    }
+
+    #[test]
+    fn move_part_reorders_summaries_and_clamps_at_boundaries() {
+        // Issue 4: a summary band moves up/down but never crosses the header or
+        // footer; a non-summary target is a no-op.
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s
+            .create_table(
+                "Customers",
+                &[NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                }],
+            )
+            .unwrap();
+        let list = s
+            .layouts_for_table(tid)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.view == "list")
+            .unwrap();
+        // Build: header, body, sub, grand, footer (create order places summaries
+        // between the body and the footer).
+        let sub = s.create_part(list.id, PartKind::SubSummary, 40).unwrap();
+        let grand = s.create_part(list.id, PartKind::GrandSummary, 40).unwrap();
+
+        let kinds = |s: &Solution| -> Vec<PartKind> {
+            s.parts(list.id).unwrap().iter().map(|p| p.kind).collect()
+        };
+        assert_eq!(
+            kinds(&s),
+            vec![
+                PartKind::Header,
+                PartKind::Body,
+                PartKind::SubSummary,
+                PartKind::GrandSummary,
+                PartKind::Footer,
+            ]
+        );
+
+        // Move the grand summary up: it swaps with the sub summary.
+        assert_eq!(s.move_part(list.id, grand, true).unwrap(), 2);
+        assert_eq!(
+            kinds(&s),
+            vec![
+                PartKind::Header,
+                PartKind::Body,
+                PartKind::GrandSummary,
+                PartKind::SubSummary,
+                PartKind::Footer,
+            ]
+        );
+
+        // Move the sub summary down: it can't cross the footer — no-op.
+        assert_eq!(s.move_part(list.id, sub, false).unwrap(), 0);
+
+        // Move the grand summary up twice more: past the body, then clamp at header.
+        assert_eq!(s.move_part(list.id, grand, true).unwrap(), 2); // swaps with body
+        assert_eq!(kinds(&s)[1], PartKind::GrandSummary);
+        assert_eq!(s.move_part(list.id, grand, true).unwrap(), 0); // header blocks it
+        assert_eq!(kinds(&s)[0], PartKind::Header);
+        assert_eq!(kinds(&s)[1], PartKind::GrandSummary);
+
+        // A non-summary part (the body) never moves.
+        let body = body_part(&s, list.id);
+        assert_eq!(s.move_part(list.id, body.id, true).unwrap(), 0);
+        // An unknown/foreign part id is a no-op.
+        assert_eq!(s.move_part(list.id, 999_999, true).unwrap(), 0);
     }
 }

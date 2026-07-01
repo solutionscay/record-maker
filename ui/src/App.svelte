@@ -70,6 +70,10 @@
     void doc.renderModel;
     void doc.activeTool;
     interaction?.refresh();
+    // Reading renderModel above tracks each object's server-derived `textStyle`, so
+    // when the inspector changes the selected text's size/style this re-applies it
+    // to an open inline editor LIVE — without committing/closing it (#5).
+    interaction?.syncOpenTextEditor();
   });
 
   // Push the current zoom into the interaction layer so placement coordinates
@@ -179,25 +183,29 @@
     position: relative;
     touch-action: none;
     overflow: auto;
-    min-height: calc(100vh - 8rem);
+    height: 100%;
+    padding: 30px;
   }
   /* The zoom layer: transform scales the canvas without reflowing the chrome.
-     `width: max-content` keeps it sized to the canvas. */
+     The workspace FILLS the pane so the canvas card stretches to a symmetric 30px
+     gutter (matching the top) instead of sitting fixed-width and centred. The
+     content-derived model width just becomes a floor (min-width below). */
   .le-workspace {
     position: relative;
-    width: max-content;
-    --le-part-gutter: 1.45rem;
+    width: 100%;
+    --le-part-gutter: 28px;
     padding-left: var(--le-part-gutter);
   }
   .le-canvas-wrap {
     position: relative;
-    width: max-content;
-    margin: 1rem 0;
+    width: 100%;
+    margin: 0;
   }
   .le-part-overlays {
     position: absolute;
     top: 1px;
     left: 0;
+    width: 100% !important;
     pointer-events: none;
   }
   .le-part-label {
@@ -205,12 +213,13 @@
     left: calc(-1 * var(--le-part-gutter));
     width: var(--le-part-gutter);
     padding: 0.35rem 0;
-    border: 1px solid #9d9780;
-    border-right: 0;
+    border: 0;
+    border-right: 1px dashed rgba(0, 0, 0, 0.13);
     border-radius: 0;
-    background: #f1eed8;
-    color: #2f3742;
-    font: 600 0.68rem/1 system-ui, sans-serif;
+    background: rgba(0, 0, 0, 0.025);
+    color: #9a9aa0;
+    font: 600 9px/1 -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+    letter-spacing: 0.14em;
     writing-mode: vertical-rl;
     text-orientation: mixed;
     transform: rotate(180deg);
@@ -221,8 +230,8 @@
     box-sizing: border-box;
   }
   .le-part-label.selected {
-    border-color: #1f6feb;
-    background: #e8f1ff;
+    border-right-color: var(--rm-accent, #0a84ff);
+    background: var(--rm-accent-soft, rgba(10, 132, 255, 0.12));
     color: #174ea6;
   }
   .le-part-resize {
@@ -298,11 +307,15 @@
     outline-offset: -1px;
   }
   .le-stage :global(.fm-canvas) {
+    width: 100% !important;
     min-width: 760px;
     margin: 0;
+    border: 0.5px solid var(--rm-border-strong, rgba(0, 0, 0, 0.16));
+    border-radius: 8px;
+    box-shadow: var(--rm-shadow-card, 0 1px 3px rgba(0, 0, 0, 0.08), 0 8px 26px rgba(0, 0, 0, 0.07));
   }
   .le-stage :global(.fm-part.selected-part) {
-    outline-color: #1f6feb;
+    outline-color: var(--rm-accent, #0a84ff);
     outline-style: solid;
   }
   .le-stage :global(.fm-obj) {

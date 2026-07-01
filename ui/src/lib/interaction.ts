@@ -18,11 +18,11 @@
 import Moveable from 'moveable';
 import Selecto from 'selecto';
 
-import type { EditorDoc, ToolKind } from './doc.svelte';
+import type { EditorDoc, ObjectDoc, ToolKind } from './doc.svelte';
 import type { ObjectView } from './model';
 import { GRID, SNAP_THRESHOLD, clampOrigin, elementsToObjectIds, objectIdsInPaintOrder, snapToGrid } from './canvas-edit';
 import { defaultBox, defaultProps, partAtY } from './create';
-import { createObject, deleteObject, setObjectContent } from './persist';
+import { createObject, deleteObject, setObjectContent, setObjectPart } from './persist';
 import { llog, lerror } from './log';
 
 type DrawTool = Exclude<ToolKind, 'pointer'>;
@@ -57,6 +57,9 @@ export class CanvasInteraction {
   #hoverOutline: HTMLElement | null = null;
   #textEditor: HTMLTextAreaElement | null = null;
   #textEditingId: number | null = null;
+  /** Tears down the open inline text editor (removes its document-level
+   * outside-press listener + element). Null when no editor is open. */
+  #textEditorCleanup: (() => void) | null = null;
   #rectFrame: number | null = null;
   /** Object ids moveable currently targets, and a cheap key to dedupe setState. */
   #targetIds = new Set<number>();
@@ -145,6 +148,17 @@ export class CanvasInteraction {
     });
     // A marquee over empty canvas live-updates the store selection.
     this.#selecto.on('select', (e) => this.#doc.selectOnly(this.#elementsToIds(e.selected)));
+    // When the marquee ends, pin the FINAL selection and attach moveable to the
+    // group SYNCHRONOUSLY. The reactive refresh (App.svelte $effect) is async, so
+    // relying on it alone can leave `#targetIds` stale at the instant the user
+    // presses to drag the group — the press would then re-select a single object
+    // instead of grabbing the marqueed set. Running `#updateTarget()` here makes
+    // the control box appear and populates `#targetIds` before the next pointer
+    // stream, so a press on any selected object drags the whole group.
+    this.#selecto.on('selectEnd', (e) => {
+      this.#doc.selectOnly(this.#elementsToIds(e.selected));
+      this.#updateTarget();
+    });
     // Decide, at press time, who owns the gesture:
     this.#selecto.on('dragStart', (e) => {
       const input = e.inputEvent;
@@ -450,6 +464,7 @@ export class CanvasInteraction {
     window.removeEventListener('mouseup', this.#onDrawUp);
     this.#drawPreview?.remove();
     this.#hoverOutline?.remove();
+    this.#textEditorCleanup?.();
     this.#textEditor?.remove();
     if (this.#rectFrame !== null) cancelAnimationFrame(this.#rectFrame);
     this.#moveable.destroy();
@@ -619,31 +634,60 @@ export class CanvasInteraction {
 
   #startTextEdit(id: number): void {
     const o = this.#doc.getObject(id);
-    const top = o ? this.#partTop(o.partId) : null;
     const overlay = this.#partOverlay();
-    if (!o || top === null || !overlay) return;
+    if (!o || this.#partTop(o.partId) === null || !overlay) return;
     this.#textEditor?.remove();
     this.#textEditingId = id;
     this.#paintHover();
     const editor = document.createElement('textarea');
     editor.className = 'le-inline-text-editor';
     editor.value = o.content;
-    editor.style.left = `${o.x}px`;
-    editor.style.top = `${top + o.y}px`;
-    editor.style.width = `${o.w}px`;
-    editor.style.height = `${o.h}px`;
     overlay.append(editor);
     this.#textEditor = editor;
+    // Match the object's resolved text style (size / weight / italic / underline /
+    // colour / align) so the editor LOOKS like the text it edits (#5). Kept in
+    // sync live via `syncOpenTextEditor()` while the inspector is used.
+    this.#applyEditorTextStyle(editor, o);
+
     const finish = (commit: boolean) => {
       if (this.#textEditor !== editor) return;
       const next = editor.value;
+      document.removeEventListener('pointerdown', onOutsidePointerDown, true);
       editor.remove();
       this.#textEditor = null;
       this.#textEditingId = null;
+      this.#textEditorCleanup = null;
       if (commit && next !== o.content) void this.#commitTextEdit(id, next);
       this.#paintHover();
     };
-    editor.addEventListener('blur', () => finish(true), { once: true });
+    // A press inside the inspector must keep the editor open even though the
+    // textarea blurs. `relatedTarget` alone is unreliable: WebKit (this app's
+    // Linux webview) and Safari/Firefox do NOT focus <button>s on click, so
+    // toggling B/I/U would blur to `null`. So a press inside the inspector arms a
+    // one-shot guard the imminent blur reads.
+    let guardBlur = false;
+    // A press that lands anywhere OTHER than the editor or the inspector commits
+    // and closes the editor. Pressing the inspector must NOT close it, so its size
+    // / style controls can be adjusted mid-edit and reflected live (#5).
+    const onOutsidePointerDown = (ev: Event) => {
+      const t = ev.target as Node | null;
+      if (t && (editor.contains(t) || this.#inspectorEl()?.contains(t))) {
+        guardBlur = true;
+        setTimeout(() => {
+          guardBlur = false;
+        }, 0);
+        return;
+      }
+      finish(true);
+    };
+    // Focus leaving the textarea commits — UNLESS it moved INTO the inspector (or a
+    // just-pressed inspector control that didn't take focus), so inspector edits
+    // restyle the editor live (#5).
+    editor.addEventListener('blur', (e) => {
+      const next = e.relatedTarget as Node | null;
+      if (guardBlur || (next && this.#inspectorEl()?.contains(next))) return;
+      finish(true);
+    });
     editor.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -653,8 +697,49 @@ export class CanvasInteraction {
         finish(true);
       }
     });
+    document.addEventListener('pointerdown', onOutsidePointerDown, true);
+    this.#textEditorCleanup = () => document.removeEventListener('pointerdown', onOutsidePointerDown, true);
     editor.focus();
     editor.select();
+  }
+
+  /** Re-apply the editing object's server-derived text style to the open inline
+   * editor, so inspector size/style changes appear LIVE without closing it (#5).
+   * No-op when no text editor is open. Called reactively from App.svelte when the
+   * render model (and thus the object's `textStyle`) changes. */
+  syncOpenTextEditor(): void {
+    const editor = this.#textEditor;
+    const id = this.#textEditingId;
+    if (!editor || id === null) return;
+    const o = this.#doc.getObject(id);
+    if (o) this.#applyEditorTextStyle(editor, o);
+  }
+
+  /** Copy the object's resolved `textStyle` (the same CSS the server derives and
+   * the canvas renders with) onto the inline editor, then re-assert the editor's
+   * box. `cssText` clears prior inline styles, so left/top/width/height are set
+   * AFTER it; position/border/z-index/background come from the class. */
+  #applyEditorTextStyle(editor: HTMLTextAreaElement, o: Readonly<ObjectDoc>): void {
+    const top = this.#partTop(o.partId) ?? 0;
+    editor.style.cssText = this.#objectView(o.id)?.textStyle ?? '';
+    editor.style.left = `${o.x}px`;
+    editor.style.top = `${top + o.y}px`;
+    editor.style.width = `${o.w}px`;
+    editor.style.height = `${o.h}px`;
+  }
+
+  /** The current render-model view of one object (carries the server-derived
+   * `textStyle`/styles the document `ObjectDoc` doesn't). */
+  #objectView(id: number): ObjectView | undefined {
+    for (const p of this.#doc.renderModel.parts) {
+      const v = p.objects.find((obj) => obj.id === id);
+      if (v) return v;
+    }
+    return undefined;
+  }
+
+  #inspectorEl(): HTMLElement | null {
+    return document.getElementById('layout-inspector');
   }
 
   async #commitTextEdit(id: number, content: string): Promise<void> {
@@ -682,15 +767,30 @@ export class CanvasInteraction {
    * persist the moved/resized group; a no-move click does neither. Then re-target. */
   #end(kind: 'drag' | 'resize' = 'drag'): void {
     this.#gesturing = false;
-    llog(kind, `${kind}End`, { moved: this.#moved, selection: [...this.#doc.selection] });
+    // A drag may have carried objects across band boundaries; settle them onto a
+    // real band (reparenting) BEFORE the undo mark so it's one step. Resize never
+    // crosses bands, so it skips this.
+    const reparented = kind === 'drag' && this.#moved ? this.#settleBands() : new Set<number>();
+    llog(kind, `${kind}End`, { moved: this.#moved, selection: [...this.#doc.selection], reparented: [...reparented] });
     if (this.#moved) {
       this.#doc.mark();
-      void this.#persistSelection();
+      void this.#persistSelection(reparented);
     }
     this.#targetKey = ''; // force a re-sync after the gesture
     this.#resizeStarts.clear();
     this.#scheduleRectUpdate();
     this.#updateTarget();
+    // A reparent moves the object to a DIFFERENT band's keyed-each, so Svelte
+    // destroys its old DOM node and creates a new one — changing paint order. The
+    // id→element map is stale until that re-render commits, so the sync above can
+    // target the wrong element. Re-target after the DOM flush (id-keyed dedupe
+    // cleared) so moveable's handles follow the MOVED object, not its old index.
+    if (reparented.size > 0) {
+      requestAnimationFrame(() => {
+        this.#targetKey = '';
+        this.#updateTarget();
+      });
+    }
   }
 
   /** Make the dragged/resized single target the selection (if it wasn't already). */
@@ -708,9 +808,44 @@ export class CanvasInteraction {
       return;
     }
     this.#moved = true;
-    this.#doc.setObjectGeometry(id, { x: clampOrigin(left), y: clampOrigin(top) });
+    // y is left UNCLAMPED during a drag so the object can travel above its own band
+    // (a negative part-relative y renders over the band above) — cross-band drags
+    // are settled to a real band + local y on drop (#settleBands). x stays ≥ 0.
+    this.#doc.setObjectGeometry(id, { x: clampOrigin(left), y: Math.round(top) });
     this.#scheduleRectUpdate();
-    llog('drag', 'apply move', { id, x: clampOrigin(left), y: clampOrigin(top) });
+    llog('drag', 'apply move', { id, x: clampOrigin(left), y: Math.round(top) });
+  }
+
+  /** Settle every moved object onto a real band after a drag: read its absolute
+   * canvas-y (its band's top + part-relative y), find the band that y lands in, and
+   * rewrite the object to that band with a clamped local y. Objects that crossed a
+   * boundary are reparented (partId change); the returned set drives which ones
+   * persist via the reparent endpoint vs the bulk geometry commit. */
+  #settleBands(): Set<number> {
+    const reparented = new Set<number>();
+    const model = this.#doc.renderModel;
+    const totalHeight = model.parts.reduce((sum, p) => sum + p.height, 0);
+    if (totalHeight <= 0) return reparented;
+    for (const id of this.#doc.selection) {
+      const o = this.#doc.getObject(id);
+      if (!o) continue;
+      const curTop = this.#partTop(o.partId);
+      if (curTop === null) continue;
+      const absY = Math.min(totalHeight - 1, Math.max(0, curTop + o.y));
+      const where = partAtY(model, absY);
+      if (!where) continue;
+      const x = clampOrigin(o.x);
+      const y = clampOrigin(where.localY);
+      if (where.partId !== o.partId) {
+        this.#doc.setProp(id, 'partId', where.partId);
+        this.#doc.setObjectGeometry(id, { x, y });
+        reparented.add(id);
+        llog('drag', 'settle: reparent object to band', { id, partId: where.partId, x, y });
+      } else if (x !== o.x || y !== o.y) {
+        this.#doc.setObjectGeometry(id, { x, y });
+      }
+    }
+    return reparented;
   }
 
   #captureResizeStart(target: HTMLElement | SVGElement, direction: number[], inputEvent: Event | undefined): void {
@@ -796,21 +931,32 @@ export class CanvasInteraction {
 
   // ── persistence (#46 bulk axum contract) ──
 
-  async #persistSelection(): Promise<void> {
-    const items = [...this.#doc.selection]
+  async #persistSelection(reparented: Set<number> = new Set()): Promise<void> {
+    const objs = [...this.#doc.selection]
       .map((id) => this.#doc.getObject(id))
-      .filter((o): o is NonNullable<typeof o> => !!o)
-      .map((o) => ({ id: o.id, x: o.x, y: o.y, w: o.w, h: o.h }));
-    if (items.length === 0) return;
-    llog('persist', 'POST geometry', { items });
+      .filter((o): o is NonNullable<typeof o> => !!o);
+    if (objs.length === 0) return;
+    // Objects that crossed a band boundary persist their new membership (partId +
+    // origin) via the reparent endpoint; the rest commit geometry in bulk as before.
+    const geom = objs.filter((o) => !reparented.has(o.id)).map((o) => ({ id: o.id, x: o.x, y: o.y, w: o.w, h: o.h }));
+    const moved = objs.filter((o) => reparented.has(o.id));
+    llog('persist', 'POST geometry', { geometry: geom, reparent: moved.map((o) => ({ id: o.id, partId: o.partId })) });
     try {
-      const r = await fetch(`/design/${this.#layoutId}/geometry`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(items),
-      });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      llog('persist', 'geometry saved', { count: items.length });
+      const posts: Promise<unknown>[] = [];
+      if (geom.length > 0) {
+        posts.push(
+          fetch(`/design/${this.#layoutId}/geometry`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(geom),
+          }).then((r) => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          }),
+        );
+      }
+      for (const o of moved) posts.push(setObjectPart(this.#layoutId, o.id, o.partId, o.x, o.y));
+      await Promise.all(posts);
+      llog('persist', 'geometry saved', { geometry: geom.length, reparented: moved.length });
     } catch (e) {
       // The store already reflects the edit; surface the persist failure rather
       // than tearing down the in-memory state (a reload would reveal divergence).

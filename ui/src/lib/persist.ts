@@ -67,9 +67,36 @@ export function setPartKind(layoutId: string, id: number, kind: string): Promise
   return postJson(`/design/${layoutId}/part/${id}/kind`, { kind });
 }
 
+/** Move a summary band up/down (Issue 4); returns the layout's parts as
+ * `[{id, position}]` after the move so the store can resync positions. */
+export function movePart(
+  layoutId: string,
+  id: number,
+  up: boolean,
+): Promise<{ id: number; position: number }[]> {
+  return postJson(`/design/${layoutId}/part/${id}/move`, { up });
+}
+
 /** Delete a band. Objects in the band are deleted with it. */
 export async function deletePart(layoutId: string, id: number): Promise<void> {
   const r = await fetch(`/design/${layoutId}/part/${id}/delete`, { method: 'POST' });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+}
+
+/** Reparent an object to another band (cross-band drag, #46): persist its new
+ * owning part + part-relative origin. No body on success (200). */
+export async function setObjectPart(
+  layoutId: string,
+  id: number,
+  partId: number,
+  x: number,
+  y: number,
+): Promise<void> {
+  const r = await fetch(`/design/${layoutId}/object/${id}/part`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ partId, x, y }),
+  });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
 }
 

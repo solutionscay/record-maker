@@ -465,7 +465,10 @@ fn shape_style(props: Option<&str>) -> String {
             .get("strokeWidth")
             .and_then(serde_json::Value::as_i64)
             .unwrap_or(1);
-        s.push_str(&format!("border:{width}px solid {stroke};"));
+        // Render the stroke OUTSIDE the box (box-shadow ring) so a thicker stroke
+        // grows the object visually without eating into its stored geometry; the
+        // ring also follows `border-radius`, so ellipses stay round (#44 issue 2).
+        s.push_str(&format!("box-shadow:0 0 0 {width}px {stroke};"));
     }
     if let Some(radius) = v.get("radius").and_then(serde_json::Value::as_i64) {
         s.push_str(&format!("border-radius:{radius}px;"));
@@ -493,7 +496,9 @@ fn object_style(kind: ObjectKind, props: Option<&str>) -> String {
             .and_then(serde_json::Value::as_i64)
             .unwrap_or(1)
             .max(0);
-        s.push_str(&format!("border:{width}px solid {stroke};"));
+        // Stroke grows outward (box-shadow ring) rather than inward, so geometry is
+        // preserved and a thicker border makes the object visually bigger (issue 2).
+        s.push_str(&format!("box-shadow:0 0 0 {width}px {stroke};"));
     }
     if let Some(radius) = v.get("radius").and_then(serde_json::Value::as_i64) {
         s.push_str(&format!("border-radius:{}px;", radius.max(0)));
@@ -869,6 +874,9 @@ struct DesignModel {
     rec: i64,
     total: i64,
     width: i64,
+    /// The layout's Browse view (`form` | `list` | `table`) — the client gates the
+    /// summary part-kinds on it (a form allows only header/body/footer, Issue 3).
+    view: String,
     /// The primary table's fields — what the Create zone's Field tool offers
     /// (#48/#62). Geometry-independent, so the same list rides every record.
     fields: Vec<FieldChoice>,
@@ -881,7 +889,7 @@ async fn design_model(
     Query(q): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let sol = st.sol.lock().unwrap();
-    let Some((_lay, table)) = layout_table(&sol, layout_id) else {
+    let Some((lay, table)) = layout_table(&sol, layout_id) else {
         return not_found("layout", layout_id);
     };
     let ids = sol.record_ids(&table).unwrap();
@@ -918,6 +926,7 @@ async fn design_model(
         rec,
         total,
         width: layout_canvas_width(&sol, layout_id),
+        view: lay.view.clone(),
         fields: field_choices,
         parts,
     };
@@ -955,6 +964,36 @@ async fn update_object_geometry(
             geom.w.max(1),
             geom.h.max(1),
         )
+        .unwrap();
+    if updated == 0 {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    StatusCode::OK.into_response()
+}
+
+/// A cross-band move from the Layout canvas (#46): the object's new owning part
+/// and its part-relative origin. `x`/`y` clamp to the canvas origin server-side.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ObjectPartUpdate {
+    part_id: i64,
+    x: i64,
+    y: i64,
+}
+
+/// Persist an object's new band membership from the Layout canvas (#46): a drag
+/// that crosses a band boundary POSTs `{partId,x,y}` and this reparents the object
+/// to that part, scoped to the layout and clamped to the canvas origin like the
+/// geometry commit. 200 on success; 404 when the object or target part isn't in
+/// the layout. Authoritative, so Browse reflects the new band on the next read.
+async fn update_object_part(
+    State(st): State<AppState>,
+    Path((layout_id, object_id)): Path<(i64, i64)>,
+    Json(body): Json<ObjectPartUpdate>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let updated = sol
+        .set_object_part(layout_id, object_id, body.part_id, body.x.max(0), body.y.max(0))
         .unwrap();
     if updated == 0 {
         return StatusCode::NOT_FOUND.into_response();
@@ -1229,6 +1268,48 @@ async fn update_part_kind(
         objects: Vec::new(),
     })
     .into_response()
+}
+
+/// The direction a summary band moves within its layout (Issue 4).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PartMoveBody {
+    up: bool,
+}
+
+/// A part's id + resolved position after a reorder — the lightweight shape the
+/// move endpoint returns so the client can resync `PartDoc.position` (Issue 4).
+#[derive(serde::Serialize)]
+struct PartPosition {
+    id: i64,
+    position: i64,
+}
+
+/// Move a summary band up/down within its layout, staying between the header and
+/// footer (Issue 4). 200 returns the layout's parts as `[{id, position}]` (after
+/// the move) so the client resyncs positions; 404 when the move was a no-op (no
+/// such movable part / clamped at a boundary).
+async fn move_design_part(
+    State(st): State<AppState>,
+    Path((layout_id, part_id)): Path<(i64, i64)>,
+    Json(body): Json<PartMoveBody>,
+) -> impl IntoResponse {
+    let mut sol = st.sol.lock().unwrap();
+    match sol.move_part(layout_id, part_id, body.up) {
+        Ok(0) => return StatusCode::NOT_FOUND.into_response(),
+        Ok(_) => {}
+        Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+    let positions: Vec<PartPosition> = sol
+        .parts(layout_id)
+        .unwrap()
+        .into_iter()
+        .map(|p| PartPosition {
+            id: p.id,
+            position: p.position,
+        })
+        .collect();
+    axum::Json(positions).into_response()
 }
 
 /// Delete a band from a layout. Child objects are removed with it.
@@ -1590,6 +1671,7 @@ fn app(state: AppState) -> Router {
         .route("/design/:layout/part", post(create_design_part))
         .route("/design/:layout/part/:id/height", post(update_part_height))
         .route("/design/:layout/part/:id/kind", post(update_part_kind))
+        .route("/design/:layout/part/:id/move", post(move_design_part))
         .route("/design/:layout/part/:id/delete", post(delete_design_part))
         .route(
             "/design/:layout/object/:id/geometry",
@@ -1615,6 +1697,7 @@ fn app(state: AppState) -> Router {
             "/design/:layout/object/:id/delete",
             post(delete_design_object),
         )
+        .route("/design/:layout/object/:id/part", post(update_object_part))
         .route("/design/:layout/geometry", post(update_objects_geometry))
         .route("/ui/*path", get(ui_asset))
         .with_state(state)
@@ -2278,7 +2361,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(resp.contains(r#""kind":"rect""#) && resp.contains(r#""shape":true"#));
         assert!(
-            resp.contains(r#""shapeStyle":"background:#eef;border:1px solid #88a;""#),
+            resp.contains(r#""shapeStyle":"background:#eef;box-shadow:0 0 0 1px #88a;""#),
             "derived style echoed\n{resp}"
         );
         assert!(
@@ -2487,7 +2570,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(
-            resp.contains(r#""objectStyle":"background:#ffeecc;border:3px solid #335577;""#),
+            resp.contains(r#""objectStyle":"background:#ffeecc;box-shadow:0 0 0 3px #335577;""#),
             "field box style\n{resp}"
         );
         assert!(
@@ -2509,7 +2592,7 @@ mod tests {
 
         let (_, model) = get_body(state, &format!("/design/{layout_id}/model")).await;
         assert!(
-            model.contains(r#""objectStyle":"background:#ffeecc;border:3px solid #335577;""#)
+            model.contains(r#""objectStyle":"background:#ffeecc;box-shadow:0 0 0 3px #335577;""#)
                 && model.contains(r#""textStyle":"color:#445566;font-size:16px;text-align:center;justify-content:center;""#),
             "styles persist in design model\n{model}"
         );
@@ -2527,7 +2610,14 @@ mod tests {
             }],
         )
         .unwrap();
-        let layout_id = sol.layouts().unwrap()[0].id;
+        // Summaries are a List/Table feature (Issue 3): design on the List view.
+        let layout_id = sol
+            .layouts()
+            .unwrap()
+            .into_iter()
+            .find(|l| l.view == "list")
+            .unwrap()
+            .id;
         let before = sol.parts(layout_id).unwrap().len();
         let state = state_for(sol);
 
@@ -2558,7 +2648,14 @@ mod tests {
             }],
         )
         .unwrap();
-        let layout_id = sol.layouts().unwrap()[0].id;
+        // Summaries are a List/Table feature (Issue 3): design on the List view.
+        let layout_id = sol
+            .layouts()
+            .unwrap()
+            .into_iter()
+            .find(|l| l.view == "list")
+            .unwrap()
+            .id;
         let part_id = sol
             .create_part(layout_id, PartKind::SubSummary, 80)
             .unwrap();
@@ -2665,6 +2762,59 @@ mod tests {
         assert!(
             sol.objects(part_id).unwrap().is_empty(),
             "objects deleted with the band"
+        );
+    }
+
+    /// Issue 4: the move endpoint reorders a summary band and returns the layout's
+    /// `[{id, position}]` after the move; a clamped move (past the footer) is 404.
+    #[tokio::test]
+    async fn design_move_part_reorders_and_returns_positions() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        let tid = sol
+            .create_table(
+                "Customers",
+                &[NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                }],
+            )
+            .unwrap();
+        // Summaries live on List/Table (Issue 3).
+        let layout_id = sol
+            .layouts_for_table(tid)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.view == "list")
+            .unwrap()
+            .id;
+        // header, body, sub, grand, footer.
+        let sub = sol.create_part(layout_id, PartKind::SubSummary, 40).unwrap();
+        let grand = sol
+            .create_part(layout_id, PartKind::GrandSummary, 40)
+            .unwrap();
+        let state = state_for(sol);
+
+        // Move the grand summary up: it swaps with the sub summary; response lists
+        // every part's post-move position.
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/design/{layout_id}/part/{grand}/move"),
+            r#"{"up":true}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(resp.contains(&format!(r#"{{"id":{grand},"position":2}}"#)));
+        assert!(resp.contains(&format!(r#"{{"id":{sub},"position":3}}"#)));
+
+        // The sub summary can't move below the footer — clamped ⇒ 404.
+        assert_eq!(
+            post_json(
+                state.clone(),
+                &format!("/design/{layout_id}/part/{sub}/move"),
+                r#"{"up":false}"#
+            )
+            .await,
+            StatusCode::NOT_FOUND
         );
     }
 
@@ -2832,7 +2982,7 @@ mod tests {
             r#""content":"Name""#,
             r#""content":"Note""#,
             r#""shape":true"#,
-            r#""shapeStyle":"background:#eef;border:1px solid #88a;border-radius:4px;""#,
+            r#""shapeStyle":"background:#eef;box-shadow:0 0 0 1px #88a;border-radius:4px;""#,
             r#""z":5"#,
         ] {
             assert!(body.contains(needle), "model JSON missing {needle}\n{body}");

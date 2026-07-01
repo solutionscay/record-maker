@@ -25,6 +25,8 @@ const outFile = resolve(root, '../crates/server/templates/_icons.svg');
 // symbol id (`icon-<id>`) → pixelarticons file name (without .svg). The id is the
 // stable name both surfaces reference; the file name is a pixelarticons detail.
 const ICONS = {
+  // Application brand (shell.html).
+  app: 'database',
   // Record / layout stepper (shell.html) + sidebar collapse toggle.
   first: 'arrow-bar-left',
   prev: 'chevron-left',

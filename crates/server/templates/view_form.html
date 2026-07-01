@@ -20,8 +20,18 @@
 </form>
 {% when None %}{% endmatch %}
 {% when None %}
-<p class="placeholder">No records in <strong>{{ table }}</strong> yet. Add one in
-Table view, then page through them here.</p>
+{% match chrome.nav %}
+{% when Some with (nav) %}
+<div class="empty">
+  <p class="empty-title">No records in {{ table }} yet</p>
+  <p class="empty-sub">Create your first record to get started.</p>
+  <form class="inline" method="post" action="/browse/{{ nav.layout_id }}">
+    <input type="hidden" name="view" value="{{ nav.view }}">
+    <button type="submit" class="empty-btn"><svg class="icon"><use href="#icon-plus"></use></svg>New record</button>
+  </form>
+  <p class="empty-hint">or press <kbd class="kbd-mod">Ctrl</kbd> <kbd>N</kbd></p>
+</div>
+{% when None %}{% endmatch %}
 {% endmatch %}
 {% endblock %}
 

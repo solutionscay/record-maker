@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>record-maker</title>
+  <title>Record Maker</title>
   <style>
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
@@ -34,7 +34,8 @@
     /* Unified toolbar. */
     .topbar { grid-area: topbar; display: flex; align-items: center; gap: 16px; height: 52px;
               padding: 0 16px; background: var(--rm-toolbar-bg); border-bottom: .5px solid var(--rm-border); }
-    .brand { font-size: 13.5px; font-weight: 600; color: var(--rm-text); }
+    .brand { display: inline-flex; align-items: center; gap: 7px; font-size: 13.5px; font-weight: 600; color: var(--rm-text); }
+    .brand .icon { width: 18px; height: 18px; display: block; color: var(--rm-accent); }
     .actions { display: flex; gap: 8px; margin-left: auto; }
     .act { display: inline-flex; align-items: center; gap: .3em; font-size: 12px; font-weight: 500;
            padding: 5px 11px; border-radius: 7px; border: .5px solid var(--rm-border);
@@ -64,8 +65,12 @@
     .modes a.active { background: var(--rm-segment-active-bg); color: var(--rm-text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.14); }
     .modes .disabled { color: #bcbcc1; }
     .layout-select { width: 100%; font: inherit; font-size: 13px; font-weight: 500; color: var(--rm-text);
-                     padding: 8px 11px; border: .5px solid var(--rm-border); border-radius: 8px;
-                     background: var(--rm-control-bg); box-shadow: 0 1px 2px rgba(0,0,0,.05); }
+                     padding: 8px 28px 8px 11px; border: .5px solid var(--rm-border); border-radius: 8px;
+                     box-shadow: 0 1px 2px rgba(0,0,0,.05);
+                     appearance: none; -webkit-appearance: none;
+                     background-color: var(--rm-control-bg);
+                     background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath d='M1 1.5 5 5.5 9 1.5' fill='none' stroke='%238a8a8e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+                     background-repeat: no-repeat; background-position: right 10px center; }
     /* Record stepper — the flip-book pager, styled as a macOS card. */
     .stepper { display: flex; flex-direction: column; gap: 10px; align-items: stretch;
                padding: 10px; border: .5px solid var(--rm-border); border-radius: 9px;
@@ -136,6 +141,22 @@
     button { font: inherit; padding: .4rem .8rem; border-radius: .4rem; border: 1px solid #888; cursor: pointer; background: #fff; }
     .placeholder { max-width: 46rem; color: #555; line-height: 1.5; background: #f7f9fc;
                    border: 1px dashed #cbd5e1; border-radius: .5rem; padding: 1rem 1.25rem; }
+    /* Standard empty state — centered in the content pane, offers the primary
+       "create a record" action + its keyboard shortcut. */
+    .empty { display: flex; flex-direction: column; align-items: center; justify-content: center;
+             gap: 10px; height: 100%; padding: 40px; text-align: center; }
+    .empty-title { margin: 0; font-size: 15px; font-weight: 600; color: var(--rm-text); }
+    .empty-sub { margin: 0 0 4px; font-size: 13px; color: var(--rm-text-dim); }
+    .empty-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+                 font-size: 13px; font-weight: 600; line-height: 1;
+                 color: #fff; background: var(--rm-accent); border: .5px solid transparent; border-radius: 8px;
+                 padding: 9px 16px; cursor: pointer; box-shadow: 0 1px 3px rgba(10,132,255,.4); }
+    .empty-btn:hover { filter: brightness(1.05); }
+    .empty-btn .icon { width: 15px; height: 15px; display: block; flex: none; vertical-align: 0; }
+    .empty-hint { margin: 0; font-size: 12px; color: var(--rm-text-dim); }
+    .empty-hint kbd { font: inherit; font-size: 11px; background: var(--rm-control-bg);
+                      border: .5px solid var(--rm-border-strong); border-bottom-width: 1.5px;
+                      border-radius: 5px; padding: 1px 6px; color: var(--rm-text); }
     .hint { color: #777; font-size: .85rem; max-width: 40rem; }
     /* Form / List share one shape in Browse: the view fills the content pane
        edge-to-edge (100% width/height), with no meta title or card chrome, and
@@ -223,7 +244,7 @@
   {% include "_icons.svg" %}
   <div class="app {% if chrome.mode == "design" %}has-inspector{% endif %}">
     <header class="topbar">
-      <span class="brand">record-maker</span>
+      <span class="brand"><svg class="icon"><use href="#icon-app"></use></svg>Record Maker</span>
       {% if !chrome.view_tabs.is_empty() %}
       <nav class="view-switch" title="View as">
         {% for v in chrome.view_tabs %}
@@ -236,9 +257,9 @@
         {% if chrome.mode == "browse" %}
         {% match chrome.nav %}
         {% when Some with (nav) %}
-          <form class="inline" method="post" action="/browse/{{ nav.layout_id }}">
+          <form id="rm-new-record" class="inline" method="post" action="/browse/{{ nav.layout_id }}">
             <input type="hidden" name="view" value="{{ nav.view }}">
-            <button type="submit" class="act" title="Add a new record"><svg class="icon"><use href="#icon-plus"></use></svg>New</button>
+            <button type="submit" class="act" title="Add a new record (Ctrl/⌘ N)"><svg class="icon"><use href="#icon-plus"></use></svg>New</button>
           </form>
           {% match nav.current_id %}
           {% when Some with (cid) %}
@@ -482,6 +503,21 @@
     document.addEventListener('keydown', function (e) {
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
       var k = e.key.toLowerCase();
+      // Ctrl/⌘ A must never invoke the browser's page select-all. In Layout Mode
+      // the canvas interaction layer handles this same event as object select-all.
+      if (k === 'a') {
+        e.preventDefault();
+        return;
+      }
+      // Ctrl/⌘ N — create a new record (Browse only; the New form is only
+      // present there and when a layout is open).
+      if (k === 'n') {
+        var newForm = document.getElementById('rm-new-record');
+        if (!newForm) return;
+        e.preventDefault();
+        newForm.requestSubmit ? newForm.requestSubmit() : newForm.submit();
+        return;
+      }
       if (k !== 'l' && k !== 'b') return;
       if (LID === null) return; // no layout open → nothing to switch to
       e.preventDefault();
@@ -489,6 +525,10 @@
       if (MODE === dest) return; // already in that mode
       window.location.href = '/' + dest + '/' + LID;
     });
+    // Show the platform-correct modifier symbol in keyboard hints.
+    if (/Mac|iPhone|iPad/.test(navigator.platform)) {
+      document.querySelectorAll('.kbd-mod').forEach(function (k) { k.textContent = '⌘'; });
+    }
   })();
   </script>
 </body>

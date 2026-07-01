@@ -221,8 +221,7 @@
     font: 600 9px/1 -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
     letter-spacing: 0.14em;
     writing-mode: vertical-rl;
-    text-orientation: mixed;
-    transform: rotate(180deg);
+    text-orientation: upright;
     overflow: hidden;
     white-space: nowrap;
     cursor: pointer;

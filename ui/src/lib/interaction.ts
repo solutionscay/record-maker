@@ -573,10 +573,9 @@ export class CanvasInteraction {
     const target = e.target as HTMLElement | null;
     const inEditable = !!target?.closest('input, textarea, select, [contenteditable="true"]');
 
-    // Cmd/Ctrl+1 → select every object on the canvas. Ignored while typing in a
-    // field (e.g. the inline text editor) so it can't hijack a text selection.
-    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key === '1') {
-      if (inEditable) return;
+    // Cmd/Ctrl+A selects every layout object. Native page/text select-all is
+    // never useful in Layout Mode, including while focus is in the inspector.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'a') {
       e.preventDefault();
       this.#selectAllObjects();
       return;
@@ -590,7 +589,7 @@ export class CanvasInteraction {
     void this.#deleteSelectedObjects();
   };
 
-  /** Select all canvas objects (Cmd/Ctrl+1). A no-op while a placement tool is
+  /** Select all canvas objects (Cmd/Ctrl+A). A no-op while a placement tool is
    * armed — the canvas is a drawing surface then, not a selection surface. Syncs
    * moveable's control box immediately so the group handles appear at once. */
   #selectAllObjects(): void {

@@ -672,7 +672,7 @@ export class EditorDoc {
     llog('select', 'selectOnly', { ids: [...this.#selection] });
   }
 
-  /** Select every object in the document (Cmd/Ctrl+1). Order-insensitive — the
+  /** Select every object in the document (Cmd/Ctrl+A). Order-insensitive — the
    * selection is a set; a placement-vs-select policy is the canvas's concern, not
    * the store's. Clears any part selection, mirroring `selectOnly`. */
   selectAll(): void {

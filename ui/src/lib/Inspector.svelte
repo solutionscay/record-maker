@@ -43,6 +43,7 @@
   // ── Selection-aware derived state ─────────────────────────────────────────
 
   let selectedIds = $derived([...doc.selection]);
+  let hasMultipleSelection = $derived(selectedIds.length > 1);
   let selectedId = $derived(selectedIds[0] ?? null);
   let selected = $derived(selectedId === null ? undefined : doc.getObject(selectedId));
   let selectedProps = $derived(parseProps(selected?.props ?? ''));
@@ -82,10 +83,12 @@
 
   // Header title/subtitle (design: "Field" · "Text · Name").
   let headerTitle = $derived(
-    selected ? (KIND_LABEL[selected.kind] ?? 'Object') : selectedPart ? 'Band' : 'Inspector',
+    hasMultipleSelection ? 'Multiple items selected' : selected ? (KIND_LABEL[selected.kind] ?? 'Object') : selectedPart ? 'Band' : 'Inspector',
   );
   let headerSub = $derived(
-    selected
+    hasMultipleSelection
+      ? `${selectedIds.length} objects`
+      : selected
       ? selected.kind === 'field'
         ? doc.fields.find((f) => f.id === selectedBindingFieldId)?.name || selected.binding || ''
         : selected.kind === 'text'
@@ -334,7 +337,9 @@
 </header>
 
 <div class="insp-body">
-  {#if selected}
+  {#if hasMultipleSelection}
+    <p class="insp-empty">Multiple items selected.</p>
+  {:else if selected}
     {#if selected.kind === 'field' || selected.kind === 'text'}
       <section class="insp-sec">
         <span class="side-label">{selected.kind === 'text' ? 'Text' : 'Binding'}</span>
@@ -551,12 +556,12 @@
   {/if}
 </div>
 
-{#if selected}
+{#if selectedIds.length > 0}
   <footer class="insp-foot">
     <button
       type="button"
       class="insp-delete"
-      title="Delete selected object"
+      title={hasMultipleSelection ? 'Delete selected objects' : 'Delete selected object'}
       disabled={selectedIds.length === 0 || busy}
       onclick={deleteSelectedObjects}
     >{deleteLabel}</button>
@@ -646,6 +651,14 @@
     border-radius: 7px;
     background: var(--rm-control-bg);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  }
+  .ctl-select {
+    padding-right: 28px;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath d='M1 1.5 5 5.5 9 1.5' fill='none' stroke='%238a8a8e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
   }
   .ctl-select-auto {
     width: auto;

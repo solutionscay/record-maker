@@ -19,6 +19,16 @@ use record_maker_engine::Solution;
 use record_maker_server::{seed, serve, AppState};
 
 fn main() {
+    // WebKitGTK's DMA-BUF renderer (default since 2.42) fails to create a device
+    // on many NVIDIA driver setups — the window opens but paints nothing (a blank
+    // screen), with a `nv_common_gbm_create_device failed` GBM error on stderr.
+    // Disabling it falls back to a renderer that works. Linux-only, and only when
+    // the user hasn't set the variable themselves, so it stays overridable.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     tauri::Builder::default()
         .setup(|app| {
             // --- Resolve per-app, writable/bundled paths from Tauri. ---

@@ -218,11 +218,16 @@
     font: inherit;
     font-size: 13px;
     color: var(--rm-text);
-    padding: 7px 10px;
+    padding: 7px 26px 7px 10px;
     border: 0.5px solid var(--rm-border);
     border-radius: 7px;
-    background: var(--rm-control-bg);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+    appearance: none;
+    -webkit-appearance: none;
+    background-color: var(--rm-control-bg);
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath d='M1 1.5 5 5.5 9 1.5' fill='none' stroke='%238a8a8e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 9px center;
   }
   .le-combo-row {
     display: grid;

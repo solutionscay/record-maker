@@ -592,6 +592,16 @@ export class EditorDoc {
     llog('select', 'selectOnly', { ids: [...this.#selection] });
   }
 
+  /** Select every object in the document (Cmd/Ctrl+1). Order-insensitive — the
+   * selection is a set; a placement-vs-select policy is the canvas's concern, not
+   * the store's. Clears any part selection, mirroring `selectOnly`. */
+  selectAll(): void {
+    this.#selectedPartId = null;
+    this.#selection.clear();
+    for (const id of this.#objects.keys()) this.#selection.add(id);
+    llog('select', 'selectAll', { count: this.#selection.size });
+  }
+
   /** Toggle one object's membership in the selection. */
   toggle(id: number): void {
     this.#selectedPartId = null;

@@ -120,6 +120,22 @@
     .fm-row + .fm-row, .fm-list > .fm-part + .fm-row { border-top: 1px solid #eef0f2; }
     .fm-row:hover { background: #f6f9ff; }
     .fm-row.current { background: #eaf3ff; box-shadow: inset 3px 0 0 #1f6feb; }
+    /* Standard app dialog — the shared confirm surface (native <dialog>). One
+       instance in the shell; server chrome and the Svelte islands (same document)
+       both drive it via window.appConfirm(). Forms opt in declaratively with
+       `data-confirm`, replacing native confirm(). `.danger` reddens the OK action. */
+    .dialog { border: 0; padding: 0; border-radius: .6rem; color: #1b1b1f; background: #fff;
+              width: min(26rem, calc(100vw - 2rem)); box-shadow: 0 12px 40px rgba(0,0,0,.22); }
+    .dialog::backdrop { background: rgba(20,22,28,.42); }
+    .dialog-card { margin: 0; padding: 1.1rem 1.2rem 1rem; display: flex; flex-direction: column; gap: .55rem; }
+    .dialog-title { margin: 0; font-size: 1rem; font-weight: 600; }
+    .dialog-message { margin: 0; font-size: .88rem; line-height: 1.45; color: #444; white-space: pre-wrap; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: .5rem; }
+    .dialog-btn { font-size: .85rem; padding: .35rem .9rem; }
+    .dialog-ok { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+    .dialog-ok:hover { background: #1a5fd0; }
+    .dialog.danger .dialog-ok { background: #b00020; border-color: #b00020; }
+    .dialog.danger .dialog-ok:hover { background: #970019; }
   </style>
   {% block head_extra %}{% endblock %}
 </head>
@@ -150,7 +166,8 @@
           {% match nav.current_id %}
           {% when Some with (cid) %}
           <form class="inline" method="post" action="/browse/{{ nav.layout_id }}/{{ cid }}/delete"
-                onsubmit="return confirm('Delete record {{ nav.current }} of {{ nav.total }}? This cannot be undone.');">
+                data-confirm data-confirm-title="Delete record" data-confirm-ok="Delete" data-confirm-danger
+                data-confirm-message="Delete record {{ nav.current }} of {{ nav.total }}? This cannot be undone.">
             <input type="hidden" name="view" value="{{ nav.view }}">
             <input type="hidden" name="rec" value="{{ nav.current }}">
             <button type="submit" class="act" title="Delete the current record"><svg class="icon"><use href="#icon-delete"></use></svg>Delete</button>
@@ -254,6 +271,75 @@
       <span class="status-detail">{% block statusbar %}{% endblock %}</span>
     </footer>
   </div>
+  {# Standard app dialog. One native <dialog> shared by the whole app; opened
+     via window.appConfirm() or declaratively by any form with `data-confirm`. The
+     inner form's `method="dialog"` closes on either button, setting returnValue to
+     the pressed button's value; Esc closes with an empty returnValue (= cancel). #}
+  <dialog id="app-dialog" class="dialog" aria-labelledby="app-dialog-title">
+    <form method="dialog" class="dialog-card">
+      <h2 class="dialog-title" id="app-dialog-title"></h2>
+      <p class="dialog-message" id="app-dialog-message"></p>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel" class="dialog-btn" id="app-dialog-cancel">Cancel</button>
+        <button type="submit" value="ok" class="dialog-btn dialog-ok" id="app-dialog-ok">OK</button>
+      </div>
+    </form>
+  </dialog>
+  <script>
+  (function () {
+    var dlg = document.getElementById('app-dialog');
+    var titleEl = document.getElementById('app-dialog-title');
+    var msgEl = document.getElementById('app-dialog-message');
+    var okBtn = document.getElementById('app-dialog-ok');
+    var cancelBtn = document.getElementById('app-dialog-cancel');
+
+    // Promise-based confirm on the standard dialog. Resolves true on OK, false on
+    // Cancel / Esc / backdrop. Falls back to native confirm() if <dialog> is
+    // unsupported, so a commit path is never silently lost.
+    window.appConfirm = function (opts) {
+      opts = opts || {};
+      var message = opts.message || 'Are you sure?';
+      if (!dlg || typeof dlg.showModal !== 'function') {
+        return Promise.resolve(window.confirm(message));
+      }
+      titleEl.textContent = opts.title || 'Confirm';
+      titleEl.style.display = opts.title === '' ? 'none' : '';
+      msgEl.textContent = message;
+      okBtn.textContent = opts.confirmLabel || 'OK';
+      cancelBtn.textContent = opts.cancelLabel || 'Cancel';
+      dlg.classList.toggle('danger', !!opts.danger);
+      return new Promise(function (resolve) {
+        function onClose() {
+          dlg.removeEventListener('close', onClose);
+          resolve(dlg.returnValue === 'ok');
+        }
+        dlg.addEventListener('close', onClose);
+        dlg.returnValue = '';
+        dlg.showModal();
+        // Focus Cancel by default so a stray Enter doesn't confirm a destructive act.
+        cancelBtn.focus();
+      });
+    };
+
+    // Declarative hook: any `<form data-confirm>` routes through the dialog instead
+    // of submitting immediately. On OK we call the native form.submit() (which does
+    // NOT re-fire this listener), so there is no re-entrancy guard to manage.
+    document.addEventListener('submit', function (e) {
+      var form = e.target;
+      if (!form || form.nodeName !== 'FORM' || !form.hasAttribute('data-confirm')) return;
+      e.preventDefault();
+      window.appConfirm({
+        title: form.getAttribute('data-confirm-title') || 'Confirm',
+        message: form.getAttribute('data-confirm-message') || 'Are you sure?',
+        confirmLabel: form.getAttribute('data-confirm-ok') || 'OK',
+        danger: form.hasAttribute('data-confirm-danger'),
+      }).then(function (ok) {
+        if (ok) form.submit();
+      });
+    });
+  })();
+  </script>
+
   {# Shared inline-edit controller (#40). Any `.rec-edit` element (a record's
      editor) opens on focus, commits on leaving it or pressing Enter, and reverts
      on Escape. Works the same in Form, List, and Table views. Commits use
@@ -281,6 +367,30 @@
         if (e.key === 'Enter') { e.preventDefault(); commit(); if (document.activeElement) document.activeElement.blur(); }
         else if (e.key === 'Escape') { e.preventDefault(); revert(); }
       });
+    });
+  })();
+  </script>
+  {# App-level keyboard shortcuts. Mode switching is server navigation (there is no
+     client-side toggle — Browse and Layout are separate pages), so it lives in the
+     shared chrome and works in both modes. Cmd/Ctrl+L → Layout, Cmd/Ctrl+B →
+     Browse; both no-op when no layout is open or already in that mode. #}
+  <script>
+  (function () {
+    var LID = null, MODE = "{{ chrome.mode }}";
+    {% match chrome.current_layout %}
+    {% when Some with (lid) %}
+    LID = "{{ lid }}";
+    {% when None %}
+    {% endmatch %}
+    document.addEventListener('keydown', function (e) {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      var k = e.key.toLowerCase();
+      if (k !== 'l' && k !== 'b') return;
+      if (LID === null) return; // no layout open → nothing to switch to
+      e.preventDefault();
+      var dest = k === 'l' ? 'design' : 'browse';
+      if (MODE === dest) return; // already in that mode
+      window.location.href = '/' + dest + '/' + LID;
     });
   })();
   </script>

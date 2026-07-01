@@ -540,14 +540,35 @@ export class CanvasInteraction {
   };
 
   #onKeyDown = (e: KeyboardEvent): void => {
+    const target = e.target as HTMLElement | null;
+    const inEditable = !!target?.closest('input, textarea, select, [contenteditable="true"]');
+
+    // Cmd/Ctrl+1 → select every object on the canvas. Ignored while typing in a
+    // field (e.g. the inline text editor) so it can't hijack a text selection.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key === '1') {
+      if (inEditable) return;
+      e.preventDefault();
+      this.#selectAllObjects();
+      return;
+    }
+
     if (e.key !== 'Delete' && e.key !== 'Backspace') return;
     if (e.altKey || e.ctrlKey || e.metaKey) return;
-    const target = e.target as HTMLElement | null;
-    if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+    if (inEditable) return;
     if (this.#doc.selection.size === 0 || this.#deleting) return;
     e.preventDefault();
     void this.#deleteSelectedObjects();
   };
+
+  /** Select all canvas objects (Cmd/Ctrl+1). A no-op while a placement tool is
+   * armed — the canvas is a drawing surface then, not a selection surface. Syncs
+   * moveable's control box immediately so the group handles appear at once. */
+  #selectAllObjects(): void {
+    if (this.#doc.activeTool !== 'pointer') return;
+    this.#doc.selectAll();
+    llog('select', 'select all (keyboard)', { count: this.#doc.selection.size });
+    this.#updateTarget();
+  }
 
   async #deleteSelectedObjects(): Promise<void> {
     const ids = [...this.#doc.selection];

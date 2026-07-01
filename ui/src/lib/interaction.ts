@@ -71,6 +71,12 @@ export class CanvasInteraction {
   #placing = false;
   /** True while selected object deletion is in flight, so repeat keys do not fan out. */
   #deleting = false;
+  /** One-shot: swallow the native `click` the browser fires right after a marquee
+   * DRAG release. Without it, `#onClick` (which can't see selecto's marquee) would
+   * run its deselect/select-part path on that click and wipe the selection the
+   * marquee just committed. A bare click (no drag) does NOT set this, so an empty-
+   * canvas click still deselects as before. */
+  #suppressNextClick = false;
   /** Active draw-to-create gesture while a non-pointer tool is armed. */
   #drawing: DrawPlacement | null = null;
   #drawPreview: HTMLElement | null = null;
@@ -158,6 +164,16 @@ export class CanvasInteraction {
     this.#selecto.on('selectEnd', (e) => {
       this.#doc.selectOnly(this.#elementsToIds(e.selected));
       this.#updateTarget();
+      // A real marquee (not a bare click) is followed by a native `click` on the
+      // canvas/band; swallow that one click so `#onClick` doesn't deselect the set
+      // we just pinned. Auto-expire on the next tick so it never eats a later click
+      // if the browser happened not to emit one.
+      if (!e.isClick) {
+        this.#suppressNextClick = true;
+        setTimeout(() => {
+          this.#suppressNextClick = false;
+        }, 0);
+      }
     });
     // Decide, at press time, who owns the gesture:
     this.#selecto.on('dragStart', (e) => {
@@ -518,24 +534,23 @@ export class CanvasInteraction {
   }
 
   #onClick = (e: MouseEvent): void => {
+    // Swallow the single native click that trails a marquee drag-release, so the
+    // committed multi-selection is not immediately cleared by the deselect path.
+    if (this.#suppressNextClick) {
+      this.#suppressNextClick = false;
+      return;
+    }
     if (this.#gesturing || this.#doc.activeTool !== 'pointer') return;
     const target = e.target as Element | null;
     if (!target || this.#moveable.isMoveableElement(target)) return;
     if (target.closest('.fm-obj') || target.closest('.le-part-label, .le-part-resize')) return;
 
-    const partEl = (target.closest('.fm-part') ?? null) as HTMLElement | null;
-    if (!partEl) {
-      this.#doc.clearSelection();
-      return;
-    }
-    const id = this.#partIdForElement(partEl);
-    if (id === undefined) {
-      llog('target', 'click on part but id UNRESOLVED', { parts: this.#partElements().length });
-      return;
-    }
+    // A click on band whitespace (or empty canvas) only DESELECTS. Selecting a part
+    // is reserved for its label rail (`.le-part-label`, wired in App.svelte), so a
+    // stray click in the body never hijacks the selection into part-edit mode.
     this.#hoverId = null;
     this.#paintHover();
-    this.#doc.selectPart(id);
+    this.#doc.clearSelection();
     this.#updateTarget();
   };
 
@@ -997,11 +1012,6 @@ export class CanvasInteraction {
     return canvas ? Array.from(canvas.querySelectorAll<HTMLElement>('.fm-obj')) : [];
   }
 
-  #partElements(): HTMLElement[] {
-    const canvas = this.#canvas();
-    return canvas ? Array.from(canvas.querySelectorAll<HTMLElement>('.fm-part')) : [];
-  }
-
   #elementsToIds(elements: Array<HTMLElement | SVGElement>): number[] {
     return elementsToObjectIds(elements, this.#paintedElements(), objectIdsInPaintOrder(this.#doc.renderModel));
   }
@@ -1016,12 +1026,6 @@ export class CanvasInteraction {
     const i = this.#paintedElements().indexOf(el as HTMLElement);
     if (i < 0) return undefined;
     return objectIdsInPaintOrder(this.#doc.renderModel)[i];
-  }
-
-  #partIdForElement(el: Element): number | undefined {
-    const i = this.#partElements().indexOf(el as HTMLElement);
-    if (i < 0) return undefined;
-    return this.#doc.renderModel.parts[i]?.id;
   }
 
   #scheduleRectUpdate(): void {

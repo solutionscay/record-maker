@@ -40,6 +40,10 @@ const ICONS = {
   field: 'text-cursor-input',
   rect: 'square',
   ellipse: 'circle',
+  // Inspector text-alignment segmented control (Inspector.svelte).
+  'align-left': 'text-align-left',
+  'align-center': 'text-align-center',
+  'align-right': 'text-align-right',
   // Shared +/− glyphs: New / add-band / zoom-in reuse `plus`; the line tool and
   // zoom-out reuse `minus`. One symbol each, referenced from several controls.
   plus: 'plus',

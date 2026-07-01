@@ -11,7 +11,7 @@
    any other object is static `text` rendered from its `content` slot. The Svelte
    `Band` component mirrors this branch-for-branch (the #44 parity contract). #}
 {% macro band(p, editable) %}
-<div class="fm-part" style="height: {{ p.height }}px;">
+<div class="fm-part" style="height: {{ p.height }}px;{{ p.part_style }}">
   {% for o in p.objects %}
   <div class="fm-obj{% if o.field %} fm-field{% endif %}{% if o.read_only %} fm-readonly{% endif %}"
        style="left:{{ o.x }}px; top:{{ o.y }}px; width:{{ o.w }}px; height:{{ o.h }}px; z-index:{{ o.z }};{{ o.object_style }}">

@@ -16,8 +16,10 @@
     setObjectReadOnly as persistReadOnly,
     setPartHeight as persistPartHeight,
     setPartKind as persistPartKind,
+    setPartProps as persistPartProps,
   } from './persist';
   import { llog, lerror } from './log';
+  import Icon from './Icon.svelte';
 
   let { doc, layoutId = '' }: { doc: EditorDoc; layoutId?: string } = $props();
 
@@ -51,6 +53,7 @@
   let selectedBindingFieldId = $derived(selected?.kind === 'field' ? fieldIdForBinding(selected.binding) : null);
   let selectedPartId = $derived(doc.selectedPartId);
   let selectedPart = $derived(selectedPartId === null ? undefined : doc.getPart(selectedPartId));
+  let selectedPartProps = $derived(parseProps(selectedPart?.props ?? ''));
   // A form offers header/body/footer only; summaries are List/Table (Issue 3). The
   // current kind stays listed so an existing band always shows its own value.
   let partKinds = $derived(
@@ -251,6 +254,24 @@
     }
   }
 
+  async function setSelectedPartFill(value: string): Promise<void> {
+    if (!selectedPart) return;
+    const id = selectedPart.id;
+    const next = { ...selectedPartProps, fill: value };
+    llog('persist', 'inspector: set band fill', { id, value });
+    // Optimistic + undoable document change; the band's partStyle then refreshes
+    // from the server's single-source derivation (mirrors object setStyle).
+    doc.setPartProps(id, JSON.stringify(next));
+    doc.mark();
+    try {
+      const view = await persistPartProps(layoutId, id, next);
+      doc.setPartStyle(id, view.partStyle);
+    } catch (e) {
+      lerror('persist', 'set band fill failed', e);
+      doc.setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   async function setSelectedPartHeight(height: number): Promise<void> {
     if (!selectedPart) return;
     const id = selectedPart.id;
@@ -431,7 +452,7 @@
                 class:active={alignValue(selectedProps.align) === a}
                 title={`Align ${a}`}
                 onclick={() => setStyle('align', a)}
-              >{a === 'left' ? 'L' : a === 'center' ? 'C' : 'R'}</button>
+              ><Icon name={`align-${a}`} /></button>
             {/each}
           </div>
         </div>
@@ -482,6 +503,17 @@
           min={doc.minPartHeight(selectedPart.id)}
           value={selectedPart.height}
           onchange={(e) => setSelectedPartHeight(Number(e.currentTarget.value))}
+        />
+      </div>
+      <!-- Band background fill (Issue 7): the server's part_style() renders
+           `background:{fill}` for the band, live on the canvas and in Browse. -->
+      <div class="insp-row">
+        <span>Background</span>
+        <input
+          class="swatch"
+          type="color"
+          value={colorValue(selectedPartProps.fill, '#ffffff')}
+          onchange={(e) => setSelectedPartFill(e.currentTarget.value)}
         />
       </div>
       {#if selectedPartIsSummary}

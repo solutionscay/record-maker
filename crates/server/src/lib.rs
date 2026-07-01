@@ -1262,8 +1262,23 @@ struct CreatePartBody {
     height: Option<i64>,
 }
 
-/// Append a band to a layout (#48) and return its `PartView` (no objects yet) so
-/// the store can add it without a re-hydrate. 404 unknown layout; 400 bad kind.
+/// The result of appending a band (#48): the new `part` plus the layout's full
+/// `[{id, position}]` ordering *after* the insert. `create_part` places summary
+/// bands between the body and footer and shifts the trailing parts down, so the
+/// client can't guess the slot — it must resync every part's `position` from
+/// `positions` (mirrors the move endpoint) or the new band renders below the
+/// footer.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreatePartResult {
+    part: PartView,
+    positions: Vec<PartPosition>,
+}
+
+/// Append a band to a layout (#48) and return the new `PartView` plus the layout's
+/// post-insert `[{id, position}]` ordering so the store places the band in its
+/// server-assigned slot (summaries land above the footer). 404 unknown layout;
+/// 400 bad kind.
 async fn create_design_part(
     State(st): State<AppState>,
     Path(layout_id): Path<i64>,
@@ -1281,13 +1296,25 @@ async fn create_design_part(
         Ok(id) => id,
         Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
     };
-    axum::Json(PartView {
-        id,
-        kind: kind.as_str(),
-        height,
-        props: String::new(),
-        part_style: String::new(),
-        objects: Vec::new(),
+    let positions: Vec<PartPosition> = sol
+        .parts(layout_id)
+        .unwrap()
+        .into_iter()
+        .map(|p| PartPosition {
+            id: p.id,
+            position: p.position,
+        })
+        .collect();
+    axum::Json(CreatePartResult {
+        part: PartView {
+            id,
+            kind: kind.as_str(),
+            height,
+            props: String::new(),
+            part_style: String::new(),
+            objects: Vec::new(),
+        },
+        positions,
     })
     .into_response()
 }
@@ -2794,9 +2821,22 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(resp.contains(r#""kind":"subsummary""#) && resp.contains(r#""height":40"#));
-        assert_eq!(
-            state.sol.lock().unwrap().parts(layout_id).unwrap().len(),
-            before + 1
+        // The response carries the post-insert ordering so the client resyncs
+        // positions instead of guessing bottom-most.
+        assert!(resp.contains(r#""positions""#), "create echoes positions\n{resp}");
+        let parts = state.sol.lock().unwrap().parts(layout_id).unwrap();
+        assert_eq!(parts.len(), before + 1);
+        // The new summary must sit ABOVE the footer — never below it.
+        let sub = parts
+            .iter()
+            .find(|p| p.kind == PartKind::SubSummary)
+            .unwrap();
+        let footer = parts.iter().find(|p| p.kind == PartKind::Footer).unwrap();
+        assert!(
+            sub.position < footer.position,
+            "sub-summary must land above the footer (sub {} vs footer {})",
+            sub.position,
+            footer.position
         );
     }
 

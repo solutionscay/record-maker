@@ -500,10 +500,17 @@ export class EditorDoc {
 
   /** Append a band the server just created (#48). A plain document mutation —
    * part lifecycle is not (yet) in the undo model the way objects are; a band-add
-   * is rare and structural. Derives the new part's `position` as bottom-most. */
-  addPart(view: PartView): void {
+   * is rare and structural. The server assigns the slot (summaries land between
+   * body and footer, shifting trailing parts down); `positions` carries the whole
+   * layout's `[{id, position}]` after the insert, which we resync so the band
+   * never renders below the footer. Falls back to bottom-most only when the caller
+   * has no server positions. */
+  addPart(view: PartView, positions?: { id: number; position: number }[]): void {
     if (this.#parts.some((p) => p.id === view.id)) return;
-    const position = this.#parts.reduce((m, p) => Math.max(m, p.position), -1) + 1;
+    // Provisional slot; the authoritative `positions` (below) overwrites it.
+    const position =
+      positions?.find((p) => p.id === view.id)?.position ??
+      this.#parts.reduce((m, p) => Math.max(m, p.position), -1) + 1;
     this.#parts = [
       ...this.#parts,
       {
@@ -515,6 +522,7 @@ export class EditorDoc {
         partStyle: view.partStyle,
       },
     ];
+    if (positions && positions.length) this.applyPartPositions(positions);
     this.selectPart(view.id);
     llog('store', 'addPart', { id: view.id, kind: view.kind, position });
   }

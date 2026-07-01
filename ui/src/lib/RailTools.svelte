@@ -73,7 +73,8 @@
     busy = true;
     llog('create', 'rail: add band', { kind: partKind });
     try {
-      doc.addPart(await createPart(layoutId, partKind, 80));
+      const { part, positions } = await createPart(layoutId, partKind, 80);
+      doc.addPart(part, positions);
     } catch (e) {
       lerror('create', 'add band failed', e);
       doc.setError(e instanceof Error ? e.message : String(e));

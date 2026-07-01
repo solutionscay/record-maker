@@ -147,6 +147,13 @@
     // A form allows only header/body/footer — summary bands are List/Table (Issue 3).
     if (doc.view === 'form' && (kind === 'subsummary' || kind === 'grandsummary')) return false;
     if (selectedPart.kind === 'body') return false;
+    // Header/footer are structural anchors (top/bottom) — they can't become summaries,
+    // which would strand a summary above the header or below the footer (mirrors move_part).
+    if (
+      (selectedPart.kind === 'header' || selectedPart.kind === 'footer') &&
+      (kind === 'subsummary' || kind === 'grandsummary')
+    )
+      return false;
     if (isSingletonPartKind(kind) && doc.parts.some((p) => p.id !== selectedPart.id && p.kind === kind)) return false;
     if (kind === 'grandsummary') {
       const body = doc.parts.find((p) => p.kind === 'body');

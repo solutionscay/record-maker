@@ -544,6 +544,16 @@ impl Solution {
         if current.kind == PartKind::Body && kind != PartKind::Body {
             bail!("a layout must keep exactly one body part");
         }
+        // The header and footer are structural anchors — top and bottom of the
+        // layout. Converting one into a summary would strand that summary at the
+        // very top or bottom, the same invariant `move_part` enforces (a summary
+        // can never rise above the header or sink below the footer). Since
+        // `set_part_kind` never repositions, block the conversion outright.
+        if matches!(kind, PartKind::SubSummary | PartKind::GrandSummary)
+            && matches!(current.kind, PartKind::Header | PartKind::Footer)
+        {
+            bail!("the header and footer cannot become summary parts");
+        }
         self.reject_form_summary(layout_id, kind)?;
         let parts = self.parts(layout_id)?;
         self.validate_part_kind_change(&parts, part_id, kind)?;
@@ -1539,6 +1549,54 @@ mod tests {
     }
 
     #[test]
+    fn header_and_footer_cannot_become_summaries() {
+        // The structural anchors stay put: converting the header or footer into a
+        // summary would strand that summary above the header / below the footer,
+        // which `move_part` also forbids. `set_part_kind` never repositions, so the
+        // conversion must be rejected outright.
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
+        let lay = s
+            .layouts()
+            .unwrap()
+            .into_iter()
+            .find(|l| l.view == "list")
+            .unwrap();
+        let parts = s.parts(lay.id).unwrap();
+        let header = parts.iter().find(|p| p.kind == PartKind::Header).unwrap();
+        let footer = parts.iter().find(|p| p.kind == PartKind::Footer).unwrap();
+
+        for &target in &[PartKind::SubSummary, PartKind::GrandSummary] {
+            assert!(
+                s.set_part_kind(lay.id, header.id, target).is_err(),
+                "header cannot become a {}",
+                target.as_str()
+            );
+            assert!(
+                s.set_part_kind(lay.id, footer.id, target).is_err(),
+                "footer cannot become a {}",
+                target.as_str()
+            );
+        }
+        // The kinds are unchanged after the rejected conversions.
+        assert_eq!(
+            s.part_by_id(lay.id, header.id).unwrap().unwrap().kind,
+            PartKind::Header
+        );
+        assert_eq!(
+            s.part_by_id(lay.id, footer.id).unwrap().unwrap().kind,
+            PartKind::Footer
+        );
+    }
+
+    #[test]
     fn part_rules_reject_duplicate_singletons_and_excess_grand_summaries() {
         let mut s = Solution::open_in_memory().unwrap();
         s.create_table(
@@ -1731,9 +1789,15 @@ mod tests {
             .set_part_kind(form.id, form_footer.id, PartKind::GrandSummary)
             .is_err());
 
-        // A list allows both create and convert-to-summary.
+        // A list allows creating summary bands of both kinds...
         assert!(s.create_part(list.id, PartKind::SubSummary, 40).is_ok());
-        assert!(s.create_part(list.id, PartKind::GrandSummary, 40).is_ok());
+        let list_grand = s.create_part(list.id, PartKind::GrandSummary, 40).unwrap();
+        // ...and converting one summary kind into the other.
+        assert!(s
+            .set_part_kind(list.id, list_grand, PartKind::SubSummary)
+            .is_ok());
+        // But the footer stays structural even on a list — it can't become a
+        // summary (that would strand a summary below the footer).
         let list_footer = s
             .parts(list.id)
             .unwrap()
@@ -1742,7 +1806,7 @@ mod tests {
             .unwrap();
         assert!(s
             .set_part_kind(list.id, list_footer.id, PartKind::SubSummary)
-            .is_ok());
+            .is_err());
     }
 
     #[test]

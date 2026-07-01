@@ -52,8 +52,16 @@ export function createObject(layoutId: string, req: NewObjectRequest): Promise<O
   return postJson(`/design/${layoutId}/object`, req);
 }
 
-/** Append a band; returns its (object-less) part view. */
-export function createPart(layoutId: string, kind: string, height: number): Promise<PartView> {
+/** Append a band; returns its (object-less) part view plus the layout's
+ * post-insert `[{id, position}]` ordering. The server places summary bands
+ * between the body and footer and shifts trailing parts down, so the store must
+ * resync positions from `positions` — otherwise the new band renders below the
+ * footer. */
+export function createPart(
+  layoutId: string,
+  kind: string,
+  height: number,
+): Promise<{ part: PartView; positions: { id: number; position: number }[] }> {
   return postJson(`/design/${layoutId}/part`, { kind, height });
 }
 

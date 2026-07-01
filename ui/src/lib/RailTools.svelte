@@ -1,7 +1,8 @@
 <script lang="ts">
   // The Layout-mode rail TOOLS (issue #62) — the design-mode counterpart of the
   // server-rendered Navigate zone, mounted into the sidebar's `#layout-tools`
-  // node and SHARING the canvas's EditorDoc store. Three zones:
+  // node and SHARING the canvas's EditorDoc store. Four zones:
+  //   • Mode   — select/move mode for existing canvas objects.
   //   • Create — a tool palette (#48): arm a tool, click the canvas to place an
   //     object (the canvas's interaction layer does the placing); a Field dropdown
   //     binds the field a placement uses; a Part control appends a band.
@@ -14,6 +15,7 @@
   import type { EditorDoc, ToolKind } from './doc.svelte';
   import {
     createPart,
+    deleteObject as persistDeleteObject,
     deletePart as persistDeletePart,
     setObjectProps as persistProps,
     setPartHeight as persistPartHeight,
@@ -23,8 +25,10 @@
 
   let { doc, layoutId = '' }: { doc: EditorDoc; layoutId?: string } = $props();
 
-  const TOOLS: { id: ToolKind; label: string; glyph: string }[] = [
-    { id: 'pointer', label: 'Select / move', glyph: '➚' },
+  const MODE_TOOLS: { id: ToolKind; label: string; glyph: string }[] = [
+    { id: 'pointer', label: 'Select / move objects', glyph: '➚' },
+  ];
+  const CREATE_TOOLS: { id: ToolKind; label: string; glyph: string }[] = [
     { id: 'text', label: 'Text label', glyph: 'T' },
     { id: 'field', label: 'Field', glyph: '▭' },
     { id: 'rect', label: 'Rectangle', glyph: '▢' },
@@ -48,7 +52,7 @@
     if (fieldId === null && doc.fields.length > 0) fieldId = doc.fields[0].id;
   });
 
-  // ── Create zone ──────────────────────────────────────────────────────────
+  // ── Mode / create zones ─────────────────────────────────────────────────
 
   function pickTool(t: ToolKind): void {
     llog('tool', 'rail: pick tool', { tool: t, fieldId });
@@ -73,7 +77,8 @@
 
   // ── Style zone (selection-aware) ─────────────────────────────────────────
 
-  let selectedId = $derived([...doc.selection][0] ?? null);
+  let selectedIds = $derived([...doc.selection]);
+  let selectedId = $derived(selectedIds[0] ?? null);
   let selected = $derived(selectedId === null ? undefined : doc.getObject(selectedId));
   let selectedProps = $derived(parseProps(selected?.props ?? ''));
   let canStyle = $derived(!!selected);
@@ -110,6 +115,23 @@
     } catch (e) {
       lerror('persist', 'set style failed', e);
       doc.setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function deleteSelectedObjects(): Promise<void> {
+    const ids = selectedIds;
+    if (ids.length === 0 || busy) return;
+    busy = true;
+    llog('persist', 'rail: delete object(s)', { ids });
+    try {
+      await Promise.all(ids.map((id) => persistDeleteObject(layoutId, id)));
+      for (const id of ids) doc.removeObject(id);
+      doc.mark();
+    } catch (e) {
+      lerror('persist', 'delete object failed', e);
+      doc.setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      busy = false;
     }
   }
 
@@ -168,9 +190,24 @@
 </script>
 
 <section class="le-zone">
+  <span class="side-label">Mode</span>
+  <div class="le-tools le-tools-single">
+    {#each MODE_TOOLS as t (t.id)}
+      <button
+        type="button"
+        class:active={doc.activeTool === t.id}
+        aria-pressed={doc.activeTool === t.id}
+        title={t.label}
+        onclick={() => pickTool(t.id)}
+      >{t.glyph}</button>
+    {/each}
+  </div>
+</section>
+
+<section class="le-zone">
   <span class="side-label">Create</span>
   <div class="le-tools">
-    {#each TOOLS as t (t.id)}
+    {#each CREATE_TOOLS as t (t.id)}
       <button
         type="button"
         class:active={doc.activeTool === t.id}
@@ -235,6 +272,13 @@
   {#if !canStyle}
     <span class="le-hint">Select an object to style it.</span>
   {/if}
+  <button
+    type="button"
+    class="le-danger-btn"
+    title="Delete selected object"
+    disabled={selectedIds.length === 0 || busy}
+    onclick={deleteSelectedObjects}
+  >Delete object</button>
 </section>
 
 <section class="le-zone">
@@ -295,6 +339,9 @@
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 0.3rem;
+  }
+  .le-tools-single {
+    grid-template-columns: 1fr;
   }
   .le-tools button {
     height: 30px;

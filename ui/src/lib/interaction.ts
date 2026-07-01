@@ -24,12 +24,26 @@
 import Moveable from 'moveable';
 import Selecto from 'selecto';
 
-import type { EditorDoc } from './doc.svelte';
+import type { EditorDoc, ToolKind } from './doc.svelte';
 import type { ObjectView } from './model';
 import { GRID, SNAP_THRESHOLD, clampOrigin, elementsToObjectIds, objectIdsInPaintOrder, snapToGrid } from './canvas-edit';
 import { defaultBox, defaultProps, partAtY } from './create';
-import { createObject } from './persist';
+import { createObject, deleteObject } from './persist';
 import { llog, lerror } from './log';
+
+type DrawTool = Exclude<ToolKind, 'pointer'>;
+
+interface DrawPlacement {
+  tool: DrawTool;
+  fieldId: number | null;
+  partId: number;
+  partTop: number;
+  partHeight: number;
+  startX: number;
+  startY: number;
+  dragged: boolean;
+  box: { x: number; y: number; w: number; h: number };
+}
 
 export class CanvasInteraction {
   readonly #stage: HTMLElement;
@@ -54,6 +68,11 @@ export class CanvasInteraction {
   #zoom = 1;
   /** True while a placement POST is in flight, so a second click can't double-place. */
   #placing = false;
+  /** True while selected object deletion is in flight, so repeat keys do not fan out. */
+  #deleting = false;
+  /** Active draw-to-create gesture while a non-pointer tool is armed. */
+  #drawing: DrawPlacement | null = null;
+  #drawPreview: HTMLElement | null = null;
   #resizeStarts = new Map<
     number,
     {
@@ -147,7 +166,7 @@ export class CanvasInteraction {
           });
           return;
         }
-        void this.#placeAt(input.clientX, input.clientY);
+        this.#startDraw(input);
         return;
       }
       const target = input.target as Element | null;
@@ -193,6 +212,7 @@ export class CanvasInteraction {
     this.#stage.addEventListener('pointermove', this.#onPointerMove);
     this.#stage.addEventListener('pointerleave', this.#onPointerLeave);
     this.#stage.addEventListener('click', this.#onClick);
+    window.addEventListener('keydown', this.#onKeyDown);
     llog('init', 'CanvasInteraction ready', { layoutId, painted: this.#paintedElements().length });
   }
 
@@ -211,69 +231,159 @@ export class CanvasInteraction {
     this.#moveable.setState({ zoom: z });
   }
 
-  /** Place a new object where the user clicked while a tool is armed (#48). Maps
-   * the client point into model coordinates (undoing the zoom scale), finds the
-   * part under it, POSTs the create, and adds the returned object(s) to the store
-   * as ONE undo step — then disarms back to the pointer tool. A `field` adds both
-   * its value object and its spawned caption label (#60). */
-  async #placeAt(clientX: number, clientY: number): Promise<void> {
+  /** Start a draw-to-create gesture. Release persists the final box; a very short
+   * click falls back to the tool's default size, but creation still waits for
+   * pointer-up so objects are not dropped on press. */
+  #startDraw(input: MouseEvent | PointerEvent): void {
     const tool = this.#doc.activeTool;
-    if (tool === 'pointer' || this.#placing) {
-      llog('place', 'placeAt ignored', { tool, placing: this.#placing });
+    if (tool === 'pointer' || this.#placing || this.#drawing) {
+      llog('place', 'draw start ignored', { tool, placing: this.#placing, drawing: !!this.#drawing });
       return;
     }
-    const canvas = this.#canvas();
-    if (!canvas) {
-      llog('error', 'placeAt: no .fm-canvas in stage');
+    const point = this.#canvasPoint(input.clientX, input.clientY);
+    if (!point) {
+      llog('error', 'draw start: no .fm-canvas in stage');
       this.#doc.setTool('pointer');
       return;
     }
-    const rect = canvas.getBoundingClientRect();
-    const z = this.#zoom || 1;
-    const cx = Math.max(0, Math.round((clientX - rect.left) / z));
-    const cy = Math.max(0, (clientY - rect.top) / z);
-    // The single most useful line for "object landed in the wrong place": the
-    // client point, the canvas rect it's measured against, the zoom, and the
-    // resulting MODEL coordinates (the object's top-left, not its centre).
-    llog('place', 'click → model coords', {
-      clientX,
-      clientY,
-      canvasLeft: Math.round(rect.left),
-      canvasTop: Math.round(rect.top),
-      canvasW: Math.round(rect.width),
-      canvasH: Math.round(rect.height),
-      zoom: z,
-      modelX: cx,
-      modelY: Math.round(cy),
-    });
-    const where = partAtY(this.#doc.renderModel, cy);
+    const where = partAtY(this.#doc.renderModel, point.y);
     if (!where) {
-      llog('place', 'no part under the click', { modelY: Math.round(cy) });
+      llog('place', 'no part under draw start', { modelY: Math.round(point.y) });
       this.#doc.setTool('pointer');
       return;
     }
-    const box = defaultBox(tool);
-    // Centre the object on the cursor (click-to-place), clamped to the band
-    // origin — placing the top-left at the cursor made objects appear down-right
-    // of where you clicked.
-    const x = Math.max(0, cx - Math.round(box.w / 2));
-    const y = Math.max(0, Math.round(where.localY) - Math.round(box.h / 2));
-    llog('place', 'resolved drop (centred on cursor)', { tool, partId: where.partId, x, y, w: box.w, h: box.h });
+    const part = this.#doc.getPart(where.partId);
+    if (!part) return;
+    const fieldId = tool === 'field' ? this.#doc.toolFieldId : null;
+    if (tool === 'field' && fieldId == null) {
+      llog('place', 'field tool armed but no field chosen — nothing to draw');
+      this.#doc.setTool('pointer');
+      return;
+    }
+    this.#drawing = {
+      tool,
+      fieldId,
+      partId: where.partId,
+      partTop: point.y - where.localY,
+      partHeight: part.height,
+      startX: point.x,
+      startY: point.y,
+      dragged: false,
+      box: { x: point.x, y: where.localY, w: 1, h: 1 },
+    };
+    this.#drawPreview = document.createElement('div');
+    this.#drawPreview.className = `le-draw-preview le-draw-${tool}`;
+    this.#partOverlay()?.append(this.#drawPreview);
+    this.#updateDraw(input);
+    window.addEventListener('pointermove', this.#onDrawMove);
+    window.addEventListener('pointerup', this.#onDrawUp, { once: true });
+    window.addEventListener('mousemove', this.#onDrawMove);
+    window.addEventListener('mouseup', this.#onDrawUp, { once: true });
+    llog('place', 'draw start', {
+      tool,
+      partId: where.partId,
+      startX: Math.round(point.x),
+      startY: Math.round(where.localY),
+    });
+  }
+
+  #onDrawMove = (e: PointerEvent | MouseEvent): void => {
+    this.#updateDraw(e);
+  };
+
+  #onDrawUp = (e: PointerEvent | MouseEvent): void => {
+    this.#updateDraw(e);
+    void this.#finishDraw();
+  };
+
+  #updateDraw(input: MouseEvent | PointerEvent): void {
+    const drawing = this.#drawing;
+    const point = this.#canvasPoint(input.clientX, input.clientY);
+    if (!drawing || !point) return;
+
+    const partBottom = drawing.partTop + drawing.partHeight;
+    const endX = Math.max(0, point.x);
+    const endY = Math.min(partBottom, Math.max(drawing.partTop, point.y));
+    const dragged = Math.abs(endX - drawing.startX) >= 4 || Math.abs(endY - drawing.startY) >= 4;
+    drawing.dragged = drawing.dragged || dragged;
+    let x: number;
+    let yGlobal: number;
+    let w: number;
+    let h: number;
+
+    if (!drawing.dragged) {
+      x = Math.max(0, drawing.startX);
+      yGlobal = drawing.startY;
+      w = 1;
+      h = 1;
+    } else if (drawing.tool === 'line') {
+      x = Math.min(drawing.startX, endX);
+      yGlobal = drawing.startY;
+      w = Math.max(8, Math.abs(endX - drawing.startX));
+      h = Math.max(2, Math.min(defaultBox(drawing.tool).h, Math.abs(endY - drawing.startY) || defaultBox(drawing.tool).h));
+    } else {
+      x = Math.min(drawing.startX, endX);
+      yGlobal = Math.min(drawing.startY, endY);
+      w = Math.max(8, Math.abs(endX - drawing.startX));
+      h = Math.max(8, Math.abs(endY - drawing.startY));
+    }
+
+    x = snapToGrid(x);
+    yGlobal = snapToGrid(yGlobal);
+    w = Math.max(1, snapToGrid(w));
+    h = Math.max(1, snapToGrid(h));
+    const y = Math.min(drawing.partHeight - 1, Math.max(0, yGlobal - drawing.partTop));
+    drawing.box = {
+      x: clampOrigin(x),
+      y: clampOrigin(y),
+      w,
+      h: Math.min(h, Math.max(1, drawing.partHeight - y)),
+    };
+    this.#paintDrawPreview(drawing);
+  }
+
+  #paintDrawPreview(drawing: DrawPlacement): void {
+    if (!this.#drawPreview) return;
+    this.#drawPreview.style.left = `${drawing.box.x}px`;
+    this.#drawPreview.style.top = `${drawing.partTop + drawing.box.y}px`;
+    this.#drawPreview.style.width = `${drawing.box.w}px`;
+    this.#drawPreview.style.height = `${drawing.box.h}px`;
+  }
+
+  /** Persist the drawn object and add the returned view(s) to the store as one
+   * undoable create step. A `field` adds both its value object and spawned label. */
+  async #finishDraw(): Promise<void> {
+    const drawing = this.#drawing;
+    if (!drawing || this.#placing) return;
+    window.removeEventListener('pointermove', this.#onDrawMove);
+    window.removeEventListener('pointerup', this.#onDrawUp);
+    window.removeEventListener('mousemove', this.#onDrawMove);
+    window.removeEventListener('mouseup', this.#onDrawUp);
+    this.#drawPreview?.remove();
+    this.#drawPreview = null;
+    this.#drawing = null;
+
+    const { tool, partId, box } = drawing;
+    llog('place', 'draw finish', { tool, partId, ...box });
+    if (!drawing.dragged) {
+      llog('place', 'draw cancelled: pointer did not move far enough', { tool, partId });
+      return;
+    }
 
     this.#placing = true;
     try {
       let views: ObjectView[];
       if (tool === 'field') {
-        const fieldId = this.#doc.toolFieldId;
+        const fieldId = drawing.fieldId;
         if (fieldId == null) {
-          llog('place', 'field tool armed but no field chosen — nothing to place');
+          llog('place', 'field draw finished but no field chosen — nothing to create');
           return;
         }
         views = await createObject(this.#layoutId, {
-          partId: where.partId,
+          partId,
           kind: 'field',
-          x,
-          y,
+          x: box.x,
+          y: box.y,
           w: box.w,
           h: box.h,
           fieldId,
@@ -281,10 +391,10 @@ export class CanvasInteraction {
         });
       } else {
         views = await createObject(this.#layoutId, {
-          partId: where.partId,
+          partId,
           kind: tool,
-          x,
-          y,
+          x: box.x,
+          y: box.y,
           w: box.w,
           h: box.h,
           content: tool === 'text' ? 'Text' : null,
@@ -295,15 +405,13 @@ export class CanvasInteraction {
       llog('create', 'server created object(s)', {
         objects: views.map((v) => ({ id: v.id, kind: v.kind, x: v.x, y: v.y, w: v.w, h: v.h })),
       });
-      for (const v of views) this.#doc.addObject(v, where.partId);
+      for (const v of views) this.#doc.addObject(v, partId);
       this.#doc.mark();
       const placed = views.at(-1); // the field VALUE (its label sorts before it)
       if (placed) {
         this.#doc.selectOnly([placed.id]);
         // The cursor now sits over the freshly-placed object, so make it the hover
-        // too: otherwise `#updateTarget` prefers a STALE hover (whatever was under
-        // the cursor before the click) and points moveable at the wrong object —
-        // the reported "resize does nothing" (it resized the hovered object).
+        // too: otherwise `#updateTarget` prefers a stale hover from before create.
         this.#hoverId = placed.id;
         llog('place', 'added to store + selected + hover pinned to placed', { selectedId: placed.id });
       }
@@ -320,6 +428,12 @@ export class CanvasInteraction {
     this.#stage.removeEventListener('pointermove', this.#onPointerMove);
     this.#stage.removeEventListener('pointerleave', this.#onPointerLeave);
     this.#stage.removeEventListener('click', this.#onClick);
+    window.removeEventListener('keydown', this.#onKeyDown);
+    window.removeEventListener('pointermove', this.#onDrawMove);
+    window.removeEventListener('pointerup', this.#onDrawUp);
+    window.removeEventListener('mousemove', this.#onDrawMove);
+    window.removeEventListener('mouseup', this.#onDrawUp);
+    this.#drawPreview?.remove();
     this.#moveable.destroy();
     this.#selecto.destroy();
   }
@@ -364,6 +478,36 @@ export class CanvasInteraction {
     this.#doc.selectPart(id);
     this.#updateTarget();
   };
+
+  #onKeyDown = (e: KeyboardEvent): void => {
+    if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+    if (this.#doc.selection.size === 0 || this.#deleting) return;
+    e.preventDefault();
+    void this.#deleteSelectedObjects();
+  };
+
+  async #deleteSelectedObjects(): Promise<void> {
+    const ids = [...this.#doc.selection];
+    if (ids.length === 0 || this.#deleting) return;
+    this.#deleting = true;
+    llog('persist', 'delete selected object(s)', { ids });
+    try {
+      await Promise.all(ids.map((id) => deleteObject(this.#layoutId, id)));
+      for (const id of ids) this.#doc.removeObject(id);
+      this.#doc.mark();
+      this.#hoverId = null;
+      this.#targetKey = '';
+      this.#updateTarget();
+    } catch (e) {
+      lerror('persist', 'failed to delete selected object(s)', e);
+      this.#doc.setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      this.#deleting = false;
+    }
+  }
 
   /** Choose moveable's target: the hovered object (so a press grabs it), unless
    * you're hovering a member of a 2+ selection (then keep the whole group so the
@@ -562,6 +706,21 @@ export class CanvasInteraction {
 
   #canvas(): HTMLElement | null {
     return this.#stage.querySelector('.fm-canvas');
+  }
+
+  #partOverlay(): HTMLElement | null {
+    return this.#stage.querySelector('.le-part-overlays');
+  }
+
+  #canvasPoint(clientX: number, clientY: number): { x: number; y: number } | null {
+    const canvas = this.#canvas();
+    if (!canvas) return null;
+    const r = canvas.getBoundingClientRect();
+    const z = this.#zoom || 1;
+    return {
+      x: Math.max(0, (clientX - r.left) / z - canvas.clientLeft),
+      y: Math.max(0, (clientY - r.top) / z - canvas.clientTop),
+    };
   }
 
   #pointInCanvas(clientX: number, clientY: number): boolean {

@@ -129,29 +129,31 @@
     bind:this={stage}
   >
     <div class="le-workspace" style={`transform: scale(${doc.zoom}); transform-origin: top left;`}>
-      <LayoutPreview model={doc.renderModel} />
-      <div class="le-part-overlays" style={`width: ${doc.renderModel.width}px; min-width: ${DESIGN_PAGE_WIDTH}px;`}>
-        {#each partBands as band (band.part.id)}
-          <button
-            type="button"
-            class="le-part-label"
-            class:selected={doc.selectedPartId === band.part.id}
-            style={`top: ${band.top + 6}px;`}
-            title={`Select ${partLabel(band.part.kind)} band`}
-            onclick={(e) => selectPart(band.part.id, e)}
-          >
-            {partLabel(band.part.kind)}
-          </button>
-          <button
-            type="button"
-            class="le-part-resize"
-            class:selected={doc.selectedPartId === band.part.id}
-            class:resizing={resizingPartId === band.part.id}
-            style={`top: ${band.top + band.part.height - 4}px;`}
-            title={`Resize ${partLabel(band.part.kind)} band`}
-            onpointerdown={(e) => startPartResize(band.part.id, band.top, e)}
-          ></button>
-        {/each}
+      <div class="le-canvas-wrap">
+        <LayoutPreview model={doc.renderModel} />
+        <div class="le-part-overlays" style={`width: ${doc.renderModel.width}px; min-width: ${DESIGN_PAGE_WIDTH}px;`}>
+          {#each partBands as band (band.part.id)}
+            <button
+              type="button"
+              class="le-part-label"
+              class:selected={doc.selectedPartId === band.part.id}
+              style={`top: ${band.top}px; height: ${band.part.height}px;`}
+              title={`Select ${partLabel(band.part.kind)} band`}
+              onclick={(e) => selectPart(band.part.id, e)}
+            >
+              {partLabel(band.part.kind)}
+            </button>
+            <button
+              type="button"
+              class="le-part-resize"
+              class:selected={doc.selectedPartId === band.part.id}
+              class:resizing={resizingPartId === band.part.id}
+              style={`top: ${band.top + band.part.height - 4}px;`}
+              title={`Resize ${partLabel(band.part.kind)} band`}
+              onpointerdown={(e) => startPartResize(band.part.id, band.top, e)}
+            ></button>
+          {/each}
+        </div>
       </div>
     </div>
   </div>
@@ -183,27 +185,39 @@
   .le-workspace {
     position: relative;
     width: max-content;
+    --le-part-gutter: 1.45rem;
+    padding-left: var(--le-part-gutter);
+  }
+  .le-canvas-wrap {
+    position: relative;
+    width: max-content;
+    margin: 1rem 0;
   }
   .le-part-overlays {
     position: absolute;
-    inset: 0 auto auto 0;
+    top: 1px;
+    left: 0;
     pointer-events: none;
   }
   .le-part-label {
     position: absolute;
-    left: -3.75rem;
-    width: 3.35rem;
-    height: 1.35rem;
-    border: 1px solid #b7bec8;
-    border-radius: 0.25rem;
-    background: #fff;
-    color: #526070;
-    font: 600 0.62rem/1 system-ui, sans-serif;
+    left: calc(-1 * var(--le-part-gutter));
+    width: var(--le-part-gutter);
+    padding: 0.35rem 0;
+    border: 1px solid #9d9780;
+    border-right: 0;
+    border-radius: 0;
+    background: #f1eed8;
+    color: #2f3742;
+    font: 600 0.68rem/1 system-ui, sans-serif;
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    transform: rotate(180deg);
     overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
     cursor: pointer;
     pointer-events: auto;
+    box-sizing: border-box;
   }
   .le-part-label.selected {
     border-color: #1f6feb;
@@ -226,12 +240,32 @@
     position: absolute;
     left: 0;
     right: 0;
-    top: 3px;
+    top: 4px;
     border-top: 1px solid rgba(31, 111, 235, 0.45);
   }
   .le-part-resize.selected::after,
   .le-part-resize.resizing::after {
     border-top: 2px solid #1f6feb;
+  }
+  .le-stage :global(.le-draw-preview) {
+    position: absolute;
+    box-sizing: border-box;
+    z-index: 1000;
+    pointer-events: none;
+    border: 1px dashed #1f6feb;
+    background: rgba(31, 111, 235, 0.08);
+  }
+  .le-stage :global(.le-draw-ellipse) {
+    border-radius: 50%;
+  }
+  .le-stage :global(.le-draw-line) {
+    border-style: solid;
+    border-color: #777;
+    background: #777;
+  }
+  .le-stage :global(.le-draw-text),
+  .le-stage :global(.le-draw-field) {
+    background: rgba(255, 255, 255, 0.75);
   }
   /* Design mode: make each part band's bounds visible. Browse keeps the bands
      subtle (the faint shell.html divider), but on the canvas the designer needs
@@ -243,6 +277,7 @@
   }
   .le-stage :global(.fm-canvas) {
     min-width: 760px;
+    margin: 0;
   }
   .le-stage :global(.fm-part.selected-part) {
     outline-color: #1f6feb;

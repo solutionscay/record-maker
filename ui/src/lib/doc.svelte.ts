@@ -65,6 +65,12 @@ export interface PartDoc {
   kind: string;
   height: number;
   position: number;
+  /** Opaque appearance bag JSON (#49/Issue 7) — what the Band inspector edits
+   * (today: a background `fill`); empty if unset. Document scope: undoable. */
+  props: string;
+  /** Server-derived inline CSS for the band's fill; empty when unstyled. A cached
+   * projection of `props`, refreshed from the server after a fill edit. */
+  partStyle: string;
 }
 
 // ── session types ───────────────────────────────────────────────────────────
@@ -137,7 +143,7 @@ export type ObjectProp =
   | 'partId';
 
 /** The part properties a part diff may target. */
-export type PartProp = 'height' | 'position' | 'kind';
+export type PartProp = 'height' | 'position' | 'kind' | 'props';
 
 /** A whole object captured for an insert/delete diff — its document record plus
  * the session render projection, so undo of a delete (or redo of a create) brings
@@ -250,7 +256,14 @@ export class EditorDoc {
     model.parts.forEach((p, position) => {
       // `position` is the part's top→bottom order; the wire model carries it as
       // array order (server: ORDER BY position, id), so the index is authoritative.
-      parts.push({ id: p.id, kind: p.kind, height: p.height, position });
+      parts.push({
+        id: p.id,
+        kind: p.kind,
+        height: p.height,
+        position,
+        props: p.props,
+        partStyle: p.partStyle,
+      });
       for (const o of p.objects) {
         this.#objects.set(o.id, {
           id: o.id,
@@ -346,6 +359,8 @@ export class EditorDoc {
         id: p.id,
         kind: p.kind,
         height: p.height,
+        props: p.props,
+        partStyle: p.partStyle,
         objects: [...this.#objects.values()]
           .filter((o) => o.partId === p.id)
           .sort((a, b) => a.z - b.z || a.id - b.id)
@@ -440,6 +455,28 @@ export class EditorDoc {
     this.#commit([{ target: 'part', id, prop: 'kind', before: p.kind, after: kind }]);
   }
 
+  /** Set a part's appearance bag (#49/Issue 7 / Band inspector) — the opaque
+   * `props` JSON string, an undoable document change mirroring `setObjectProps`.
+   * The band's `partStyle` is server-derived (single source); after persisting,
+   * the UI calls [`EditorDoc.setPartStyle`] with the server's value to refresh it. */
+  setPartProps(id: number, props: string): void {
+    const p = this.#parts.find((pt) => pt.id === id);
+    if (!p) return;
+    this.#commit([{ target: 'part', id, prop: 'props', before: p.props, after: props }]);
+  }
+
+  /** Update a part's derived fill style (session cache) from a fresh server
+   * derivation — the response to a Band-inspector fill commit. Keeps the single
+   * source of style derivation on the server; a plain mutation, not undo-recorded
+   * (mirrors `setObjectStyles` / `applyPartPositions`). */
+  setPartStyle(id: number, partStyle: string): void {
+    const i = this.#parts.findIndex((p) => p.id === id);
+    if (i < 0) return;
+    const next = this.#parts.slice();
+    next[i] = { ...next[i], partStyle };
+    this.#parts = next;
+  }
+
   /** Set an object's appearance bag (#49 / Style zone) — the opaque `props` JSON
    * string, an undoable document change. The canvas's `shapeStyle` is server-
    * derived (single source, [[layout-object-types]]); after persisting, the UI
@@ -467,7 +504,17 @@ export class EditorDoc {
   addPart(view: PartView): void {
     if (this.#parts.some((p) => p.id === view.id)) return;
     const position = this.#parts.reduce((m, p) => Math.max(m, p.position), -1) + 1;
-    this.#parts = [...this.#parts, { id: view.id, kind: view.kind, height: view.height, position }];
+    this.#parts = [
+      ...this.#parts,
+      {
+        id: view.id,
+        kind: view.kind,
+        height: view.height,
+        position,
+        props: view.props,
+        partStyle: view.partStyle,
+      },
+    ];
     this.selectPart(view.id);
     llog('store', 'addPart', { id: view.id, kind: view.kind, position });
   }

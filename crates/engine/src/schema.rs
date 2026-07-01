@@ -30,6 +30,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0005_deduplicate_singleton_parts",
         include_str!("migrations/0005_deduplicate_singleton_parts.sql"),
     ),
+    (
+        "0006_part_props",
+        include_str!("migrations/0006_part_props.sql"),
+    ),
 ];
 
 /// Schema version this build targets (the number of migrations defined).

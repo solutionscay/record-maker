@@ -139,9 +139,20 @@
     .placeholder { max-width: 46rem; color: #555; line-height: 1.5; background: #f7f9fc;
                    border: 1px dashed #cbd5e1; border-radius: .5rem; padding: 1rem 1.25rem; }
     .hint { color: #777; font-size: .85rem; max-width: 40rem; }
-    /* Form view — the layout's objects, absolutely positioned per part (#25). */
-    .fm-canvas { position: relative; background: #fff; border: 1px solid #e2e2e2;
-                 border-radius: 4px; margin: 1rem 0; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    /* Form / List share one shape in Browse: the view fills the content pane
+       edge-to-edge (100% width/height), with no meta title or card chrome, and
+       splits into a fixed header band, an independently-scrolling body, and a
+       fixed footer band (#25/#26). This mirrors Table view (sticky thead +
+       .fm-tablescroll + .fm-tablefoot), so all three views behave alike. */
+    .content:has(.fm-canvas), .content:has(.fm-list) { padding: 0; overflow: hidden; }
+    .content:has(.fm-canvas) > .fm-edit { height: 100%; min-height: 0; }
+    .fm-canvas { position: relative; background: #fff; width: 100%; height: 100%;
+                 display: flex; flex-direction: column; min-height: 0; }
+    /* Header/footer bands stay put (flex:none); the body region flexes and owns
+       the scrollbar. `.fm-bands-*` wrap Form parts; `.fm-list-scroll` wraps the
+       List rows. Objects inside keep their designed coordinates. */
+    .fm-bands-head, .fm-bands-foot { flex: 0 0 auto; position: relative; }
+    .fm-bands-body, .fm-list-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; position: relative; }
     .fm-part { position: relative; }
     .fm-part + .fm-part { border-top: 1px dashed #eceef0; }
     /* An object's geometry box is authoritative: clip content to it so the visible
@@ -160,26 +171,32 @@
     .fm-shape { width: 100%; height: 100%; box-sizing: border-box;
                 background: #f7f8fa; border: 1px solid #d3d8de; }
     .fm-ellipse { border-radius: 50%; }
-    .fm-line { background: #888; border: 0; }
+    /* A line's thickness is its `strokeWidth` (inline `height` from shape_style),
+       drawn as a bar centred on the object's vertical midline. It may exceed the
+       thin geometry box, so the object opts out of the default clip below. */
+    .fm-line { position: absolute; left: 0; right: 0; top: 50%; height: 2px;
+               transform: translateY(-50%); background: #888; border: 0; }
+    .fm-obj:has(.fm-line) { overflow: visible; }
     /* Editable field input (Form view, open/commit editing #40). */
     .fm-edit { margin: 0; }
-    /* Transparent when unfocused so the object's fill (set on the .fm-field box)
-       shows through in editable Browse; the focus highlight restores an opaque
-       background so the active field stands out (issue 1). */
+    /* Always transparent so the object's fill (set on the .fm-field box) shows
+       through in editable Browse; the focus state is a subtle highlight ring
+       only — no background change — so the field's own fill is preserved. */
     .fm-finput { flex: 1 1 auto; min-width: 0; border: 0; outline: none; font: inherit;
                  padding: .15rem .45rem; color: inherit; background: transparent; }
-    .fm-finput:focus { background: #fff7e6; box-shadow: inset 0 0 0 2px #f0c36d; }
+    .fm-finput:focus { box-shadow: inset 0 0 0 1px #f0c36d; }
     .rec-edit { margin: 0; }
     /* Editable Table cells (#40). */
     td:has(.cell-input) { padding: 0; }
     .cell-input { width: 100%; box-sizing: border-box; border: 1px solid transparent;
                   background: transparent; font: inherit; padding: .4rem .6rem; }
-    .cell-input:focus { outline: none; border-color: #f0c36d; background: #fff7e6; }
-    /* List view — the Body band repeated per record (#26). */
-    .fm-list { position: relative; background: #fff; border: 1px solid #e2e2e2;
-               border-radius: 4px; margin: 1rem 0; box-shadow: 0 1px 2px rgba(0,0,0,.04); overflow: hidden; }
+    .cell-input:focus { outline: none; border-color: #f0c36d; }
+    /* List view — the Body band repeated per record, scrolling between the fixed
+       header/footer bands (#26); fills the pane like Form/Table. */
+    .fm-list { position: relative; background: #fff; width: 100%; height: 100%;
+               display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
     .fm-row { position: relative; }
-    .fm-row + .fm-row, .fm-list > .fm-part + .fm-row { border-top: 1px solid #eef0f2; }
+    .fm-row + .fm-row { border-top: 1px solid #eef0f2; }
     .fm-row:hover { background: #f6f9ff; }
     .fm-row.current { background: #eaf3ff; box-shadow: inset 3px 0 0 #1f6feb; }
   </style>
@@ -286,7 +303,8 @@
           <input type="hidden" name="view" value="{{ nav.view }}">
           <span class="side-label">Record</span>
           <input class="rec-num" type="number" name="rec" min="1" max="{{ nav.total }}"
-                 value="{{ nav.current }}" aria-label="Current record — type a number and press Enter">
+                 value="{{ nav.current }}" onchange="this.form.submit()"
+                 aria-label="Current record — type a number or use the arrows to jump">
         </form>
         {% endif %}
         <div class="rec-total">

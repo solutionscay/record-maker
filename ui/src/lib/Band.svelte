@@ -29,7 +29,7 @@
   }
 </script>
 
-<div class="fm-part" style={`height: ${part.height}px;`}>
+<div class="fm-part" style={`height: ${part.height}px;${part.partStyle}`}>
   {#each part.objects as o (o.id)}
     <div class={objClass(o)} style={objStyle(o)}>
       {#if o.field}

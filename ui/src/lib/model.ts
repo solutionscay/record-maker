@@ -69,6 +69,13 @@ export interface PartView {
   kind: string;
   /** Part height in px. */
   height: number;
+  /** Raw appearance bag JSON the Band inspector edits (#49/Issue 7); empty when
+   * unset. Carried alongside the server-derived `partStyle` so the inspector
+   * reads/writes the underlying `fill` key while the band renders from `partStyle`. */
+  props: string;
+  /** Server-derived inline CSS for the band's `fm-part` box (its background fill);
+   * empty when the band is unstyled. */
+  partStyle: string;
   /** Objects already ordered back→front (by z, then id). Render in order. */
   objects: ObjectView[];
 }

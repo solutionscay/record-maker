@@ -2,13 +2,15 @@
 {% import "_band.html" as band %}
 
 {% block content %}
-<h2>{{ layout }} · List view</h2>
 {% if rows.is_empty() %}
 <p class="placeholder">No records in <strong>{{ table }}</strong> yet. Add one in
 Table view, then they'll list here.</p>
 {% else %}
-<div class="fm-list" style="width: {{ width }}px;">
-  {% for p in header %}{% call band::band(p, false) %}{% endfor %}
+{# Header bands fixed at top, footer bands fixed at bottom, the Body rows scroll
+   between them — the same shape as Form and Table view. #}
+<div class="fm-list">
+  <div class="fm-bands-head">{% for p in header %}{% call band::band(p, false) %}{% endfor %}</div>
+  <div class="fm-list-scroll">
   {% match chrome.nav %}
   {% when Some with (nav) %}
   {% for row in rows %}
@@ -22,7 +24,8 @@ Table view, then they'll list here.</p>
   </form>
   {% endfor %}
   {% when None %}{% endmatch %}
-  {% for p in footer %}{% call band::band(p, false) %}{% endfor %}
+  </div>
+  <div class="fm-bands-foot">{% for p in footer %}{% call band::band(p, false) %}{% endfor %}</div>
 </div>
 {% endif %}
 {% endblock %}

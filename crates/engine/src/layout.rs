@@ -167,6 +167,10 @@ pub struct PartMeta {
     pub kind: PartKind,
     pub height: i64,
     pub position: i64,
+    /// JSON appearance bag for the band (#49) — the same opaque slot objects
+    /// carry. The server derives the band's inline fill from it; the structural
+    /// contract does not define its shape. `None` for an unstyled band.
+    pub props: Option<String>,
 }
 
 /// An object on a part: **part-relative** geometry (the frozen geometry
@@ -251,7 +255,7 @@ impl Solution {
     /// stored `kind` falls back to `Body` (mirrors `FieldMeta`'s lenient parse).
     pub fn parts(&self, layout_id: i64) -> Result<Vec<PartMeta>> {
         let mut stmt = self.app.prepare(
-            "SELECT id, layout_id, kind, height, position FROM meta_part \
+            "SELECT id, layout_id, kind, height, position, props FROM meta_part \
              WHERE layout_id=?1 ORDER BY position, id",
         )?;
         let rows = stmt.query_map(params![layout_id], |r| {
@@ -262,6 +266,7 @@ impl Solution {
                 kind: PartKind::parse(&kind_s).unwrap_or(PartKind::Body),
                 height: r.get(3)?,
                 position: r.get(4)?,
+                props: r.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -487,7 +492,7 @@ impl Solution {
     /// unknown/foreign id.
     pub fn part_by_id(&self, layout_id: i64, part_id: i64) -> Result<Option<PartMeta>> {
         let mut stmt = self.app.prepare(
-            "SELECT id, layout_id, kind, height, position FROM meta_part \
+            "SELECT id, layout_id, kind, height, position, props FROM meta_part \
              WHERE id=?1 AND layout_id=?2",
         )?;
         let mut rows = stmt.query_map(params![part_id, layout_id], |r| {
@@ -498,6 +503,7 @@ impl Solution {
                 kind: PartKind::parse(&kind_s).unwrap_or(PartKind::Body),
                 height: r.get(3)?,
                 position: r.get(4)?,
+                props: r.get(5)?,
             })
         })?;
         match rows.next() {
@@ -512,6 +518,19 @@ impl Solution {
         let n = self.app.execute(
             "UPDATE meta_part SET height=?1 WHERE id=?2 AND layout_id=?3",
             params![height, part_id, layout_id],
+        )?;
+        Ok(n)
+    }
+
+    /// Persist a part's appearance bag (#49, Issue 7) — the band's opaque `props`
+    /// JSON, mirroring [`Solution::set_object_props`]. Layout-scoped like the other
+    /// part commands; returns the rows updated (`0` ⇒ no such part in that layout).
+    /// The server re-derives the band's fill from these keys on the next read, so
+    /// the write is authoritative and Browse reflects it.
+    pub fn set_part_props(&self, layout_id: i64, part_id: i64, props: &str) -> Result<usize> {
+        let n = self.app.execute(
+            "UPDATE meta_part SET props=?1 WHERE id=?2 AND layout_id=?3",
+            params![props, part_id, layout_id],
         )?;
         Ok(n)
     }
@@ -907,22 +926,22 @@ pub(crate) fn clone_layout(
 
     // Collect the source parts first (releasing the prepared statement) so the
     // per-part object copies below can run on the same connection.
-    let parts: Vec<(i64, String, i64, i64)> = {
+    let parts: Vec<(i64, String, i64, i64, Option<String>)> = {
         let mut stmt = conn.prepare(
-            "SELECT id, kind, height, position FROM meta_part WHERE layout_id=?1 ORDER BY position, id",
+            "SELECT id, kind, height, position, props FROM meta_part WHERE layout_id=?1 ORDER BY position, id",
         )?;
         let rows = stmt
             .query_map(params![src_layout_id], |r| {
-                Ok((r.get(0)?, r.get::<_, String>(1)?, r.get(2)?, r.get(3)?))
+                Ok((r.get(0)?, r.get::<_, String>(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
 
-    for (src_part_id, kind, height, position) in parts {
+    for (src_part_id, kind, height, position, props) in parts {
         conn.execute(
-            "INSERT INTO meta_part(layout_id, kind, height, position) VALUES (?1, ?2, ?3, ?4)",
-            params![new_layout_id, kind, height, position],
+            "INSERT INTO meta_part(layout_id, kind, height, position, props) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![new_layout_id, kind, height, position, props],
         )?;
         let new_part_id = conn.last_insert_rowid();
         conn.execute(

@@ -265,17 +265,14 @@ struct TableTemplate {
 #[template(path = "view_form.html")]
 struct FormTemplate {
     chrome: Chrome,
-    layout: String,
     table: String,
     /// The record at the flipbook's current position; `None` when empty.
     record: Option<FormRecord>,
 }
 
 /// One record laid out per the layout's parts/objects, with live values (#25).
-/// `width` is the canvas width (max object right edge + margin).
 struct FormRecord {
     id: i64,
-    width: i64,
     parts: Vec<PartView>,
 }
 
@@ -290,6 +287,15 @@ struct PartView {
     id: i64,
     kind: &'static str,
     height: i64,
+    /// The raw appearance bag (#49/Issue 7) the Band inspector edits, carried
+    /// alongside the server-derived `part_style` so the inspector reads/writes the
+    /// underlying `fill` key while Browse/canvas render from `part_style`. Empty
+    /// string when the band has no props.
+    props: String,
+    /// Server-derived inline CSS for the band's `<div class="fm-part">` (its
+    /// background fill). Interpolated identically by `_band.html` and `Band.svelte`
+    /// (the #44 parity contract). Empty when the band is unstyled.
+    part_style: String,
     objects: Vec<ObjectView>,
 }
 
@@ -353,9 +359,7 @@ struct FieldChoice {
 #[template(path = "view_list.html")]
 struct ListTemplate {
     chrome: Chrome,
-    layout: String,
     table: String,
-    width: i64,
     /// Non-body parts (header/title/…) rendered once above the rows.
     header: Vec<PartView>,
     /// One entry per record: the Body part(s) bound to that record.
@@ -452,11 +456,28 @@ fn parse_props(props: Option<&str>) -> Option<serde_json::Value> {
 /// in [`ObjectView::shape_style`], so the askama band macro and the Svelte `Band`
 /// both just interpolate it — there is no second derivation to keep byte-equal.
 /// Empty for absent/invalid props (an unstyled shape falls back to its CSS class).
-fn shape_style(props: Option<&str>) -> String {
+fn shape_style(kind: ObjectKind, props: Option<&str>) -> String {
     let Some(v) = parse_props(props) else {
         return String::new();
     };
     let mut s = String::new();
+    // A line is a 1-D shape: `stroke` is its COLOUR and `strokeWidth` its THICKNESS
+    // — rendered as a centred bar by the `.fm-line` rule, not the outer ring rects
+    // use. (The ring would be clipped by `.fm-obj { overflow:hidden }` and could not
+    // grow a line's weight, which is why the Border control appeared to do nothing.)
+    if matches!(kind, ObjectKind::Line) {
+        let stroke = v
+            .get("stroke")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("#888");
+        let width = v
+            .get("strokeWidth")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(2)
+            .max(1);
+        s.push_str(&format!("background:{stroke};height:{width}px;"));
+        return s;
+    }
     if let Some(fill) = v.get("fill").and_then(serde_json::Value::as_str) {
         s.push_str(&format!("background:{fill};"));
     }
@@ -502,6 +523,22 @@ fn object_style(kind: ObjectKind, props: Option<&str>) -> String {
     }
     if let Some(radius) = v.get("radius").and_then(serde_json::Value::as_i64) {
         s.push_str(&format!("border-radius:{}px;", radius.max(0)));
+    }
+    s
+}
+
+/// Derive a part/band's inline CSS from its `props` JSON (#49/Issue 7), mirroring
+/// [`object_style`]. The band's only appearance today is a background `fill`; the
+/// derived string is computed once here and interpolated identically by the askama
+/// band macro and the Svelte `Band` (the #44 parity contract). Empty for
+/// absent/invalid props (an unstyled band falls back to its `.fm-part` class).
+fn part_style(props: Option<&str>) -> String {
+    let Some(v) = parse_props(props) else {
+        return String::new();
+    };
+    let mut s = String::new();
+    if let Some(fill) = v.get("fill").and_then(serde_json::Value::as_str) {
+        s.push_str(&format!("background:{fill};"));
     }
     s
 }
@@ -593,7 +630,7 @@ fn object_view(o: &ObjectMeta, by_name: &HashMap<String, (i64, String, String)>)
         _ => String::new(),
     };
     let shape_style = if shape {
-        shape_style(o.props.as_deref())
+        shape_style(o.kind, o.props.as_deref())
     } else {
         String::new()
     };
@@ -652,6 +689,8 @@ fn render_part(
         id: part.id,
         kind: part.kind.as_str(),
         height: part.height,
+        props: part.props.clone().unwrap_or_default(),
+        part_style: part_style(part.props.as_deref()),
         objects,
     }
 }
@@ -691,11 +730,7 @@ fn build_form_record(
         .iter()
         .map(|p| render_part(sol, p, &by_name))
         .collect();
-    Some(FormRecord {
-        id,
-        width: layout_canvas_width(sol, layout_id),
-        parts,
-    })
+    Some(FormRecord { id, parts })
 }
 
 /// Build the List-view render: header/footer parts once, the Body part(s)
@@ -778,7 +813,6 @@ async fn browse(
             Html(
                 FormTemplate {
                     chrome,
-                    layout: lay.name.clone(),
                     table: table.name.clone(),
                     record,
                 }
@@ -793,9 +827,7 @@ async fn browse(
             Html(
                 ListTemplate {
                     chrome,
-                    layout: lay.name.clone(),
                     table: table.name.clone(),
-                    width: layout_canvas_width(&sol, layout_id),
                     header,
                     rows,
                     footer,
@@ -1202,6 +1234,8 @@ async fn create_design_part(
         id,
         kind: kind.as_str(),
         height,
+        props: String::new(),
+        part_style: String::new(),
         objects: Vec::new(),
     })
     .into_response()
@@ -1232,6 +1266,8 @@ async fn update_part_height(
         id: part.id,
         kind: part.kind.as_str(),
         height: part.height,
+        props: part.props.clone().unwrap_or_default(),
+        part_style: part_style(part.props.as_deref()),
         objects: Vec::new(),
     })
     .into_response()
@@ -1265,6 +1301,36 @@ async fn update_part_kind(
         id: part.id,
         kind: part.kind.as_str(),
         height: part.height,
+        props: part.props.clone().unwrap_or_default(),
+        part_style: part_style(part.props.as_deref()),
+        objects: Vec::new(),
+    })
+    .into_response()
+}
+
+/// Persist a band's `props` from the Band inspector (#49/Issue 7), layout-scoped,
+/// and echo back the updated `PartView` (with the re-derived `part_style`) so the
+/// canvas updates without a client-side re-derivation. 200 on success, 404 when no
+/// such part belongs to the layout. Mirrors [`update_object_props`].
+async fn update_part_props(
+    State(st): State<AppState>,
+    Path((layout_id, part_id)): Path<(i64, i64)>,
+    Json(body): Json<PropsBody>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let props = body.props.to_string();
+    if sol.set_part_props(layout_id, part_id, &props).unwrap() == 0 {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(part) = sol.part_by_id(layout_id, part_id).unwrap() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    axum::Json(PartView {
+        id: part.id,
+        kind: part.kind.as_str(),
+        height: part.height,
+        props: part.props.clone().unwrap_or_default(),
+        part_style: part_style(part.props.as_deref()),
         objects: Vec::new(),
     })
     .into_response()
@@ -1375,7 +1441,7 @@ async fn update_object_props(
         object_style: object_style(o.kind, o.props.as_deref()),
         text_style: text_style(o.kind, o.props.as_deref()),
         shape_style: if o.kind.is_shape() {
-            shape_style(o.props.as_deref())
+            shape_style(o.kind, o.props.as_deref())
         } else {
             String::new()
         },
@@ -1671,6 +1737,7 @@ fn app(state: AppState) -> Router {
         .route("/design/:layout/part", post(create_design_part))
         .route("/design/:layout/part/:id/height", post(update_part_height))
         .route("/design/:layout/part/:id/kind", post(update_part_kind))
+        .route("/design/:layout/part/:id/props", post(update_part_props))
         .route("/design/:layout/part/:id/move", post(move_design_part))
         .route("/design/:layout/part/:id/delete", post(delete_design_part))
         .route(
@@ -1799,6 +1866,8 @@ mod tests {
             id: 1,
             kind: "body",
             height: 60,
+            props: String::new(),
+            part_style: String::new(),
             objects: vec![
                 field_obj(1, "EDITABLE_VAL", false),
                 field_obj(2, "READONLY_VAL", true),
@@ -1806,11 +1875,9 @@ mod tests {
         };
         let tmpl = FormTemplate {
             chrome: form_chrome(),
-            layout: "L".into(),
             table: "T".into(),
             record: Some(FormRecord {
                 id: 1,
-                width: 200,
                 parts: vec![part],
             }),
         };
@@ -1840,15 +1907,15 @@ mod tests {
         o.z = 7;
         let tmpl = FormTemplate {
             chrome: form_chrome(),
-            layout: "L".into(),
             table: "T".into(),
             record: Some(FormRecord {
                 id: 1,
-                width: 200,
                 parts: vec![PartView {
                     id: 1,
                     kind: "body",
                     height: 60,
+                    props: String::new(),
+                    part_style: String::new(),
                     objects: vec![o],
                 }],
             }),
@@ -2762,6 +2829,68 @@ mod tests {
         assert!(
             sol.objects(part_id).unwrap().is_empty(),
             "objects deleted with the band"
+        );
+    }
+
+    /// Issue 7: setting a band's fill persists its `props`, echoes the re-derived
+    /// `part_style`, and surfaces on the next model/Browse read; a foreign layout
+    /// id is a scoped no-op (404).
+    #[tokio::test]
+    async fn design_part_props_sets_band_fill_and_is_scoped() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
+        let layout_id = sol.layouts().unwrap()[0].id;
+        let part_id = body_part(&sol, layout_id).id;
+        let state = state_for(sol);
+
+        // A fill commit echoes the raw props AND the server-derived part_style.
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/design/{layout_id}/part/{part_id}/props"),
+            r##"{"props":{"fill":"#334455"}}"##,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            resp.contains(r#""partStyle":"background:#334455;""#),
+            "derived band style echoed\n{resp}"
+        );
+        assert_eq!(
+            state
+                .sol
+                .lock()
+                .unwrap()
+                .part_by_id(layout_id, part_id)
+                .unwrap()
+                .unwrap()
+                .props
+                .as_deref(),
+            Some(r##"{"fill":"#334455"}"##)
+        );
+
+        // The design model carries the derived style so the canvas renders it live.
+        let (_, model) = get_body(state.clone(), &format!("/design/{layout_id}/model")).await;
+        assert!(
+            model.contains(r#""partStyle":"background:#334455;""#),
+            "band fill persists in design model\n{model}"
+        );
+
+        // A foreign layout id is a scoped no-op ⇒ 404.
+        assert_eq!(
+            post_json(
+                state.clone(),
+                &format!("/design/{}/part/{part_id}/props", layout_id + 999),
+                r##"{"props":{"fill":"#000000"}}"##,
+            )
+            .await,
+            StatusCode::NOT_FOUND
         );
     }
 

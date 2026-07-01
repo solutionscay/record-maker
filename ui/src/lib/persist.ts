@@ -67,6 +67,17 @@ export function setPartKind(layoutId: string, id: number, kind: string): Promise
   return postJson(`/design/${layoutId}/part/${id}/kind`, { kind });
 }
 
+/** Commit a band's appearance bag (#49/Issue 7) and return the updated band view
+ * — its server-derived `partStyle` refreshes the canvas without a client-side
+ * re-derivation (mirrors `setObjectProps`). */
+export function setPartProps(
+  layoutId: string,
+  id: number,
+  props: Record<string, unknown>,
+): Promise<PartView> {
+  return postJson<PartView>(`/design/${layoutId}/part/${id}/props`, { props });
+}
+
 /** Move a summary band up/down (Issue 4); returns the layout's parts as
  * `[{id, position}]` after the move so the store can resync positions. */
 export function movePart(

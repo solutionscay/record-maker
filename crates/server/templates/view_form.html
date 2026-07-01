@@ -2,7 +2,6 @@
 {% import "_band.html" as band %}
 
 {% block content %}
-<h2>{{ layout }} · Form view</h2>
 {% match record %}
 {% when Some with (r) %}
 {% match chrome.nav %}
@@ -11,8 +10,12 @@
       data-open="/browse/{{ nav.layout_id }}/{{ r.id }}/open"
       data-revert="/browse/{{ nav.layout_id }}/{{ r.id }}/revert"
       data-view="{{ nav.view }}" data-rec="{{ nav.current }}">
-  <div class="fm-canvas" style="width: {{ r.width }}px;">
-    {% for p in r.parts %}{% call band::band(p, true) %}{% endfor %}
+  {# Header/footer bands stay fixed; body (and any summary) bands scroll between
+     them. Wrappers are emitted tight so an absent header/footer is a no-op. #}
+  <div class="fm-canvas">
+    <div class="fm-bands-head">{% for p in r.parts %}{% if p.kind == "header" %}{% call band::band(p, true) %}{% endif %}{% endfor %}</div>
+    <div class="fm-bands-body">{% for p in r.parts %}{% if p.kind != "header" && p.kind != "footer" %}{% call band::band(p, true) %}{% endif %}{% endfor %}</div>
+    <div class="fm-bands-foot">{% for p in r.parts %}{% if p.kind == "footer" %}{% call band::band(p, true) %}{% endif %}{% endfor %}</div>
   </div>
 </form>
 {% when None %}{% endmatch %}

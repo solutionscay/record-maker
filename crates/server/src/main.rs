@@ -257,6 +257,9 @@ struct TableTemplate {
     chrome: Chrome,
     layout_id: i64,
     table: String,
+    /// Header/footer bands framing the grid, matching List/Form Browse views.
+    header: Vec<PartView>,
+    footer: Vec<PartView>,
     fields: Vec<FieldView>,
     records: Vec<RecordView>,
 }
@@ -736,6 +739,26 @@ fn build_form_record(
 /// Build the List-view render: header/footer parts once, the Body part(s)
 /// repeated per record bound to its values. `current_rec` (1-based) marks the
 /// flipbook's row. Returns `(header, rows, footer)`.
+/// The header and footer bands of a layout, rendered once with no record bound.
+/// Shared by List and Table Browse views so both frame their rows with the same
+/// bands: header / sub-summary render above, footer / grand-summary below.
+fn build_bands(sol: &Solution, layout_id: i64) -> (Vec<PartView>, Vec<PartView>) {
+    let no_record = HashMap::new();
+    let (mut header, mut footer) = (Vec::new(), Vec::new());
+    for p in sol.parts(layout_id).unwrap() {
+        match p.kind {
+            PartKind::Footer | PartKind::GrandSummary => {
+                footer.push(render_part(sol, &p, &no_record))
+            }
+            PartKind::Header | PartKind::SubSummary => {
+                header.push(render_part(sol, &p, &no_record))
+            }
+            PartKind::Body => {}
+        }
+    }
+    (header, footer)
+}
+
 fn build_list(
     sol: &Solution,
     layout_id: i64,
@@ -744,20 +767,13 @@ fn build_list(
     ids: &[i64],
     current_rec: i64,
 ) -> (Vec<PartView>, Vec<ListRow>, Vec<PartView>) {
-    let no_record = HashMap::new();
-    let (mut header, mut footer, mut body_parts) = (Vec::new(), Vec::new(), Vec::new());
-    for p in sol.parts(layout_id).unwrap() {
-        match p.kind {
-            PartKind::Body => body_parts.push(p),
-            PartKind::Footer | PartKind::GrandSummary => {
-                footer.push(render_part(sol, &p, &no_record))
-            }
-            // header / sub-summary render once above the rows.
-            PartKind::Header | PartKind::SubSummary => {
-                header.push(render_part(sol, &p, &no_record))
-            }
-        }
-    }
+    let (header, footer) = build_bands(sol, layout_id);
+    let body_parts: Vec<_> = sol
+        .parts(layout_id)
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.kind == PartKind::Body)
+        .collect();
 
     let mut rows = Vec::new();
     for (i, &id) in ids.iter().enumerate() {
@@ -840,10 +856,13 @@ async fn browse(
         _ => {
             let fields = sol.fields(table.id).unwrap();
             let records = sol.list_records(&table, &fields).unwrap();
+            let (header, footer) = build_bands(&sol, layout_id);
             let tmpl = TableTemplate {
                 chrome,
                 layout_id,
                 table: table.name.clone(),
+                header,
+                footer,
                 fields: fields
                     .iter()
                     .map(|f| FieldView {
@@ -2261,6 +2280,50 @@ mod tests {
         assert!(
             !html.contains(r#"<div class="fm-canvas""#),
             "list view is not the form canvas"
+        );
+    }
+
+    /// Table Browse frames its field-grid with the layout's header/footer bands,
+    /// the same as Form/List — so all three views share the fixed-band shape.
+    #[tokio::test]
+    async fn table_view_renders_header_and_footer_bands() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
+        let table = sol.table_by_name("Customers").unwrap().unwrap();
+        sol.insert_record(&table, &[]).unwrap();
+        let table_l = sol
+            .layouts_for_table(table.id)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.view == "table")
+            .unwrap()
+            .id;
+
+        let (status, html) = get_body(state_for(sol), &format!("/browse/{table_l}")).await;
+        assert_eq!(status, StatusCode::OK);
+        // Still the field-derived grid…
+        assert!(html.contains(r#"class="fm-tableview""#) && html.contains("<thead>"));
+        // …now wrapped by header/footer band regions.
+        assert!(
+            html.contains(r#"<div class="fm-bands-head">"#),
+            "table view renders the header band region"
+        );
+        assert!(
+            html.contains(r#"<div class="fm-bands-foot">"#),
+            "table view renders the footer band region"
+        );
+        // The layout's header + footer parts both render as bands (the grid body
+        // is field-derived, so these are the only .fm-part divs in Table view).
+        assert!(
+            html.matches(r#"class="fm-part""#).count() >= 2,
+            "both header and footer bands render their parts"
         );
     }
 

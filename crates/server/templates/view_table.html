@@ -1,7 +1,9 @@
 {% extends "shell.html" %}
+{% import "_band.html" as band %}
 
 {% block content %}
 <div class="fm-tableview">
+  <div class="fm-bands-head">{% for p in header %}{% call band::band(p, false) %}{% endfor %}</div>
   <div class="fm-tablescroll">
     <table>
       <thead>
@@ -23,6 +25,7 @@
       </tbody>
     </table>
   </div>
+  <div class="fm-bands-foot">{% for p in footer %}{% call band::band(p, false) %}{% endfor %}</div>
   <div class="fm-tablefoot">{{ records.len() }} record(s) · <strong>{{ table }}</strong></div>
 </div>
 {% endblock %}

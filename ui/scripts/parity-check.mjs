@@ -1,9 +1,9 @@
 // #44 shared-renderer parity gate.
 //
 // Server-renders the Svelte <LayoutPreview> from the committed fixture model
-// and asserts it normalizes to the committed canvas golden — the same golden
-// the Rust band-macro tests pin. This objectively proves the Svelte renderer's
-// DOM matches the askama macro's, so neither side can drift.
+// and asserts it normalizes to the committed Layout golden. Browse has its own
+// server-rendered golden because field objects intentionally show record values
+// there, while Layout shows field labels.
 //
 // `normalize()` below MUST stay byte-equivalent to the Rust `normalize_html`
 // in crates/server/src/main.rs. Do NOT edit tests/* or relax normalization to
@@ -38,7 +38,7 @@ function firstDiff(a, b) {
 }
 
 const model = JSON.parse(readFileSync(resolve(root, 'tests/canvas.fixture.json'), 'utf8'));
-const golden = readFileSync(resolve(root, 'tests/canvas.parity.html'), 'utf8');
+const golden = readFileSync(resolve(root, 'tests/canvas.layout.html'), 'utf8');
 
 const { createServer } = await import('vite');
 const vite = await createServer({

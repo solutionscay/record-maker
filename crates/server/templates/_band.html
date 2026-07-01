@@ -14,22 +14,22 @@
 <div class="fm-part" style="height: {{ p.height }}px;">
   {% for o in p.objects %}
   <div class="fm-obj{% if o.field %} fm-field{% endif %}{% if o.read_only %} fm-readonly{% endif %}"
-       style="left:{{ o.x }}px; top:{{ o.y }}px; width:{{ o.w }}px; height:{{ o.h }}px; z-index:{{ o.z }};">
+       style="left:{{ o.x }}px; top:{{ o.y }}px; width:{{ o.w }}px; height:{{ o.h }}px; z-index:{{ o.z }};{{ o.object_style }}">
     {% if o.field %}
     {% if editable && !o.read_only %}
       {% match o.field_id %}
       {% when Some with (fid) %}
-      <input class="fm-finput" name="f{{ fid }}" value="{{ o.value }}" autocomplete="off">
+      <input class="fm-finput" name="f{{ fid }}" value="{{ o.value }}" autocomplete="off"{% if o.text_style != "" %} style="{{ o.text_style }}"{% endif %}>
       {% when None %}
-      <span class="fm-fvalue">{{ o.value }}</span>
+      <span class="fm-fvalue"{% if o.text_style != "" %} style="{{ o.text_style }}"{% endif %}>{{ o.value }}</span>
       {% endmatch %}
     {% else %}
-    <span class="fm-fvalue">{{ o.value }}</span>
+    <span class="fm-fvalue"{% if o.text_style != "" %} style="{{ o.text_style }}"{% endif %}>{{ o.value }}</span>
     {% endif %}
     {% else if o.shape %}
     <div class="fm-shape fm-{{ o.kind }}" style="{{ o.shape_style }}"></div>
     {% else %}
-    <span class="fm-text">{{ o.content }}</span>
+    <span class="fm-text"{% if o.text_style != "" %} style="{{ o.text_style }}"{% endif %}>{{ o.content }}</span>
     {% endif %}
   </div>
   {% endfor %}

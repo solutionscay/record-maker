@@ -363,12 +363,9 @@ export class CanvasInteraction {
     this.#drawPreview = null;
     this.#drawing = null;
 
-    const { tool, partId, box } = drawing;
-    llog('place', 'draw finish', { tool, partId, ...box });
-    if (!drawing.dragged) {
-      llog('place', 'draw cancelled: pointer did not move far enough', { tool, partId });
-      return;
-    }
+    const { tool, partId } = drawing;
+    const finalBox = drawing.dragged ? drawing.box : this.#defaultPlacementBox(drawing);
+    llog('place', 'draw finish', { tool, partId, dragged: drawing.dragged, ...finalBox });
 
     this.#placing = true;
     try {
@@ -382,21 +379,22 @@ export class CanvasInteraction {
         views = await createObject(this.#layoutId, {
           partId,
           kind: 'field',
-          x: box.x,
-          y: box.y,
-          w: box.w,
-          h: box.h,
+          x: finalBox.x,
+          y: finalBox.y,
+          w: finalBox.w,
+          h: finalBox.h,
           fieldId,
+          createLabel: this.#doc.toolCreateLabel,
           rec: this.#doc.rec,
         });
       } else {
         views = await createObject(this.#layoutId, {
           partId,
           kind: tool,
-          x: box.x,
-          y: box.y,
-          w: box.w,
-          h: box.h,
+          x: finalBox.x,
+          y: finalBox.y,
+          w: finalBox.w,
+          h: finalBox.h,
           content: tool === 'text' ? 'Text' : null,
           props: defaultProps(tool) ?? null,
           rec: this.#doc.rec,
@@ -422,6 +420,18 @@ export class CanvasInteraction {
       this.#placing = false;
       this.#doc.setTool('pointer');
     }
+  }
+
+  #defaultPlacementBox(drawing: DrawPlacement): { x: number; y: number; w: number; h: number } {
+    const size = defaultBox(drawing.tool);
+    const x = clampOrigin(snapToGrid(drawing.startX));
+    const y = clampOrigin(snapToGrid(drawing.startY - drawing.partTop));
+    return {
+      x,
+      y,
+      w: size.w,
+      h: Math.min(size.h, Math.max(1, drawing.partHeight - y)),
+    };
   }
 
   destroy(): void {

@@ -150,7 +150,10 @@ impl ObjectKind {
 
     /// Whether this kind is a drawn shape (rendered from `props`, no data/text).
     pub fn is_shape(self) -> bool {
-        matches!(self, ObjectKind::Rect | ObjectKind::Line | ObjectKind::Ellipse)
+        matches!(
+            self,
+            ObjectKind::Rect | ObjectKind::Line | ObjectKind::Ellipse
+        )
     }
 }
 
@@ -230,9 +233,9 @@ impl Solution {
     /// layout **per view** (form/list/table) — independent design surfaces that
     /// happen to bind the same table — so this returns the per-view siblings.
     pub fn layouts_for_table(&self, table_id: i64) -> Result<Vec<LayoutMeta>> {
-        let mut stmt = self
-            .app
-            .prepare("SELECT id, name, table_id, view FROM meta_layout WHERE table_id=?1 ORDER BY id")?;
+        let mut stmt = self.app.prepare(
+            "SELECT id, name, table_id, view FROM meta_layout WHERE table_id=?1 ORDER BY id",
+        )?;
         let rows = stmt.query_map(params![table_id], |r| {
             Ok(LayoutMeta {
                 id: r.get(0)?,
@@ -385,7 +388,17 @@ impl Solution {
         self.app.execute(
             "INSERT INTO meta_object(part_id, kind, x, y, w, h, binding, content, props) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![o.part_id, o.kind.as_str(), o.x, o.y, o.w, o.h, o.binding, o.content, o.props],
+            params![
+                o.part_id,
+                o.kind.as_str(),
+                o.x,
+                o.y,
+                o.w,
+                o.h,
+                o.binding,
+                o.content,
+                o.props
+            ],
         )?;
         Ok(Some(self.app.last_insert_rowid()))
     }
@@ -518,6 +531,54 @@ impl Solution {
             "UPDATE meta_object SET props=?1 \
              WHERE id=?2 AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?3)",
             params![props, object_id, layout_id],
+        )?;
+        Ok(n)
+    }
+
+    /// Persist a field object's binding, scoped to its owning layout. The caller
+    /// supplies the already validated dot-path binding for the layout's table.
+    pub fn set_object_binding(
+        &self,
+        layout_id: i64,
+        object_id: i64,
+        binding: &str,
+    ) -> Result<usize> {
+        let n = self.app.execute(
+            "UPDATE meta_object SET binding=?1 \
+             WHERE id=?2 AND kind='field' \
+               AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?3)",
+            params![binding, object_id, layout_id],
+        )?;
+        Ok(n)
+    }
+
+    /// Persist a text object's static content, scoped to its owning layout.
+    pub fn set_object_content(
+        &self,
+        layout_id: i64,
+        object_id: i64,
+        content: &str,
+    ) -> Result<usize> {
+        let n = self.app.execute(
+            "UPDATE meta_object SET content=?1 \
+             WHERE id=?2 AND kind='text' \
+               AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?3)",
+            params![content, object_id, layout_id],
+        )?;
+        Ok(n)
+    }
+
+    /// Persist an object's Browse editability flag, scoped to its owning layout.
+    pub fn set_object_read_only(
+        &self,
+        layout_id: i64,
+        object_id: i64,
+        read_only: bool,
+    ) -> Result<usize> {
+        let n = self.app.execute(
+            "UPDATE meta_object SET read_only=?1 \
+             WHERE id=?2 AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?3)",
+            params![if read_only { 1 } else { 0 }, object_id, layout_id],
         )?;
         Ok(n)
     }
@@ -655,8 +716,14 @@ mod tests {
         s.create_table(
             "Customers",
             &[
-                NewField { name: "Name".into(), kind: FieldKind::Text },
-                NewField { name: "Email".into(), kind: FieldKind::Text },
+                NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                },
+                NewField {
+                    name: "Email".into(),
+                    kind: FieldKind::Text,
+                },
             ],
         )
         .unwrap();
@@ -709,7 +776,10 @@ mod tests {
         assert!(s.layouts().unwrap().is_empty());
 
         s.app
-            .execute("INSERT INTO meta_table(name, phys_name) VALUES ('T','t_x')", [])
+            .execute(
+                "INSERT INTO meta_table(name, phys_name) VALUES ('T','t_x')",
+                [],
+            )
             .unwrap();
         let tid = s.app.last_insert_rowid();
         s.app
@@ -771,11 +841,17 @@ mod tests {
         assert!(s.schema_version().unwrap() >= 2, "0002 applied");
 
         s.app
-            .execute("INSERT INTO meta_table(name, phys_name) VALUES ('T','t_x')", [])
+            .execute(
+                "INSERT INTO meta_table(name, phys_name) VALUES ('T','t_x')",
+                [],
+            )
             .unwrap();
         let tid = s.app.last_insert_rowid();
         s.app
-            .execute("INSERT INTO meta_layout(name, table_id) VALUES ('T', ?1)", [tid])
+            .execute(
+                "INSERT INTO meta_layout(name, table_id) VALUES ('T', ?1)",
+                [tid],
+            )
             .unwrap();
         let lid = s.app.last_insert_rowid();
         s.app
@@ -805,24 +881,41 @@ mod tests {
         // #15 round-trip primitive: geometry writes back to meta_object, scoped to
         // the owning layout so a foreign/unknown id can never mutate it.
         let mut s = Solution::open_in_memory().unwrap();
-        s.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        s.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
         let part = s.parts(lay.id).unwrap()[0].clone();
         let obj_id = s.objects(part.id).unwrap()[0].id;
 
         // A real move updates exactly one row and round-trips.
-        assert_eq!(s.set_object_geometry(lay.id, obj_id, 33, 44, 120, 30).unwrap(), 1);
+        assert_eq!(
+            s.set_object_geometry(lay.id, obj_id, 33, 44, 120, 30)
+                .unwrap(),
+            1
+        );
         let after = &s.objects(part.id).unwrap()[0];
         assert_eq!((after.x, after.y, after.w, after.h), (33, 44, 120, 30));
 
         // A foreign layout id is a no-op (scoped); geometry is unchanged.
-        assert_eq!(s.set_object_geometry(lay.id + 999, obj_id, 1, 1, 1, 1).unwrap(), 0);
+        assert_eq!(
+            s.set_object_geometry(lay.id + 999, obj_id, 1, 1, 1, 1)
+                .unwrap(),
+            0
+        );
         let still = &s.objects(part.id).unwrap()[0];
         assert_eq!((still.x, still.y, still.w, still.h), (33, 44, 120, 30));
 
         // An unknown object id is a no-op too.
-        assert_eq!(s.set_object_geometry(lay.id, 999_999, 0, 0, 0, 0).unwrap(), 0);
+        assert_eq!(
+            s.set_object_geometry(lay.id, 999_999, 0, 0, 0, 0).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -833,8 +926,14 @@ mod tests {
         s.create_table(
             "Customers",
             &[
-                NewField { name: "Name".into(), kind: FieldKind::Text },
-                NewField { name: "Email".into(), kind: FieldKind::Text },
+                NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                },
+                NewField {
+                    name: "Email".into(),
+                    kind: FieldKind::Text,
+                },
             ],
         )
         .unwrap();
@@ -847,7 +946,11 @@ mod tests {
         let n = s
             .set_objects_geometry(
                 lay.id,
-                &[(a, 10, 20, 100, 24), (b, 30, 40, 100, 24), (999_999, 0, 0, 1, 1)],
+                &[
+                    (a, 10, 20, 100, 24),
+                    (b, 30, 40, 100, 24),
+                    (999_999, 0, 0, 1, 1),
+                ],
             )
             .unwrap();
         assert_eq!(n, 2, "only the two real objects update");
@@ -856,8 +959,18 @@ mod tests {
         assert_eq!((after[1].x, after[1].y), (30, 40));
 
         // A foreign layout id updates nothing.
-        assert_eq!(s.set_objects_geometry(lay.id + 999, &[(a, 1, 1, 1, 1)]).unwrap(), 0);
-        assert_eq!((s.objects(part.id).unwrap()[0].x, s.objects(part.id).unwrap()[0].y), (10, 20));
+        assert_eq!(
+            s.set_objects_geometry(lay.id + 999, &[(a, 1, 1, 1, 1)])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            (
+                s.objects(part.id).unwrap()[0].x,
+                s.objects(part.id).unwrap()[0].y
+            ),
+            (10, 20)
+        );
     }
 
     #[test]
@@ -866,7 +979,13 @@ mod tests {
         // distinct rows, so editing one view never touches another (#57).
         let mut s = Solution::open_in_memory().unwrap();
         let tid = s
-            .create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .create_table(
+                "Customers",
+                &[NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                }],
+            )
             .unwrap();
         let layouts = s.layouts_for_table(tid).unwrap();
         assert_eq!(layouts.len(), 3);
@@ -881,7 +1000,8 @@ mod tests {
         assert_ne!(form_obj, list_obj, "objects are distinct rows");
 
         // Move the Form object; the List sibling must stay put.
-        s.set_object_geometry(form.id, form_obj, 99, 88, 50, 20).unwrap();
+        s.set_object_geometry(form.id, form_obj, 99, 88, 50, 20)
+            .unwrap();
         let f = &s.objects(form_part.id).unwrap()[0];
         let l = &s.objects(list_part.id).unwrap()[0];
         assert_eq!((f.x, f.y), (99, 88), "form moved");
@@ -894,15 +1014,24 @@ mod tests {
         // and the per-object read_only flag round-trips exactly.
         let s = Solution::open_in_memory().unwrap();
         s.app
-            .execute("INSERT INTO meta_table(name, phys_name) VALUES ('T','t_x')", [])
+            .execute(
+                "INSERT INTO meta_table(name, phys_name) VALUES ('T','t_x')",
+                [],
+            )
             .unwrap();
         let tid = s.app.last_insert_rowid();
         s.app
-            .execute("INSERT INTO meta_layout(name, table_id) VALUES ('T', ?1)", [tid])
+            .execute(
+                "INSERT INTO meta_layout(name, table_id) VALUES ('T', ?1)",
+                [tid],
+            )
             .unwrap();
         let lid = s.app.last_insert_rowid();
         s.app
-            .execute("INSERT INTO meta_part(layout_id, kind) VALUES (?1, 'body')", [lid])
+            .execute(
+                "INSERT INTO meta_part(layout_id, kind) VALUES (?1, 'body')",
+                [lid],
+            )
             .unwrap();
         let pid = s.app.last_insert_rowid();
 
@@ -920,10 +1049,16 @@ mod tests {
         assert_eq!(objs.len(), 2);
         // Lower z paints first (back); read_only, kind, and the binding/content
         // payload slots all round-trip independently.
-        assert_eq!((objs[0].z, objs[0].kind, objs[0].read_only), (0, ObjectKind::Text, false));
+        assert_eq!(
+            (objs[0].z, objs[0].kind, objs[0].read_only),
+            (0, ObjectKind::Text, false)
+        );
         assert_eq!(objs[0].content.as_deref(), Some("back"));
         assert!(objs[0].binding.is_none());
-        assert_eq!((objs[1].z, objs[1].kind, objs[1].read_only), (10, ObjectKind::Field, true));
+        assert_eq!(
+            (objs[1].z, objs[1].kind, objs[1].read_only),
+            (10, ObjectKind::Field, true)
+        );
         assert_eq!(objs[1].binding.as_deref(), Some("top"));
         assert!(objs[1].content.is_none());
     }
@@ -933,8 +1068,14 @@ mod tests {
         // #48: a shape object inserts onto a body part of the layout, carries its
         // props, and defaults to z=0 / editable. A foreign part id is a no-op.
         let mut s = Solution::open_in_memory().unwrap();
-        s.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        s.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
         let part = s.parts(lay.id).unwrap()[0].clone();
         let before = s.objects(part.id).unwrap().len();
@@ -959,7 +1100,10 @@ mod tests {
         let objs = s.objects(part.id).unwrap();
         assert_eq!(objs.len(), before + 1);
         let made = objs.iter().find(|o| o.id == id).unwrap();
-        assert_eq!((made.kind, made.x, made.y, made.w, made.h, made.z), (ObjectKind::Rect, 12, 8, 64, 40, 0));
+        assert_eq!(
+            (made.kind, made.x, made.y, made.w, made.h, made.z),
+            (ObjectKind::Rect, 12, 8, 64, 40, 0)
+        );
         assert!(!made.read_only);
         assert_eq!(made.props.as_deref(), Some("{\"fill\":\"#abc\"}"));
 
@@ -976,7 +1120,11 @@ mod tests {
             props: None,
         };
         assert!(s.create_object(lay.id, &other).unwrap().is_none());
-        assert_eq!(s.objects(part.id).unwrap().len(), before + 1, "no foreign insert");
+        assert_eq!(
+            s.objects(part.id).unwrap().len(),
+            before + 1,
+            "no foreign insert"
+        );
     }
 
     #[test]
@@ -984,13 +1132,28 @@ mod tests {
         // #60: dropping a field places a value `field` plus a separate caption
         // `text` label on the same row, the label to the left of the value.
         let mut s = Solution::open_in_memory().unwrap();
-        s.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        s.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
         let part = s.parts(lay.id).unwrap()[0].clone();
 
         let (label_id, field_id) = s
-            .create_field_object(lay.id, part.id, "Customers.Email", "Email", 120, 40, 200, 24)
+            .create_field_object(
+                lay.id,
+                part.id,
+                "Customers.Email",
+                "Email",
+                120,
+                40,
+                200,
+                24,
+            )
             .unwrap()
             .expect("created");
         let objs = s.objects(part.id).unwrap();
@@ -1016,8 +1179,14 @@ mod tests {
     fn create_part_appends_band_at_next_position() {
         // #48: a new band stacks below the existing ones.
         let mut s = Solution::open_in_memory().unwrap();
-        s.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        s.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
         let before = s.parts(lay.id).unwrap();
         let top_pos = before.iter().map(|p| p.position).max().unwrap();
@@ -1035,8 +1204,14 @@ mod tests {
     fn part_height_kind_and_delete_are_layout_scoped() {
         // Part edits are scoped to their owning layout, like object geometry.
         let mut s = Solution::open_in_memory().unwrap();
-        s.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        s.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
         let part = s.parts(lay.id).unwrap()[0].clone();
         let object_id = s.objects(part.id).unwrap()[0].id;
@@ -1046,24 +1221,50 @@ mod tests {
         assert_eq!(s.set_part_height(lay.id + 999, part.id, 40).unwrap(), 0);
         assert_eq!(s.part_by_id(lay.id, part.id).unwrap().unwrap().height, 180);
 
-        assert_eq!(s.set_part_kind(lay.id, part.id, PartKind::Footer).unwrap(), 1);
-        assert_eq!(s.part_by_id(lay.id, part.id).unwrap().unwrap().kind, PartKind::Footer);
-        assert_eq!(s.set_part_kind(lay.id + 999, part.id, PartKind::Header).unwrap(), 0);
-        assert_eq!(s.part_by_id(lay.id, part.id).unwrap().unwrap().kind, PartKind::Footer);
+        assert_eq!(
+            s.set_part_kind(lay.id, part.id, PartKind::Footer).unwrap(),
+            1
+        );
+        assert_eq!(
+            s.part_by_id(lay.id, part.id).unwrap().unwrap().kind,
+            PartKind::Footer
+        );
+        assert_eq!(
+            s.set_part_kind(lay.id + 999, part.id, PartKind::Header)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            s.part_by_id(lay.id, part.id).unwrap().unwrap().kind,
+            PartKind::Footer
+        );
 
         assert_eq!(s.delete_part(lay.id + 999, part.id).unwrap(), 0);
-        assert!(s.objects(part.id).unwrap().iter().any(|o| o.id == object_id));
+        assert!(s
+            .objects(part.id)
+            .unwrap()
+            .iter()
+            .any(|o| o.id == object_id));
         assert_eq!(s.delete_part(lay.id, part.id).unwrap(), 1);
         assert!(s.part_by_id(lay.id, part.id).unwrap().is_none());
-        assert!(s.objects(part.id).unwrap().is_empty(), "child objects cascade away");
+        assert!(
+            s.objects(part.id).unwrap().is_empty(),
+            "child objects cascade away"
+        );
     }
 
     #[test]
     fn delete_object_is_scoped() {
         // #48: delete removes the row, but only when it belongs to the layout.
         let mut s = Solution::open_in_memory().unwrap();
-        s.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        s.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
         let part = s.parts(lay.id).unwrap()[0].clone();
         let obj_id = s.objects(part.id).unwrap()[0].id;
@@ -1082,16 +1283,103 @@ mod tests {
     fn set_object_props_persists_scoped() {
         // #49: props write back to meta_object, layout-scoped.
         let mut s = Solution::open_in_memory().unwrap();
-        s.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        s.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
         let part = s.parts(lay.id).unwrap()[0].clone();
         let obj_id = s.objects(part.id).unwrap()[0].id;
 
-        assert_eq!(s.set_object_props(lay.id, obj_id, "{\"fill\":\"#123456\"}").unwrap(), 1);
-        let o = s.objects(part.id).unwrap().into_iter().find(|o| o.id == obj_id).unwrap();
+        assert_eq!(
+            s.set_object_props(lay.id, obj_id, "{\"fill\":\"#123456\"}")
+                .unwrap(),
+            1
+        );
+        let o = s
+            .objects(part.id)
+            .unwrap()
+            .into_iter()
+            .find(|o| o.id == obj_id)
+            .unwrap();
         assert_eq!(o.props.as_deref(), Some("{\"fill\":\"#123456\"}"));
         // Foreign layout ⇒ no-op.
         assert_eq!(s.set_object_props(lay.id + 999, obj_id, "{}").unwrap(), 0);
+    }
+
+    #[test]
+    fn selected_object_inspector_fields_persist_scoped() {
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table(
+            "Customers",
+            &[
+                NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                },
+                NewField {
+                    name: "Email".into(),
+                    kind: FieldKind::Text,
+                },
+            ],
+        )
+        .unwrap();
+        let lay = s.layouts().unwrap()[0].clone();
+        let part = s.parts(lay.id).unwrap()[0].clone();
+        let objects = s.objects(part.id).unwrap();
+        let label_id = objects
+            .iter()
+            .find(|o| o.kind == ObjectKind::Text)
+            .unwrap()
+            .id;
+        let field_id = objects
+            .iter()
+            .find(|o| o.kind == ObjectKind::Field)
+            .unwrap()
+            .id;
+
+        assert_eq!(
+            s.set_object_binding(lay.id, field_id, "Customers.Email")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.set_object_content(lay.id, label_id, "Primary email")
+                .unwrap(),
+            1
+        );
+        assert_eq!(s.set_object_read_only(lay.id, field_id, true).unwrap(), 1);
+
+        let after = s.objects(part.id).unwrap();
+        let label = after.iter().find(|o| o.id == label_id).unwrap();
+        let field = after.iter().find(|o| o.id == field_id).unwrap();
+        assert_eq!(label.content.as_deref(), Some("Primary email"));
+        assert_eq!(field.binding.as_deref(), Some("Customers.Email"));
+        assert!(field.read_only);
+
+        assert_eq!(
+            s.set_object_binding(lay.id + 999, field_id, "Customers.Name")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            s.set_object_content(lay.id + 999, label_id, "Name")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            s.set_object_read_only(lay.id + 999, field_id, false)
+                .unwrap(),
+            0
+        );
+
+        let unchanged = s.objects(part.id).unwrap();
+        let field = unchanged.iter().find(|o| o.id == field_id).unwrap();
+        assert_eq!(field.binding.as_deref(), Some("Customers.Email"));
+        assert!(field.read_only);
     }
 }

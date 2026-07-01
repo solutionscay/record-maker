@@ -86,7 +86,10 @@ fn clamp_rec(q: &HashMap<String, String>, total: i64) -> i64 {
     if total <= 0 {
         return 0;
     }
-    let n = q.get("rec").and_then(|s| s.parse::<i64>().ok()).unwrap_or(1);
+    let n = q
+        .get("rec")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(1);
     n.clamp(1, total)
 }
 
@@ -224,7 +227,14 @@ impl Chrome {
             }
             None => Vec::new(),
         };
-        Chrome { mode, layouts, current_layout: current.map(|c| c.id), view_tabs, nav: None, editing: false }
+        Chrome {
+            mode,
+            layouts,
+            current_layout: current.map(|c| c.id),
+            view_tabs,
+            nav: None,
+            editing: false,
+        }
     }
 }
 
@@ -289,8 +299,8 @@ struct PartView {
 ///   a separate `text` object — `label` is still resolved (for the inspector) but
 ///   no longer rendered inline.
 /// - `text` objects render their static `content`.
-/// - shape objects (`shape == true`) render a styled box from `shape_style`
-///   (derived server-side from `props`, so both renderers just interpolate it).
+/// - shape objects (`shape == true`) render a styled box from `shape_style`.
+/// - field/text objects render box/text styles derived from `props`.
 ///
 /// `z` is the stacking order (CSS `z-index`); `read_only` suppresses the editable
 /// input even in an editable view (per-object editability, #40/#43).
@@ -322,6 +332,8 @@ struct ObjectView {
     /// the inspector reads/writes the underlying `fill`/`stroke`/… keys. Empty
     /// string when the object has no props.
     props: String,
+    object_style: String,
+    text_style: String,
     label: String,
     value: String,
     shape_style: String,
@@ -390,7 +402,12 @@ struct DesignTemplate {
 /// landing surface now that each view is its own layout, #57).
 async fn index(State(st): State<AppState>) -> impl IntoResponse {
     let sol = st.sol.lock().unwrap();
-    match sol.layouts().unwrap().into_iter().find(|l| l.view == "form") {
+    match sol
+        .layouts()
+        .unwrap()
+        .into_iter()
+        .find(|l| l.view == "form")
+    {
         Some(l) => Redirect::to(&format!("/browse/{}", l.id)).into_response(),
         None => Html("<p>No layouts yet.</p>".to_string()).into_response(),
     }
@@ -413,12 +430,20 @@ fn resolve_object(
             let seg = binding.rsplit('.').next().unwrap_or(binding).to_lowercase();
             match by_name.get(&seg) {
                 Some((id, label, value)) => (true, Some(*id), label.clone(), value.clone()),
-                // a binding that doesn't resolve yet (e.g. a relationship path)
-                None => (true, None, binding.to_string(), String::new()),
+                // A binding that doesn't resolve yet (e.g. a relationship path)
+                // still renders a useful placeholder instead of a blank object.
+                None => (true, None, binding.to_string(), binding.to_string()),
             }
         }
         _ => (false, None, String::new(), String::new()),
     }
+}
+
+fn parse_props(props: Option<&str>) -> Option<serde_json::Value> {
+    let Some(props) = props else {
+        return None;
+    };
+    serde_json::from_str::<serde_json::Value>(props).ok()
 }
 
 /// Derive a shape object's inline CSS from its `props` JSON. #49 owns the full
@@ -428,8 +453,7 @@ fn resolve_object(
 /// both just interpolate it — there is no second derivation to keep byte-equal.
 /// Empty for absent/invalid props (an unstyled shape falls back to its CSS class).
 fn shape_style(props: Option<&str>) -> String {
-    let Some(props) = props else { return String::new() };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(props) else {
+    let Some(v) = parse_props(props) else {
         return String::new();
     };
     let mut s = String::new();
@@ -449,6 +473,77 @@ fn shape_style(props: Option<&str>) -> String {
     s
 }
 
+/// Box-level style for non-shape layout objects. Field objects use this for fill
+/// and border; text objects accept the same props if present, but the first UI
+/// pass exposes text formatting for text boxes rather than fill/line controls.
+fn object_style(kind: ObjectKind, props: Option<&str>) -> String {
+    if kind.is_shape() {
+        return String::new();
+    }
+    let Some(v) = parse_props(props) else {
+        return String::new();
+    };
+    let mut s = String::new();
+    if let Some(fill) = v.get("fill").and_then(serde_json::Value::as_str) {
+        s.push_str(&format!("background:{fill};"));
+    }
+    if let Some(stroke) = v.get("stroke").and_then(serde_json::Value::as_str) {
+        let width = v
+            .get("strokeWidth")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(1)
+            .max(0);
+        s.push_str(&format!("border:{width}px solid {stroke};"));
+    }
+    if let Some(radius) = v.get("radius").and_then(serde_json::Value::as_i64) {
+        s.push_str(&format!("border-radius:{}px;", radius.max(0)));
+    }
+    s
+}
+
+/// Text-level style for field and text objects. Alignment includes flex
+/// justification because field display values are vertically-centered flex spans.
+fn text_style(kind: ObjectKind, props: Option<&str>) -> String {
+    if !matches!(kind, ObjectKind::Field | ObjectKind::Text) {
+        return String::new();
+    }
+    let Some(v) = parse_props(props) else {
+        return String::new();
+    };
+    let mut s = String::new();
+    if let Some(color) = v.get("textColor").and_then(serde_json::Value::as_str) {
+        s.push_str(&format!("color:{color};"));
+    }
+    if let Some(size) = v.get("fontSize").and_then(serde_json::Value::as_i64) {
+        s.push_str(&format!("font-size:{}px;", size.clamp(6, 96)));
+    }
+    if v.get("bold")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        s.push_str("font-weight:700;");
+    }
+    if v.get("italic")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        s.push_str("font-style:italic;");
+    }
+    if v.get("underline")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        s.push_str("text-decoration:underline;");
+    }
+    match v.get("align").and_then(serde_json::Value::as_str) {
+        Some("center") => s.push_str("text-align:center;justify-content:center;"),
+        Some("right") => s.push_str("text-align:right;justify-content:flex-end;"),
+        Some("left") => s.push_str("text-align:left;justify-content:flex-start;"),
+        _ => {}
+    }
+    s
+}
+
 /// A record's field values keyed by lowercased field name → (field id, display
 /// name, value) — the lookup `resolve_object` binds against.
 fn by_name_map(fields: &[FieldMeta], cells: Vec<String>) -> HashMap<String, (i64, String, String)> {
@@ -457,6 +552,26 @@ fn by_name_map(fields: &[FieldMeta], cells: Vec<String>) -> HashMap<String, (i64
         .zip(cells)
         .map(|(f, value)| (f.name.to_lowercase(), (f.id, f.name.clone(), value)))
         .collect()
+}
+
+fn by_name_for_rec(
+    sol: &Solution,
+    table: &TableMeta,
+    fields: &[FieldMeta],
+    rec: Option<i64>,
+) -> HashMap<String, (i64, String, String)> {
+    let ids = sol.record_ids(table).unwrap();
+    let rec = clamp_rec_n(rec, ids.len() as i64);
+    if rec < 1 {
+        return HashMap::new();
+    }
+    match sol
+        .get_record(table, fields, ids[(rec - 1) as usize])
+        .unwrap()
+    {
+        Some(cells) => by_name_map(fields, cells),
+        None => HashMap::new(),
+    }
 }
 
 /// Resolve one object into its `ObjectView` (#44/#60), bound against `by_name`.
@@ -472,7 +587,13 @@ fn object_view(o: &ObjectMeta, by_name: &HashMap<String, (i64, String, String)>)
         ObjectKind::Text => o.content.clone().unwrap_or_default(),
         _ => String::new(),
     };
-    let shape_style = if shape { shape_style(o.props.as_deref()) } else { String::new() };
+    let shape_style = if shape {
+        shape_style(o.props.as_deref())
+    } else {
+        String::new()
+    };
+    let object_style = object_style(o.kind, o.props.as_deref());
+    let text_style = text_style(o.kind, o.props.as_deref());
     ObjectView {
         id: o.id,
         kind: o.kind.as_str(),
@@ -488,10 +609,25 @@ fn object_view(o: &ObjectMeta, by_name: &HashMap<String, (i64, String, String)>)
         binding: o.binding.clone().unwrap_or_default(),
         content,
         props: o.props.clone().unwrap_or_default(),
+        object_style,
+        text_style,
         label,
         value,
         shape_style,
     }
+}
+
+fn object_view_for_rec(
+    sol: &Solution,
+    layout_id: i64,
+    object_id: i64,
+    rec: Option<i64>,
+) -> Option<ObjectView> {
+    let (_lay, table) = layout_table(sol, layout_id)?;
+    let fields = sol.fields(table.id).ok()?;
+    let by_name = by_name_for_rec(sol, &table, &fields, rec);
+    let object = sol.object_by_id(layout_id, object_id).ok()??;
+    Some(object_view(&object, &by_name))
 }
 
 /// Render one part's objects, positioned and bound against `by_name` (an empty
@@ -507,7 +643,12 @@ fn render_part(
         .iter()
         .map(|o| object_view(o, by_name))
         .collect();
-    PartView { id: part.id, kind: part.kind.as_str(), height: part.height, objects }
+    PartView {
+        id: part.id,
+        kind: part.kind.as_str(),
+        height: part.height,
+        objects,
+    }
 }
 
 /// Canvas width for a layout: the rightmost object edge + a margin. Geometry is
@@ -545,7 +686,11 @@ fn build_form_record(
         .iter()
         .map(|p| render_part(sol, p, &by_name))
         .collect();
-    Some(FormRecord { id, width: layout_canvas_width(sol, layout_id), parts })
+    Some(FormRecord {
+        id,
+        width: layout_canvas_width(sol, layout_id),
+        parts,
+    })
 }
 
 /// Build the List-view render: header/footer parts once, the Body part(s)
@@ -580,8 +725,15 @@ fn build_list(
             continue;
         };
         let by_name = by_name_map(fields, cells);
-        let parts = body_parts.iter().map(|p| render_part(sol, p, &by_name)).collect();
-        rows.push(ListRow { id, current: (i as i64) + 1 == current_rec, parts });
+        let parts = body_parts
+            .iter()
+            .map(|p| render_part(sol, p, &by_name))
+            .collect();
+        rows.push(ListRow {
+            id,
+            current: (i as i64) + 1 == current_rec,
+            parts,
+        });
     }
     (header, rows, footer)
 }
@@ -606,7 +758,11 @@ async fn browse(
     let ids = sol.record_ids(&table).unwrap();
     let total = ids.len() as i64;
     let rec = clamp_rec(&q, total);
-    let current_id = if rec >= 1 { ids.get((rec - 1) as usize).copied() } else { None };
+    let current_id = if rec >= 1 {
+        ids.get((rec - 1) as usize).copied()
+    } else {
+        None
+    };
     chrome.nav = Some(flipbook(layout_id, view, rec, current_id, total));
     chrome.editing = current_id.is_some_and(|cid| st.lock_held((table.id, cid)));
 
@@ -628,8 +784,7 @@ async fn browse(
         }
         "list" => {
             let fields = sol.fields(table.id).unwrap();
-            let (header, rows, footer) =
-                build_list(&sol, layout_id, &table, &fields, &ids, rec);
+            let (header, rows, footer) = build_list(&sol, layout_id, &table, &fields, &ids, rec);
             Html(
                 ListTemplate {
                     chrome,
@@ -654,7 +809,9 @@ async fn browse(
                 table: table.name.clone(),
                 fields: fields
                     .iter()
-                    .map(|f| FieldView { name: f.name.clone() })
+                    .map(|f| FieldView {
+                        name: f.name.clone(),
+                    })
                     .collect(),
                 records: records
                     .into_iter()
@@ -663,7 +820,10 @@ async fn browse(
                         cells: fields
                             .iter()
                             .zip(r.cells)
-                            .map(|(f, value)| CellView { field_id: f.id, value })
+                            .map(|(f, value)| CellView {
+                                field_id: f.id,
+                                value,
+                            })
                             .collect(),
                     })
                     .collect(),
@@ -685,7 +845,12 @@ async fn design(State(st): State<AppState>, Path(layout_id): Path<i64>) -> impl 
     let mut chrome = Chrome::build(&sol, "design", Some(&lay));
     // Keep the pagination control in Layout mode — repurposed to step layouts.
     chrome.nav = layout_stepper(&sol, &lay);
-    let tmpl = DesignTemplate { chrome, layout_id, layout: lay.name.clone(), view: view_label(&lay.view) };
+    let tmpl = DesignTemplate {
+        chrome,
+        layout_id,
+        layout: lay.name.clone(),
+        view: view_label(&lay.view),
+    };
     Html(tmpl.render().unwrap()).into_response()
 }
 
@@ -725,7 +890,10 @@ async fn design_model(
     let fields = sol.fields(table.id).unwrap();
     // Bind to the record at `rec` when present; otherwise render geometry blank.
     let by_name = if rec >= 1 {
-        match sol.get_record(&table, &fields, ids[(rec - 1) as usize]).unwrap() {
+        match sol
+            .get_record(&table, &fields, ids[(rec - 1) as usize])
+            .unwrap()
+        {
             Some(cells) => by_name_map(&fields, cells),
             None => HashMap::new(),
         }
@@ -740,7 +908,10 @@ async fn design_model(
         .collect();
     let field_choices = fields
         .iter()
-        .map(|f| FieldChoice { id: f.id, name: f.name.clone() })
+        .map(|f| FieldChoice {
+            id: f.id,
+            name: f.name.clone(),
+        })
         .collect();
     let model = DesignModel {
         layout_id,
@@ -845,6 +1016,7 @@ struct CreateObjectBody {
     h: i64,
     rec: Option<i64>,
     field_id: Option<i64>,
+    create_label: Option<bool>,
     content: Option<String>,
     props: Option<serde_json::Value>,
 }
@@ -871,7 +1043,10 @@ async fn create_design_object(
     let ids = sol.record_ids(&table).unwrap();
     let rec = clamp_rec_n(body.rec, ids.len() as i64);
     let by_name = if rec >= 1 {
-        match sol.get_record(&table, &fields, ids[(rec - 1) as usize]).unwrap() {
+        match sol
+            .get_record(&table, &fields, ids[(rec - 1) as usize])
+            .unwrap()
+        {
             Some(cells) => by_name_map(&fields, cells),
             None => HashMap::new(),
         }
@@ -888,12 +1063,39 @@ async fn create_design_object(
         };
         let binding = format!("{}.{}", table.name, f.name);
         let label = f.name.clone();
-        match sol
-            .create_field_object(layout_id, body.part_id, &binding, &label, body.x, body.y, body.w, body.h)
-            .unwrap()
-        {
-            Some((label_id, field_id)) => vec![label_id, field_id],
-            None => return StatusCode::NOT_FOUND.into_response(),
+        if body.create_label.unwrap_or(true) {
+            match sol
+                .create_field_object(
+                    layout_id,
+                    body.part_id,
+                    &binding,
+                    &label,
+                    body.x,
+                    body.y,
+                    body.w,
+                    body.h,
+                )
+                .unwrap()
+            {
+                Some((label_id, field_id)) => vec![label_id, field_id],
+                None => return StatusCode::NOT_FOUND.into_response(),
+            }
+        } else {
+            let new = NewObject {
+                part_id: body.part_id,
+                kind,
+                x: body.x,
+                y: body.y,
+                w: body.w,
+                h: body.h,
+                binding: Some(binding),
+                content: None,
+                props: None,
+            };
+            match sol.create_object(layout_id, &new).unwrap() {
+                Some(id) => vec![id],
+                None => return StatusCode::NOT_FOUND.into_response(),
+            }
         }
     } else {
         let content = match kind {
@@ -954,7 +1156,13 @@ async fn create_design_part(
     };
     let height = body.height.unwrap_or(80).max(1);
     let id = sol.create_part(layout_id, kind, height).unwrap();
-    axum::Json(PartView { id, kind: kind.as_str(), height, objects: Vec::new() }).into_response()
+    axum::Json(PartView {
+        id,
+        kind: kind.as_str(),
+        height,
+        objects: Vec::new(),
+    })
+    .into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -1050,17 +1258,18 @@ struct PropsBody {
     props: serde_json::Value,
 }
 
-/// The canvas-facing result of a props commit (#49): the freshly **server-derived**
-/// shape style, so the canvas updates without a client-side re-derivation (the
-/// single-source rule, [[layout-object-types]]). Empty for a non-shape object.
+/// The canvas-facing result of a props commit (#49): freshly server-derived
+/// styles, so the canvas updates without a client-side re-derivation.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PropsResult {
+struct StyleResult {
+    object_style: String,
+    text_style: String,
     shape_style: String,
 }
 
 /// Persist an object's `props` from the Style zone (#49), layout-scoped, and echo
-/// back the re-derived shape style for the canvas. 200 on success, 404 when no
+/// back re-derived styles for the canvas. 200 on success, 404 when no
 /// such object belongs to the layout.
 async fn update_object_props(
     State(st): State<AppState>,
@@ -1072,11 +1281,108 @@ async fn update_object_props(
     if sol.set_object_props(layout_id, object_id, &props).unwrap() == 0 {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let shape_style = match sol.object_by_id(layout_id, object_id).unwrap() {
-        Some(o) if o.kind.is_shape() => shape_style(o.props.as_deref()),
-        _ => String::new(),
+    let Some(o) = sol.object_by_id(layout_id, object_id).unwrap() else {
+        return StatusCode::NOT_FOUND.into_response();
     };
-    axum::Json(PropsResult { shape_style }).into_response()
+    axum::Json(StyleResult {
+        object_style: object_style(o.kind, o.props.as_deref()),
+        text_style: text_style(o.kind, o.props.as_deref()),
+        shape_style: if o.kind.is_shape() {
+            shape_style(o.props.as_deref())
+        } else {
+            String::new()
+        },
+    })
+    .into_response()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BindingBody {
+    field_id: i64,
+    rec: Option<i64>,
+}
+
+/// Rebind a selected field object to another field on the layout's primary table.
+/// The client supplies a field id rather than a raw binding so the server remains
+/// the single source for the stored dot-path.
+async fn update_object_binding(
+    State(st): State<AppState>,
+    Path((layout_id, object_id)): Path<(i64, i64)>,
+    Json(body): Json<BindingBody>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let Some((_lay, table)) = layout_table(&sol, layout_id) else {
+        return not_found("layout", layout_id);
+    };
+    let fields = sol.fields(table.id).unwrap();
+    let Some(field) = fields.iter().find(|f| f.id == body.field_id) else {
+        return (StatusCode::BAD_REQUEST, "no such field").into_response();
+    };
+    let binding = format!("{}.{}", table.name, field.name);
+    if sol
+        .set_object_binding(layout_id, object_id, &binding)
+        .unwrap()
+        == 0
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match object_view_for_rec(&sol, layout_id, object_id, body.rec) {
+        Some(view) => axum::Json(view).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ContentBody {
+    content: String,
+}
+
+/// Update the static content for a selected text object.
+async fn update_object_content(
+    State(st): State<AppState>,
+    Path((layout_id, object_id)): Path<(i64, i64)>,
+    Json(body): Json<ContentBody>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    if sol
+        .set_object_content(layout_id, object_id, &body.content)
+        .unwrap()
+        == 0
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match object_view_for_rec(&sol, layout_id, object_id, None) {
+        Some(view) => axum::Json(view).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadOnlyBody {
+    read_only: bool,
+    rec: Option<i64>,
+}
+
+/// Toggle whether a selected object renders as editable in Browse mode.
+async fn update_object_read_only(
+    State(st): State<AppState>,
+    Path((layout_id, object_id)): Path<(i64, i64)>,
+    Json(body): Json<ReadOnlyBody>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    if sol
+        .set_object_read_only(layout_id, object_id, body.read_only)
+        .unwrap()
+        == 0
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match object_view_for_rec(&sol, layout_id, object_id, body.rec) {
+        Some(view) => axum::Json(view).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// Directory holding the built Layout Mode editor bundle (Svelte 5 + Vite static
@@ -1114,9 +1420,11 @@ async fn ui_asset(Path(path): Path<String>) -> impl IntoResponse {
     }
     let full = std::path::Path::new(UI_DIST).join(&path);
     match tokio::fs::read(&full).await {
-        Ok(bytes) => {
-            ([(axum::http::header::CONTENT_TYPE, ui_content_type(&path))], bytes).into_response()
-        }
+        Ok(bytes) => (
+            [(axum::http::header::CONTENT_TYPE, ui_content_type(&path))],
+            bytes,
+        )
+            .into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -1243,9 +1551,18 @@ fn seed(sol: &mut Solution) -> anyhow::Result<()> {
         sol.create_table(
             "Customers",
             &[
-                NewField { name: "Name".into(), kind: FieldKind::Text },
-                NewField { name: "Email".into(), kind: FieldKind::Text },
-                NewField { name: "Age".into(), kind: FieldKind::Number },
+                NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                },
+                NewField {
+                    name: "Email".into(),
+                    kind: FieldKind::Text,
+                },
+                NewField {
+                    name: "Age".into(),
+                    kind: FieldKind::Number,
+                },
             ],
         )?;
     }
@@ -1268,9 +1585,30 @@ fn app(state: AppState) -> Router {
         .route("/design/:layout/part/:id/height", post(update_part_height))
         .route("/design/:layout/part/:id/kind", post(update_part_kind))
         .route("/design/:layout/part/:id/delete", post(delete_design_part))
-        .route("/design/:layout/object/:id/geometry", post(update_object_geometry))
-        .route("/design/:layout/object/:id/props", post(update_object_props))
-        .route("/design/:layout/object/:id/delete", post(delete_design_object))
+        .route(
+            "/design/:layout/object/:id/geometry",
+            post(update_object_geometry),
+        )
+        .route(
+            "/design/:layout/object/:id/props",
+            post(update_object_props),
+        )
+        .route(
+            "/design/:layout/object/:id/binding",
+            post(update_object_binding),
+        )
+        .route(
+            "/design/:layout/object/:id/content",
+            post(update_object_content),
+        )
+        .route(
+            "/design/:layout/object/:id/read-only",
+            post(update_object_read_only),
+        )
+        .route(
+            "/design/:layout/object/:id/delete",
+            post(delete_design_object),
+        )
         .route("/design/:layout/geometry", post(update_objects_geometry))
         .route("/ui/*path", get(ui_asset))
         .with_state(state)
@@ -1326,10 +1664,33 @@ mod tests {
             binding: format!("T.Field{field_id}"),
             content: String::new(),
             props: String::new(),
+            object_style: String::new(),
+            text_style: String::new(),
             label: format!("Field {field_id}"),
             value: value.to_string(),
             shape_style: String::new(),
         }
+    }
+
+    #[test]
+    fn unresolved_field_binding_renders_binding_fallback() {
+        let object = ObjectMeta {
+            id: 1,
+            part_id: 1,
+            kind: ObjectKind::Field,
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 24,
+            z: 0,
+            read_only: true,
+            binding: Some("Customers.Missing".into()),
+            content: None,
+            props: None,
+        };
+        let view = object_view(&object, &HashMap::new());
+        assert_eq!(view.label, "Customers.Missing");
+        assert_eq!(view.value, "Customers.Missing");
     }
 
     /// The #43 acceptance: a read-only object renders a non-editable value, while
@@ -1349,7 +1710,11 @@ mod tests {
             chrome: form_chrome(),
             layout: "L".into(),
             table: "T".into(),
-            record: Some(FormRecord { id: 1, width: 200, parts: vec![part] }),
+            record: Some(FormRecord {
+                id: 1,
+                width: 200,
+                parts: vec![part],
+            }),
         };
         let html = tmpl.render().unwrap();
 
@@ -1382,7 +1747,12 @@ mod tests {
             record: Some(FormRecord {
                 id: 1,
                 width: 200,
-                parts: vec![PartView { id: 1, kind: "body", height: 60, objects: vec![o] }],
+                parts: vec![PartView {
+                    id: 1,
+                    kind: "body",
+                    height: 60,
+                    objects: vec![o],
+                }],
             }),
         };
         assert!(tmpl.render().unwrap().contains("z-index:7"));
@@ -1403,8 +1773,14 @@ mod tests {
             .create_table(
                 "Customers",
                 &[
-                    NewField { name: "Name".into(), kind: FieldKind::Text },
-                    NewField { name: "Email".into(), kind: FieldKind::Text },
+                    NewField {
+                        name: "Name".into(),
+                        kind: FieldKind::Text,
+                    },
+                    NewField {
+                        name: "Email".into(),
+                        kind: FieldKind::Text,
+                    },
                 ],
             )
             .unwrap();
@@ -1435,7 +1811,9 @@ mod tests {
             .unwrap();
         let resp = app(state).oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
 
         // Read-only Name: value shown, but no editable input bound to it.
@@ -1444,7 +1822,10 @@ mod tests {
             !html.contains(&format!(r#"name="f{name_fid}""#)),
             "read-only field must not render an input"
         );
-        assert!(html.contains("fm-readonly"), "read-only object marked in markup");
+        assert!(
+            html.contains("fm-readonly"),
+            "read-only object marked in markup"
+        );
         // Editable Email: input present.
         assert!(
             html.contains(&format!(r#"name="f{email_fid}""#))
@@ -1507,7 +1888,11 @@ mod tests {
             }
         }
         // 3. drop spaces adjacent to tag boundaries.
-        collapsed.replace("> ", ">").replace(" <", "<").trim().to_string()
+        collapsed
+            .replace("> ", ">")
+            .replace(" <", "<")
+            .trim()
+            .to_string()
     }
 
     fn golden_path(name: &str) -> std::path::PathBuf {
@@ -1542,8 +1927,14 @@ mod tests {
             .create_table(
                 "Customers",
                 &[
-                    NewField { name: "Name".into(), kind: FieldKind::Text },
-                    NewField { name: "Email".into(), kind: FieldKind::Text },
+                    NewField {
+                        name: "Name".into(),
+                        kind: FieldKind::Text,
+                    },
+                    NewField {
+                        name: "Email".into(),
+                        kind: FieldKind::Text,
+                    },
                 ],
             )
             .unwrap();
@@ -1551,12 +1942,18 @@ mod tests {
         let fields = sol.fields(tid).unwrap();
         sol.insert_record(
             &table,
-            &[(&fields[0], "Ada".into()), (&fields[1], "ada@example.com".into())],
+            &[
+                (&fields[0], "Ada".into()),
+                (&fields[1], "ada@example.com".into()),
+            ],
         )
         .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
         sol.app
-            .execute("UPDATE meta_object SET read_only=1 WHERE binding='Customers.Name'", [])
+            .execute(
+                "UPDATE meta_object SET read_only=1 WHERE binding='Customers.Name'",
+                [],
+            )
             .unwrap();
         sol.app
             .execute(
@@ -1596,11 +1993,18 @@ mod tests {
         use axum::http::Request;
         use tower::ServiceExt;
         let resp = app(state)
-            .oneshot(Request::builder().uri(uri).body(axum::body::Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
@@ -1632,7 +2036,9 @@ mod tests {
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
@@ -1642,30 +2048,55 @@ mod tests {
     #[tokio::test]
     async fn browse_view_tabs_link_to_sibling_layouts_and_render_by_view() {
         let mut sol = Solution::open_in_memory().unwrap();
-        sol.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let table = sol.table_by_name("Customers").unwrap().unwrap();
         let fields = sol.fields(table.id).unwrap();
-        sol.insert_record(&table, &[(&fields[0], "Ada".into())]).unwrap();
+        sol.insert_record(&table, &[(&fields[0], "Ada".into())])
+            .unwrap();
         let layouts = sol.layouts_for_table(table.id).unwrap();
         let form = layouts.iter().find(|l| l.view == "form").unwrap().id;
         let list = layouts.iter().find(|l| l.view == "list").unwrap().id;
         let table_l = layouts.iter().find(|l| l.view == "table").unwrap().id;
-        assert!(form != list && list != table_l && form != table_l, "distinct per-view ids");
+        assert!(
+            form != list && list != table_l && form != table_l,
+            "distinct per-view ids"
+        );
         let state = state_for(sol);
 
         // The Form layout renders the canvas and offers tabs to the SIBLING ids.
         let (status, html) = get_body(state.clone(), &format!("/browse/{form}")).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(html.contains(r#"<div class="fm-canvas""#), "form renders the canvas");
-        assert!(html.contains(&format!(r#"href="/browse/{list}""#)), "List tab → list layout");
-        assert!(html.contains(&format!(r#"href="/browse/{table_l}""#)), "Table tab → table layout");
+        assert!(
+            html.contains(r#"<div class="fm-canvas""#),
+            "form renders the canvas"
+        );
+        assert!(
+            html.contains(&format!(r#"href="/browse/{list}""#)),
+            "List tab → list layout"
+        );
+        assert!(
+            html.contains(&format!(r#"href="/browse/{table_l}""#)),
+            "Table tab → table layout"
+        );
 
         // The List layout renders the list surface by its own view, not the canvas.
         let (status, html) = get_body(state, &format!("/browse/{list}")).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(html.contains(r#"class="fm-list""#), "list renders the list surface");
-        assert!(!html.contains(r#"<div class="fm-canvas""#), "list view is not the form canvas");
+        assert!(
+            html.contains(r#"class="fm-list""#),
+            "list renders the list surface"
+        );
+        assert!(
+            !html.contains(r#"<div class="fm-canvas""#),
+            "list view is not the form canvas"
+        );
     }
 
     /// #57 Layout-mode chrome: the view toggle stays (switching which view you
@@ -1674,8 +2105,14 @@ mod tests {
     #[tokio::test]
     async fn design_mode_keeps_view_toggle_and_layout_stepper() {
         let mut sol = Solution::open_in_memory().unwrap();
-        sol.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let table = sol.table_by_name("Customers").unwrap().unwrap();
         let layouts = sol.layouts_for_table(table.id).unwrap();
         let form = layouts.iter().find(|l| l.view == "form").unwrap().id;
@@ -1683,11 +2120,20 @@ mod tests {
         let (status, html) = get_body(state_for(sol), &format!("/design/{form}")).await;
         assert_eq!(status, StatusCode::OK);
         // View toggle present, switching which view you DESIGN (links into /design/).
-        assert!(html.contains(&format!(r#"href="/design/{list}""#)), "view toggle → design the List layout");
+        assert!(
+            html.contains(&format!(r#"href="/design/{list}""#)),
+            "view toggle → design the List layout"
+        );
         // Pagination control repurposed to layout navigation.
-        assert!(html.contains("Layout navigation"), "stepper navigates layouts in design mode");
+        assert!(
+            html.contains("Layout navigation"),
+            "stepper navigates layouts in design mode"
+        );
         // Record actions don't belong in Layout mode.
-        assert!(html.contains(r#"title="Records are managed in Browse mode""#), "no record actions in layout mode");
+        assert!(
+            html.contains(r#"title="Records are managed in Browse mode""#),
+            "no record actions in layout mode"
+        );
     }
 
     /// #46 group commit: a bulk POST persists every object's geometry in one
@@ -1698,8 +2144,14 @@ mod tests {
         sol.create_table(
             "Customers",
             &[
-                NewField { name: "Name".into(), kind: FieldKind::Text },
-                NewField { name: "Email".into(), kind: FieldKind::Text },
+                NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                },
+                NewField {
+                    name: "Email".into(),
+                    kind: FieldKind::Text,
+                },
             ],
         )
         .unwrap();
@@ -1728,13 +2180,23 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(resp.status(), StatusCode::OK);
-        let count = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(String::from_utf8(count.to_vec()).unwrap(), "2", "only real ids count");
+        let count = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(count.to_vec()).unwrap(),
+            "2",
+            "only real ids count"
+        );
 
         let sol = state.sol.lock().unwrap();
         let after = sol.objects(part.id).unwrap();
         assert_eq!((after[0].x, after[0].y), (10, 20));
-        assert_eq!((after[1].x, after[1].y), (0, 40), "negative x clamped to origin");
+        assert_eq!(
+            (after[1].x, after[1].y),
+            (0, 40),
+            "negative x clamped to origin"
+        );
     }
 
     /// #62 two-mount rail: the design page renders the `#layout-tools` mount node
@@ -1743,17 +2205,35 @@ mod tests {
     #[tokio::test]
     async fn design_page_renders_tool_rail_mount_node() {
         let mut sol = Solution::open_in_memory().unwrap();
-        sol.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
-        let form = sol.layouts().unwrap().into_iter().find(|l| l.view == "form").unwrap().id;
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
+        let form = sol
+            .layouts()
+            .unwrap()
+            .into_iter()
+            .find(|l| l.view == "form")
+            .unwrap()
+            .id;
         let state = state_for(sol);
 
         let (status, html) = get_body(state.clone(), &format!("/design/{form}")).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(html.contains(r#"id="layout-tools""#), "design page mounts the tool rail");
+        assert!(
+            html.contains(r#"id="layout-tools""#),
+            "design page mounts the tool rail"
+        );
 
         let (_, browse) = get_body(state, &format!("/browse/{form}")).await;
-        assert!(!browse.contains(r#"id="layout-tools""#), "browse has no tool rail");
+        assert!(
+            !browse.contains(r#"id="layout-tools""#),
+            "browse has no tool rail"
+        );
     }
 
     /// #48 create: placing a shape POSTs `{partId,kind,x,y,w,h,props}`, persists a
@@ -1762,8 +2242,14 @@ mod tests {
     #[tokio::test]
     async fn design_create_shape_object_persists_and_returns_view() {
         let mut sol = Solution::open_in_memory().unwrap();
-        sol.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
         let part_id = sol.parts(layout_id).unwrap()[0].id;
         let before = sol.objects(part_id).unwrap().len();
@@ -1772,16 +2258,25 @@ mod tests {
         let body = format!(
             r##"{{"partId":{part_id},"kind":"rect","x":20,"y":12,"w":64,"h":48,"props":{{"fill":"#eef","stroke":"#88a","strokeWidth":1}}}}"##
         );
-        let (status, resp) = post_json_body(state.clone(), &format!("/design/{layout_id}/object"), &body).await;
+        let (status, resp) =
+            post_json_body(state.clone(), &format!("/design/{layout_id}/object"), &body).await;
         assert_eq!(status, StatusCode::OK);
         assert!(resp.contains(r#""kind":"rect""#) && resp.contains(r#""shape":true"#));
-        assert!(resp.contains(r#""shapeStyle":"background:#eef;border:1px solid #88a;""#), "derived style echoed\n{resp}");
-        assert!(resp.contains("strokeWidth"), "raw props echoed for the inspector\n{resp}");
+        assert!(
+            resp.contains(r#""shapeStyle":"background:#eef;border:1px solid #88a;""#),
+            "derived style echoed\n{resp}"
+        );
+        assert!(
+            resp.contains("strokeWidth"),
+            "raw props echoed for the inspector\n{resp}"
+        );
 
         let sol = state.sol.lock().unwrap();
         let objs = sol.objects(part_id).unwrap();
         assert_eq!(objs.len(), before + 1, "one row inserted");
-        assert!(objs.iter().any(|o| o.kind == ObjectKind::Rect && (o.x, o.y) == (20, 12)));
+        assert!(objs
+            .iter()
+            .any(|o| o.kind == ObjectKind::Rect && (o.x, o.y) == (20, 12)));
     }
 
     /// #48/#60 create: the Field tool POSTs `{kind:"field",fieldId,…}` and gets
@@ -1790,12 +2285,19 @@ mod tests {
     #[tokio::test]
     async fn design_create_field_object_spawns_label_and_returns_both() {
         let mut sol = Solution::open_in_memory().unwrap();
-        sol.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let table = sol.table_by_name("Customers").unwrap().unwrap();
         let fields = sol.fields(table.id).unwrap();
         let name_fid = fields[0].id;
-        sol.insert_record(&table, &[(&fields[0], "Ada".into())]).unwrap();
+        sol.insert_record(&table, &[(&fields[0], "Ada".into())])
+            .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
         let part_id = sol.parts(layout_id).unwrap()[0].id;
         let before = sol.objects(part_id).unwrap().len();
@@ -1804,24 +2306,212 @@ mod tests {
         let body = format!(
             r#"{{"partId":{part_id},"kind":"field","x":120,"y":40,"w":200,"h":24,"fieldId":{name_fid},"rec":1}}"#
         );
-        let (status, resp) = post_json_body(state.clone(), &format!("/design/{layout_id}/object"), &body).await;
+        let (status, resp) =
+            post_json_body(state.clone(), &format!("/design/{layout_id}/object"), &body).await;
         assert_eq!(status, StatusCode::OK);
         // The value field resolves "Ada" and binds Customers.Name; the label
         // carries the caption "Name".
         assert!(resp.contains(r#""kind":"field""#) && resp.contains(r#""value":"Ada""#));
         assert!(resp.contains(r#""binding":"Customers.Name""#));
-        assert!(resp.contains(r#""kind":"text""#) && resp.contains(r#""content":"Name""#), "label spawned\n{resp}");
+        assert!(
+            resp.contains(r#""kind":"text""#) && resp.contains(r#""content":"Name""#),
+            "label spawned\n{resp}"
+        );
 
         let sol = state.sol.lock().unwrap();
-        assert_eq!(sol.objects(part_id).unwrap().len(), before + 2, "value + label inserted");
+        assert_eq!(
+            sol.objects(part_id).unwrap().len(),
+            before + 2,
+            "value + label inserted"
+        );
+        drop(sol);
+
+        let body = format!(
+            r#"{{"partId":{part_id},"kind":"field","x":120,"y":80,"w":200,"h":24,"fieldId":{name_fid},"createLabel":false,"rec":1}}"#
+        );
+        let (status, resp) =
+            post_json_body(state.clone(), &format!("/design/{layout_id}/object"), &body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(resp.contains(r#""kind":"field""#), "field created\n{resp}");
+        assert!(
+            !resp.contains(r#""kind":"text""#),
+            "label suppressed\n{resp}"
+        );
+
+        let sol = state.sol.lock().unwrap();
+        assert_eq!(
+            sol.objects(part_id).unwrap().len(),
+            before + 3,
+            "second placement inserted value only"
+        );
+    }
+
+    #[tokio::test]
+    async fn design_selected_object_inspector_updates_field_text_and_read_only() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        sol.create_table(
+            "Customers",
+            &[
+                NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                },
+                NewField {
+                    name: "Email".into(),
+                    kind: FieldKind::Text,
+                },
+            ],
+        )
+        .unwrap();
+        let table = sol.table_by_name("Customers").unwrap().unwrap();
+        let fields = sol.fields(table.id).unwrap();
+        sol.insert_record(
+            &table,
+            &[
+                (&fields[0], "Ada".into()),
+                (&fields[1], "ada@example.test".into()),
+            ],
+        )
+        .unwrap();
+        let layout_id = sol.layouts().unwrap()[0].id;
+        let part_id = sol.parts(layout_id).unwrap()[0].id;
+        let objects = sol.objects(part_id).unwrap();
+        let label_id = objects
+            .iter()
+            .find(|o| o.kind == ObjectKind::Text)
+            .unwrap()
+            .id;
+        let field_id = objects
+            .iter()
+            .find(|o| o.kind == ObjectKind::Field)
+            .unwrap()
+            .id;
+        let email_fid = fields[1].id;
+        let state = state_for(sol);
+
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/design/{layout_id}/object/{field_id}/binding"),
+            &format!(r#"{{"fieldId":{email_fid},"rec":1}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            resp.contains(r#""binding":"Customers.Email""#),
+            "binding response\n{resp}"
+        );
+        assert!(
+            resp.contains(r#""fieldId":"#) && resp.contains(r#""value":"ada@example.test""#),
+            "field projection\n{resp}"
+        );
+
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/design/{layout_id}/object/{label_id}/content"),
+            r#"{"content":"Primary email"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            resp.contains(r#""content":"Primary email""#),
+            "content response\n{resp}"
+        );
+
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/design/{layout_id}/object/{field_id}/read-only"),
+            r#"{"readOnly":true,"rec":1}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            resp.contains(r#""readOnly":true"#),
+            "read-only response\n{resp}"
+        );
+
+        let sol = state.sol.lock().unwrap();
+        let updated = sol.objects(part_id).unwrap();
+        let label = updated.iter().find(|o| o.id == label_id).unwrap();
+        let field = updated.iter().find(|o| o.id == field_id).unwrap();
+        assert_eq!(label.content.as_deref(), Some("Primary email"));
+        assert_eq!(field.binding.as_deref(), Some("Customers.Email"));
+        assert!(field.read_only);
+    }
+
+    #[tokio::test]
+    async fn design_object_props_style_field_and_text_objects() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
+        let layout_id = sol.layouts().unwrap()[0].id;
+        let part_id = sol.parts(layout_id).unwrap()[0].id;
+        let objects = sol.objects(part_id).unwrap();
+        let label_id = objects
+            .iter()
+            .find(|o| o.kind == ObjectKind::Text)
+            .unwrap()
+            .id;
+        let field_id = objects
+            .iter()
+            .find(|o| o.kind == ObjectKind::Field)
+            .unwrap()
+            .id;
+        let state = state_for(sol);
+
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/design/{layout_id}/object/{field_id}/props"),
+            r##"{"props":{"fill":"#ffeecc","stroke":"#335577","strokeWidth":3,"textColor":"#112233","fontSize":18,"bold":true,"italic":true,"underline":true,"align":"right"}}"##,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            resp.contains(r#""objectStyle":"background:#ffeecc;border:3px solid #335577;""#),
+            "field box style\n{resp}"
+        );
+        assert!(
+            resp.contains("color:#112233;font-size:18px;font-weight:700;font-style:italic;text-decoration:underline;text-align:right;justify-content:flex-end;"),
+            "field text style\n{resp}"
+        );
+
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/design/{layout_id}/object/{label_id}/props"),
+            r##"{"props":{"textColor":"#445566","fontSize":16,"align":"center"}}"##,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            resp.contains(r#""textStyle":"color:#445566;font-size:16px;text-align:center;justify-content:center;""#),
+            "text formatting style\n{resp}"
+        );
+
+        let (_, model) = get_body(state, &format!("/design/{layout_id}/model")).await;
+        assert!(
+            model.contains(r#""objectStyle":"background:#ffeecc;border:3px solid #335577;""#)
+                && model.contains(r#""textStyle":"color:#445566;font-size:16px;text-align:center;justify-content:center;""#),
+            "styles persist in design model\n{model}"
+        );
     }
 
     /// #48 create-part: POSTing a kind appends a band and echoes its `PartView`.
     #[tokio::test]
     async fn design_create_part_appends_band_and_returns_view() {
         let mut sol = Solution::open_in_memory().unwrap();
-        sol.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
         let before = sol.parts(layout_id).unwrap().len();
         let state = state_for(sol);
@@ -1834,7 +2524,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(resp.contains(r#""kind":"footer""#) && resp.contains(r#""height":40"#));
-        assert_eq!(state.sol.lock().unwrap().parts(layout_id).unwrap().len(), before + 1);
+        assert_eq!(
+            state.sol.lock().unwrap().parts(layout_id).unwrap().len(),
+            before + 1
+        );
     }
 
     /// Part editing: height/kind/delete round-trip through layout-scoped design
@@ -1842,8 +2535,14 @@ mod tests {
     #[tokio::test]
     async fn design_part_editing_round_trip() {
         let mut sol = Solution::open_in_memory().unwrap();
-        sol.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
         let part_id = sol.parts(layout_id).unwrap()[0].id;
         let state = state_for(sol);
@@ -1856,7 +2555,17 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(resp.contains(r#""height":164"#));
-        assert_eq!(state.sol.lock().unwrap().part_by_id(layout_id, part_id).unwrap().unwrap().height, 164);
+        assert_eq!(
+            state
+                .sol
+                .lock()
+                .unwrap()
+                .part_by_id(layout_id, part_id)
+                .unwrap()
+                .unwrap()
+                .height,
+            164
+        );
 
         let (status, resp) = post_json_body(
             state.clone(),
@@ -1867,29 +2576,58 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(resp.contains(r#""kind":"footer""#));
         assert_eq!(
-            state.sol.lock().unwrap().part_by_id(layout_id, part_id).unwrap().unwrap().kind,
+            state
+                .sol
+                .lock()
+                .unwrap()
+                .part_by_id(layout_id, part_id)
+                .unwrap()
+                .unwrap()
+                .kind,
             PartKind::Footer
         );
 
         assert_eq!(
-            post_json(state.clone(), &format!("/design/{}/part/{part_id}/height", layout_id + 999), r#"{"height":1}"#)
-                .await,
+            post_json(
+                state.clone(),
+                &format!("/design/{}/part/{part_id}/height", layout_id + 999),
+                r#"{"height":1}"#
+            )
+            .await,
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            post_json(state.clone(), &format!("/design/{layout_id}/part/{part_id}/kind"), r#"{"kind":"bad"}"#)
-                .await,
+            post_json(
+                state.clone(),
+                &format!("/design/{layout_id}/part/{part_id}/kind"),
+                r#"{"kind":"bad"}"#
+            )
+            .await,
             StatusCode::BAD_REQUEST
         );
 
-        assert!(!state.sol.lock().unwrap().objects(part_id).unwrap().is_empty());
+        assert!(!state
+            .sol
+            .lock()
+            .unwrap()
+            .objects(part_id)
+            .unwrap()
+            .is_empty());
         assert_eq!(
-            post_json(state.clone(), &format!("/design/{layout_id}/part/{part_id}/delete"), "").await,
+            post_json(
+                state.clone(),
+                &format!("/design/{layout_id}/part/{part_id}/delete"),
+                ""
+            )
+            .await,
             StatusCode::OK
         );
         let sol = state.sol.lock().unwrap();
         assert!(sol.part_by_id(layout_id, part_id).unwrap().is_none());
-        assert!(sol.objects(part_id).unwrap().is_empty(), "objects deleted with the band");
+        assert!(
+            sol.objects(part_id).unwrap().is_empty(),
+            "objects deleted with the band"
+        );
     }
 
     /// #48 delete + #49 props: a placed object can have its props set (shape style
@@ -1897,8 +2635,14 @@ mod tests {
     #[tokio::test]
     async fn design_object_props_then_delete_round_trip() {
         let mut sol = Solution::open_in_memory().unwrap();
-        sol.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
         let part_id = sol.parts(layout_id).unwrap()[0].id;
         let state = state_for(sol);
@@ -1913,7 +2657,12 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let rect_id = {
             let sol = state.sol.lock().unwrap();
-            sol.objects(part_id).unwrap().iter().find(|o| o.kind == ObjectKind::Rect).unwrap().id
+            sol.objects(part_id)
+                .unwrap()
+                .iter()
+                .find(|o| o.kind == ObjectKind::Rect)
+                .unwrap()
+                .id
         };
 
         // Set props → the model now derives a shape_style from them.
@@ -1925,18 +2674,38 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let (_, model) = get_body(state.clone(), &format!("/design/{layout_id}/model")).await;
-        assert!(model.contains("background:#102030;border-radius:6px;"), "props drive shape_style\n{model}");
+        assert!(
+            model.contains("background:#102030;border-radius:6px;"),
+            "props drive shape_style\n{model}"
+        );
 
         // Delete it (scoped): a foreign layout is a no-op 404, the real one 200.
         assert_eq!(
-            post_json(state.clone(), &format!("/design/{}/object/{rect_id}/delete", layout_id + 999), "").await,
+            post_json(
+                state.clone(),
+                &format!("/design/{}/object/{rect_id}/delete", layout_id + 999),
+                ""
+            )
+            .await,
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            post_json(state.clone(), &format!("/design/{layout_id}/object/{rect_id}/delete"), "").await,
+            post_json(
+                state.clone(),
+                &format!("/design/{layout_id}/object/{rect_id}/delete"),
+                ""
+            )
+            .await,
             StatusCode::OK
         );
-        assert!(!state.sol.lock().unwrap().objects(part_id).unwrap().iter().any(|o| o.id == rect_id));
+        assert!(!state
+            .sol
+            .lock()
+            .unwrap()
+            .objects(part_id)
+            .unwrap()
+            .iter()
+            .any(|o| o.id == rect_id));
     }
 
     /// #15 round-trip: POSTing new geometry persists to `meta_object` (scoped to
@@ -1945,8 +2714,14 @@ mod tests {
     #[tokio::test]
     async fn design_object_geometry_persists_clamps_and_is_scoped() {
         let mut sol = Solution::open_in_memory().unwrap();
-        sol.create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
-            .unwrap();
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
         let part = sol.parts(layout_id).unwrap()[0].clone();
         let obj_id = sol.objects(part.id).unwrap()[0].id;
@@ -2004,7 +2779,8 @@ mod tests {
     #[tokio::test]
     async fn design_model_endpoint_matches_committed_fixture() {
         let (sol, layout_id) = parity_fixture();
-        let (status, body) = get_body(state_for(sol), &format!("/design/{layout_id}/model?rec=1")).await;
+        let (status, body) =
+            get_body(state_for(sol), &format!("/design/{layout_id}/model?rec=1")).await;
         assert_eq!(status, StatusCode::OK);
         // Shape sanity (independent of the golden), so a contract change is loud.
         for needle in [
@@ -2031,10 +2807,13 @@ mod tests {
     #[tokio::test]
     async fn browse_canvas_matches_parity_golden() {
         let (sol, layout_id) = parity_fixture();
-        let (status, html) = get_body(state_for(sol), &format!("/browse/{layout_id}?view=form")).await;
+        let (status, html) =
+            get_body(state_for(sol), &format!("/browse/{layout_id}?view=form")).await;
         assert_eq!(status, StatusCode::OK);
         // The form holds exactly one `.fm-canvas`; slice it out up to `</form>`.
-        let start = html.find(r#"<div class="fm-canvas""#).expect("canvas present");
+        let start = html
+            .find(r#"<div class="fm-canvas""#)
+            .expect("canvas present");
         let end = start + html[start..].find("</form>").expect("form closes");
         let canvas = normalize_html(&html[start..end]);
         assert!(canvas.starts_with(r#"<div class="fm-canvas""#) && canvas.ends_with("</div>"));

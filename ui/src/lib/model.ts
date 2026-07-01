@@ -42,6 +42,10 @@ export interface ObjectView {
    * alongside the server-derived `shapeStyle` so the inspector reads/writes the
    * underlying `fill`/`stroke`/… keys while the canvas renders from `shapeStyle`. */
   props: string;
+  /** Server-derived inline CSS for the object's outer box; empty when unset. */
+  objectStyle: string;
+  /** Server-derived inline CSS for field/text content; empty when unset. */
+  textStyle: string;
   /** Resolved field label (kept for the inspector; no longer rendered inline). */
   label: string;
   /** Live field value (shown in the `fm-fvalue` span); empty for non-fields. */

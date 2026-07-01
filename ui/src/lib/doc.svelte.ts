@@ -89,6 +89,8 @@ export interface ObjectResolved {
   fieldId: number | null;
   label: string;
   value: string;
+  objectStyle: string;
+  textStyle: string;
   shapeStyle: string;
 }
 
@@ -98,6 +100,8 @@ const EMPTY_RESOLVED: ObjectResolved = {
   fieldId: null,
   label: '',
   value: '',
+  objectStyle: '',
+  textStyle: '',
   shapeStyle: '',
 };
 
@@ -209,6 +213,8 @@ export class EditorDoc {
   #activeTool = $state<ToolKind>('pointer');
   /** The field a `field`-tool placement binds (the rail's field dropdown). */
   #toolFieldId = $state<number | null>(null);
+  /** Whether a field placement should also create a static label object. */
+  #toolCreateLabel = $state(true);
   /** Canvas zoom factor (#62 Zoom zone): 1 = 100%. A viewport concern — applied as
    * a CSS scale on the stage, never persisted, never undoable. */
   #zoom = $state(1);
@@ -262,6 +268,8 @@ export class EditorDoc {
           fieldId: o.fieldId,
           label: o.label,
           value: o.value,
+          objectStyle: o.objectStyle,
+          textStyle: o.textStyle,
           shapeStyle: o.shapeStyle,
         });
       }
@@ -362,6 +370,8 @@ export class EditorDoc {
       binding: o.binding,
       content: o.content,
       props: o.props,
+      objectStyle: r.objectStyle,
+      textStyle: r.textStyle,
       label: r.label,
       value: r.value,
       shapeStyle: r.shapeStyle,
@@ -467,13 +477,18 @@ export class EditorDoc {
     llog('store', 'removePart', { id });
   }
 
-  /** Update just an object's derived `shapeStyle` (session) from a fresh server
+  /** Update an object's derived styles (session) from a fresh server
    * derivation — the response to a Style-zone props commit. Keeps the single
-   * source of shape-style derivation on the server ([[layout-object-types]]). */
-  setShapeStyle(id: number, shapeStyle: string): void {
+   * source of style derivation on the server ([[layout-object-types]]). */
+  setObjectStyles(id: number, styles: Pick<ObjectView, 'objectStyle' | 'textStyle' | 'shapeStyle'>): void {
     const r = this.#resolved.get(id);
     if (!r) return;
-    this.#resolved.set(id, { ...r, shapeStyle });
+    this.#resolved.set(id, {
+      ...r,
+      objectStyle: styles.objectStyle,
+      textStyle: styles.textStyle,
+      shapeStyle: styles.shapeStyle,
+    });
   }
 
   /** Remove an object (#48 delete / undo of a create) as one undoable delete step.
@@ -500,6 +515,8 @@ export class EditorDoc {
       fieldId: view.fieldId,
       label: view.label,
       value: view.value,
+      objectStyle: view.objectStyle,
+      textStyle: view.textStyle,
       shapeStyle: view.shapeStyle,
     });
   }
@@ -634,12 +651,17 @@ export class EditorDoc {
     return this.#toolFieldId;
   }
 
+  get toolCreateLabel(): boolean {
+    return this.#toolCreateLabel;
+  }
+
   /** Arm a Create-zone tool. `pointer` returns the canvas to select/drag; for the
    * `field` tool, `fieldId` is the field a placement binds (ignored otherwise). */
-  setTool(tool: ToolKind, fieldId: number | null = null): void {
+  setTool(tool: ToolKind, fieldId: number | null = null, createLabel = true): void {
     this.#activeTool = tool;
     this.#toolFieldId = tool === 'field' ? fieldId : null;
-    llog('tool', 'setTool', { tool, fieldId: this.#toolFieldId });
+    this.#toolCreateLabel = tool === 'field' ? createLabel : true;
+    llog('tool', 'setTool', { tool, fieldId: this.#toolFieldId, createLabel: this.#toolCreateLabel });
   }
 
   // ── session: canvas zoom (#62 Zoom zone) ─────────────────────────────────
@@ -770,6 +792,8 @@ export class EditorDoc {
         fieldId: view.fieldId,
         label: view.label,
         value: view.value,
+        objectStyle: view.objectStyle,
+        textStyle: view.textStyle,
         shapeStyle: view.shapeStyle,
       },
     };

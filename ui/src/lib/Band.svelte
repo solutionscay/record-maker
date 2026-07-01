@@ -21,7 +21,11 @@
   }
 
   function objStyle(o: ObjectView): string {
-    return `left:${o.x}px; top:${o.y}px; width:${o.w}px; height:${o.h}px; z-index:${o.z};`;
+    return `left:${o.x}px; top:${o.y}px; width:${o.w}px; height:${o.h}px; z-index:${o.z};${o.objectStyle}`;
+  }
+
+  function fieldText(o: ObjectView): string {
+    return o.label || o.binding || o.value;
   }
 </script>
 
@@ -29,11 +33,11 @@
   {#each part.objects as o (o.id)}
     <div class={objClass(o)} style={objStyle(o)}>
       {#if o.field}
-        <span class="fm-fvalue">{o.value}</span>
+        <span class="fm-fvalue" style={o.textStyle || null}>{fieldText(o)}</span>
       {:else if o.shape}
         <div class="fm-shape fm-{o.kind}" style={o.shapeStyle}></div>
       {:else}
-        <span class="fm-text">{o.content}</span>
+        <span class="fm-text" style={o.textStyle || null}>{o.content}</span>
       {/if}
     </div>
   {/each}

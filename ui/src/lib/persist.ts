@@ -5,6 +5,12 @@
 // shape style (the single source of that derivation, [[layout-object-types]]).
 
 import type { ObjectView, PartView } from './model';
+
+export interface StyleResult {
+  objectStyle: string;
+  textStyle: string;
+  shapeStyle: string;
+}
 import { llog } from './log';
 
 /** The object the Create zone places (#48). For a `field`, `fieldId` names which
@@ -19,6 +25,7 @@ export interface NewObjectRequest {
   h: number;
   rec?: number;
   fieldId?: number | null;
+  createLabel?: boolean;
   content?: string | null;
   props?: Record<string, unknown> | null;
 }
@@ -78,7 +85,31 @@ export async function setObjectProps(
   layoutId: string,
   id: number,
   props: Record<string, unknown>,
-): Promise<string> {
-  const res = await postJson<{ shapeStyle: string }>(`/design/${layoutId}/object/${id}/props`, { props });
-  return res.shapeStyle;
+): Promise<StyleResult> {
+  return postJson<StyleResult>(`/design/${layoutId}/object/${id}/props`, { props });
+}
+
+/** Rebind a field object and return the updated server projection. */
+export function setObjectBinding(
+  layoutId: string,
+  id: number,
+  fieldId: number,
+  rec: number,
+): Promise<ObjectView> {
+  return postJson(`/design/${layoutId}/object/${id}/binding`, { fieldId, rec });
+}
+
+/** Update a text object's static content and return the updated view. */
+export function setObjectContent(layoutId: string, id: number, content: string): Promise<ObjectView> {
+  return postJson(`/design/${layoutId}/object/${id}/content`, { content });
+}
+
+/** Toggle whether the object is editable in Browse mode and return the updated view. */
+export function setObjectReadOnly(
+  layoutId: string,
+  id: number,
+  readOnly: boolean,
+  rec: number,
+): Promise<ObjectView> {
+  return postJson(`/design/${layoutId}/object/${id}/read-only`, { readOnly, rec });
 }

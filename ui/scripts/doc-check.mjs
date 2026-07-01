@@ -8,7 +8,7 @@
 //   • a mark groups multiple diffs into one atomic undo step;
 //   • selection is session scope (updates live, never enters the undo history);
 //   • the store's renderModel matches the committed #44 fixture, and feeding it
-//     through <LayoutPreview> reproduces the committed canvas golden byte-for-
+//     through <LayoutPreview> reproduces the committed Layout golden byte-for-
 //     byte (so rendering from the store keeps parity green).
 //
 // `normalize()` below MUST stay byte-equivalent to scripts/parity-check.mjs and
@@ -60,7 +60,7 @@ function geom(o) {
 }
 
 const fixture = JSON.parse(readFileSync(resolve(root, 'tests/canvas.fixture.json'), 'utf8'));
-const golden = readFileSync(resolve(root, 'tests/canvas.parity.html'), 'utf8');
+const golden = readFileSync(resolve(root, 'tests/canvas.layout.html'), 'utf8');
 const fresh = () => structuredClone(fixture);
 
 const { createServer } = await import('vite');
@@ -227,7 +227,7 @@ try {
       id: 99, kind: 'rect', field: false, shape: true, fieldId: null,
       x: 200, y: 10, w: 40, h: 40, z: 0, readOnly: false,
       binding: '', content: '', props: '{"fill":"#abc"}',
-      label: '', value: '', shapeStyle: 'background:#abc;',
+      objectStyle: '', textStyle: '', label: '', value: '', shapeStyle: 'background:#abc;',
     };
     d.addObject(newRect, partId);
     d.mark();

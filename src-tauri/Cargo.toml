@@ -1,0 +1,23 @@
+[package]
+name = "record-maker-tauri"
+version = "0.1.0"
+edition = "2021"
+description = "Tauri 2 desktop shell — embeds the axum server in-process on an ephemeral loopback port (#16)"
+
+[[bin]]
+name = "record-maker"
+path = "src/main.rs"
+
+[dependencies]
+# Desktop shell runtime. No IPC commands today: the WebView talks to the
+# embedded axum server directly over http://127.0.0.1:<ephemeral-port>.
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+# The shared app: router, handlers, state, `serve`/`seed`. Path dep on the
+# server *library* (crate `record_maker_server`).
+record-maker-server = { path = "../crates/server" }
+# `Solution::open` lives in the engine crate; the server lib does not re-export it.
+record-maker-engine = { path = "../crates/engine" }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

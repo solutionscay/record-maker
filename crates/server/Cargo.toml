@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Embedded axum server — Browse Mode runtime + web-publish target"
 
+[lib]
+name = "record_maker_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "record-maker-server"
 path = "src/main.rs"

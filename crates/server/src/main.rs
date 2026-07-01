@@ -1155,7 +1155,10 @@ async fn create_design_part(
         return (StatusCode::BAD_REQUEST, "bad part kind").into_response();
     };
     let height = body.height.unwrap_or(80).max(1);
-    let id = sol.create_part(layout_id, kind, height).unwrap();
+    let id = match sol.create_part(layout_id, kind, height) {
+        Ok(id) => id,
+        Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
+    };
     axum::Json(PartView {
         id,
         kind: kind.as_str(),
@@ -1211,8 +1214,10 @@ async fn update_part_kind(
     let Some(kind) = PartKind::parse(&body.kind) else {
         return (StatusCode::BAD_REQUEST, "bad part kind").into_response();
     };
-    if sol.set_part_kind(layout_id, part_id, kind).unwrap() == 0 {
-        return StatusCode::NOT_FOUND.into_response();
+    match sol.set_part_kind(layout_id, part_id, kind) {
+        Ok(0) => return StatusCode::NOT_FOUND.into_response(),
+        Ok(_) => {}
+        Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
     }
     let Some(part) = sol.part_by_id(layout_id, part_id).unwrap() else {
         return StatusCode::NOT_FOUND.into_response();
@@ -1232,9 +1237,10 @@ async fn delete_design_part(
     Path((layout_id, part_id)): Path<(i64, i64)>,
 ) -> impl IntoResponse {
     let sol = st.sol.lock().unwrap();
-    match sol.delete_part(layout_id, part_id).unwrap() {
-        0 => StatusCode::NOT_FOUND.into_response(),
-        _ => StatusCode::OK.into_response(),
+    match sol.delete_part(layout_id, part_id) {
+        Ok(0) => StatusCode::NOT_FOUND.into_response(),
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
     }
 }
 
@@ -1623,8 +1629,9 @@ async fn main() {
         locks: Arc::new(Mutex::new(HashSet::new())),
     };
 
-    let addr = "127.0.0.1:4317";
-    let listener = tokio::net::TcpListener::bind(addr)
+    let port = std::env::var("RM_PORT").unwrap_or_else(|_| "4317".to_string());
+    let addr = format!("127.0.0.1:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("bind listener");
     println!("record-maker → http://{addr}");
@@ -1670,6 +1677,14 @@ mod tests {
             value: value.to_string(),
             shape_style: String::new(),
         }
+    }
+
+    fn body_part(sol: &Solution, layout_id: i64) -> PartMeta {
+        sol.parts(layout_id)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.kind == PartKind::Body)
+            .expect("body part")
     }
 
     #[test]
@@ -2156,7 +2171,7 @@ mod tests {
         )
         .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
-        let part = sol.parts(layout_id).unwrap()[0].clone();
+        let part = body_part(&sol, layout_id);
         let objs = sol.objects(part.id).unwrap();
         let (a, b) = (objs[0].id, objs[1].id);
         let state = state_for(sol);
@@ -2251,7 +2266,7 @@ mod tests {
         )
         .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
-        let part_id = sol.parts(layout_id).unwrap()[0].id;
+        let part_id = body_part(&sol, layout_id).id;
         let before = sol.objects(part_id).unwrap().len();
         let state = state_for(sol);
 
@@ -2299,7 +2314,7 @@ mod tests {
         sol.insert_record(&table, &[(&fields[0], "Ada".into())])
             .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
-        let part_id = sol.parts(layout_id).unwrap()[0].id;
+        let part_id = body_part(&sol, layout_id).id;
         let before = sol.objects(part_id).unwrap().len();
         let state = state_for(sol);
 
@@ -2374,7 +2389,7 @@ mod tests {
         )
         .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
-        let part_id = sol.parts(layout_id).unwrap()[0].id;
+        let part_id = body_part(&sol, layout_id).id;
         let objects = sol.objects(part_id).unwrap();
         let label_id = objects
             .iter()
@@ -2450,7 +2465,7 @@ mod tests {
         )
         .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
-        let part_id = sol.parts(layout_id).unwrap()[0].id;
+        let part_id = body_part(&sol, layout_id).id;
         let objects = sol.objects(part_id).unwrap();
         let label_id = objects
             .iter()
@@ -2519,11 +2534,11 @@ mod tests {
         let (status, resp) = post_json_body(
             state.clone(),
             &format!("/design/{layout_id}/part"),
-            r#"{"kind":"footer","height":40}"#,
+            r#"{"kind":"subsummary","height":40}"#,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(resp.contains(r#""kind":"footer""#) && resp.contains(r#""height":40"#));
+        assert!(resp.contains(r#""kind":"subsummary""#) && resp.contains(r#""height":40"#));
         assert_eq!(
             state.sol.lock().unwrap().parts(layout_id).unwrap().len(),
             before + 1
@@ -2544,7 +2559,9 @@ mod tests {
         )
         .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
-        let part_id = sol.parts(layout_id).unwrap()[0].id;
+        let part_id = sol
+            .create_part(layout_id, PartKind::SubSummary, 80)
+            .unwrap();
         let state = state_for(sol);
 
         let (status, resp) = post_json_body(
@@ -2570,11 +2587,11 @@ mod tests {
         let (status, resp) = post_json_body(
             state.clone(),
             &format!("/design/{layout_id}/part/{part_id}/kind"),
-            r#"{"kind":"footer"}"#,
+            r#"{"kind":"grandsummary"}"#,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(resp.contains(r#""kind":"footer""#));
+        assert!(resp.contains(r#""kind":"grandsummary""#));
         assert_eq!(
             state
                 .sol
@@ -2584,7 +2601,26 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .kind,
-            PartKind::Footer
+            PartKind::GrandSummary
+        );
+        let body_id = state
+            .sol
+            .lock()
+            .unwrap()
+            .parts(layout_id)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.kind == PartKind::Body)
+            .unwrap()
+            .id;
+        assert_eq!(
+            post_json(
+                state.clone(),
+                &format!("/design/{layout_id}/part/{body_id}/kind"),
+                r#"{"kind":"header"}"#
+            )
+            .await,
+            StatusCode::CONFLICT
         );
 
         assert_eq!(
@@ -2606,13 +2642,15 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
 
-        assert!(!state
-            .sol
-            .lock()
-            .unwrap()
-            .objects(part_id)
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            post_json(
+                state.clone(),
+                &format!("/design/{layout_id}/part/{body_id}/delete"),
+                ""
+            )
+            .await,
+            StatusCode::CONFLICT
+        );
         assert_eq!(
             post_json(
                 state.clone(),
@@ -2644,7 +2682,7 @@ mod tests {
         )
         .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
-        let part_id = sol.parts(layout_id).unwrap()[0].id;
+        let part_id = body_part(&sol, layout_id).id;
         let state = state_for(sol);
 
         // Create a rect to operate on.
@@ -2723,7 +2761,7 @@ mod tests {
         )
         .unwrap();
         let layout_id = sol.layouts().unwrap()[0].id;
-        let part = sol.parts(layout_id).unwrap()[0].clone();
+        let part = body_part(&sol, layout_id);
         let obj_id = sol.objects(part.id).unwrap()[0].id;
         let state = state_for(sol);
 

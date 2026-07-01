@@ -49,6 +49,12 @@
     if (fieldId === null && doc.fields.length > 0) fieldId = doc.fields[0].id;
   });
 
+  $effect(() => {
+    if (!canAddPartKind(partKind)) {
+      partKind = PART_KINDS.find((p) => canAddPartKind(p.id))?.id ?? partKind;
+    }
+  });
+
   // ── Mode / create zones ─────────────────────────────────────────────────
 
   function pickTool(t: ToolKind): void {
@@ -62,7 +68,7 @@
     if (doc.activeTool === 'field') doc.setTool('field', fieldId, createLabel);
   }
   async function addPart(): Promise<void> {
-    if (busy) return;
+    if (busy || !canAddPartKind(partKind)) return;
     busy = true;
     llog('create', 'rail: add band', { kind: partKind });
     try {
@@ -89,6 +95,7 @@
   let selectedBindingFieldId = $derived(selected?.kind === 'field' ? fieldIdForBinding(selected.binding) : null);
   let selectedPartId = $derived(doc.selectedPartId);
   let selectedPart = $derived(selectedPartId === null ? undefined : doc.getPart(selectedPartId));
+  let usedPartKinds = $derived(new Set(doc.parts.map((p) => p.kind)));
 
   function fieldIdForBinding(binding: string): number | null {
     const fieldName = binding.split('.').at(-1)?.toLowerCase() ?? '';
@@ -116,6 +123,38 @@
   }
   function alignValue(v: unknown): string {
     return typeof v === 'string' && ['left', 'center', 'right'].includes(v) ? v : 'left';
+  }
+
+  function isSingletonPartKind(kind: string): boolean {
+    return kind === 'header' || kind === 'body' || kind === 'footer';
+  }
+
+  function canAddPartKind(kind: string): boolean {
+    if (isSingletonPartKind(kind) && usedPartKinds.has(kind)) return false;
+    if (kind === 'grandsummary') {
+      const body = doc.parts.find((p) => p.kind === 'body');
+      if (!body) return false;
+      const leading = doc.parts.some((p) => p.kind === 'grandsummary' && p.position < body.position);
+      const trailing = doc.parts.some((p) => p.kind === 'grandsummary' && p.position > body.position);
+      return !(leading && trailing);
+    }
+    return true;
+  }
+
+  function canSetSelectedPartKind(kind: string): boolean {
+    if (!selectedPart) return false;
+    if (selectedPart.kind === kind) return true;
+    if (selectedPart.kind === 'body') return false;
+    if (isSingletonPartKind(kind) && doc.parts.some((p) => p.id !== selectedPart.id && p.kind === kind)) return false;
+    if (kind === 'grandsummary') {
+      const body = doc.parts.find((p) => p.kind === 'body');
+      if (!body) return false;
+      const wantsTrailing = selectedPart.position > body.position;
+      return !doc.parts.some(
+        (p) => p.id !== selectedPart.id && p.kind === 'grandsummary' && (p.position > body.position) === wantsTrailing,
+      );
+    }
+    return true;
   }
 
   async function setStyle(key: string, value: string | number | boolean): Promise<void> {
@@ -198,7 +237,7 @@
   // ── Band inspector ──────────────────────────────────────────────────────
 
   async function setSelectedPartKind(kind: string): Promise<void> {
-    if (!selectedPart) return;
+    if (!selectedPart || !canSetSelectedPartKind(kind)) return;
     const id = selectedPart.id;
     llog('persist', 'rail: set band kind', { id, kind });
     doc.setPartKind(id, kind);
@@ -227,7 +266,7 @@
   }
 
   async function deleteSelectedPart(): Promise<void> {
-    if (!selectedPart || busy) return;
+    if (!selectedPart || selectedPart.kind === 'body' || busy) return;
     const id = selectedPart.id;
     busy = true;
     llog('persist', 'rail: delete band', { id });
@@ -298,10 +337,10 @@
   <div class="le-combo-row">
     <select class="le-select" bind:value={partKind} title="Band kind">
       {#each PART_KINDS as p (p.id)}
-        <option value={p.id}>{p.label}</option>
+        <option value={p.id} disabled={!canAddPartKind(p.id)}>{p.label}</option>
       {/each}
     </select>
-    <button type="button" class="le-icon-btn" title="Add band" onclick={addPart} disabled={busy}>+</button>
+    <button type="button" class="le-icon-btn" title="Add band" onclick={addPart} disabled={busy || !canAddPartKind(partKind)}>+</button>
   </div>
 </section>
 
@@ -464,7 +503,7 @@
       onchange={(e) => setSelectedPartKind(e.currentTarget.value)}
     >
       {#each PART_KINDS as p (p.id)}
-        <option value={p.id}>{p.label}</option>
+        <option value={p.id} disabled={!canSetSelectedPartKind(p.id)}>{p.label}</option>
       {/each}
     </select>
   </label>
@@ -481,7 +520,7 @@
     type="button"
     class="le-danger-btn"
     title="Delete selected band"
-    disabled={busy}
+    disabled={busy || selectedPart.kind === 'body'}
     onclick={deleteSelectedPart}
   >Delete band</button>
   </section>

@@ -49,7 +49,7 @@
 //! - `props` — JSON bag reserved for appearance/style and misc (#49). The
 //!   structural contract does not define its shape; it round-trips opaquely.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use rusqlite::{params, Connection, Transaction};
 
 use crate::Solution;
@@ -441,14 +441,16 @@ impl Solution {
         Ok(Some((label_id, field_id)))
     }
 
-    /// Append a band to a layout (#48). The new part stacks below the others
-    /// (`position = max(position) + 1`). Returns the new part id.
+    /// Create a band under the FileMaker-style part rules: a layout has one body
+    /// and at most one header/footer; subsummaries can repeat; grand summaries
+    /// can appear once before and once after the body. The chosen position keeps
+    /// header/body/footer in their structural slots and places summary bands
+    /// around the body instead of blindly appending.
     pub fn create_part(&self, layout_id: i64, kind: PartKind, height: i64) -> Result<i64> {
-        let position: i64 = self.app.query_row(
-            "SELECT COALESCE(MAX(position) + 1, 0) FROM meta_part WHERE layout_id=?1",
-            params![layout_id],
-            |r| r.get(0),
-        )?;
+        let parts = self.parts(layout_id)?;
+        self.validate_part_create(&parts, kind)?;
+        let position = self.insertion_position(&parts, kind);
+        self.shift_part_positions(layout_id, position)?;
         self.app.execute(
             "INSERT INTO meta_part(layout_id, kind, height, position) VALUES (?1, ?2, ?3, ?4)",
             params![layout_id, kind.as_str(), height, position],
@@ -492,6 +494,14 @@ impl Solution {
     /// Persist a part's kind, scoped to its layout. Returns the number of rows
     /// updated (`0` ⇒ no such part in that layout).
     pub fn set_part_kind(&self, layout_id: i64, part_id: i64, kind: PartKind) -> Result<usize> {
+        let Some(current) = self.part_by_id(layout_id, part_id)? else {
+            return Ok(0);
+        };
+        if current.kind == PartKind::Body && kind != PartKind::Body {
+            bail!("a layout must keep exactly one body part");
+        }
+        let parts = self.parts(layout_id)?;
+        self.validate_part_kind_change(&parts, part_id, kind)?;
         let n = self.app.execute(
             "UPDATE meta_part SET kind=?1 WHERE id=?2 AND layout_id=?3",
             params![kind.as_str(), part_id, layout_id],
@@ -502,11 +512,138 @@ impl Solution {
     /// Delete a part from a layout. Child objects are removed by the schema's
     /// cascading foreign key. Returns the number of parts removed.
     pub fn delete_part(&self, layout_id: i64, part_id: i64) -> Result<usize> {
+        if matches!(
+            self.part_by_id(layout_id, part_id)?.map(|p| p.kind),
+            Some(PartKind::Body)
+        ) {
+            bail!("the body part cannot be deleted");
+        }
         let n = self.app.execute(
             "DELETE FROM meta_part WHERE id=?1 AND layout_id=?2",
             params![part_id, layout_id],
         )?;
         Ok(n)
+    }
+
+    fn validate_part_create(&self, parts: &[PartMeta], kind: PartKind) -> Result<()> {
+        match kind {
+            PartKind::Header | PartKind::Body | PartKind::Footer => {
+                if parts.iter().any(|p| p.kind == kind) {
+                    bail!("layout already has a {} part", kind.as_str());
+                }
+            }
+            PartKind::GrandSummary => {
+                if self.has_trailing_grand_summary(parts) && self.has_leading_grand_summary(parts) {
+                    bail!("layout already has leading and trailing grand summary parts");
+                }
+            }
+            PartKind::SubSummary => {}
+        }
+        Ok(())
+    }
+
+    fn validate_part_kind_change(
+        &self,
+        parts: &[PartMeta],
+        part_id: i64,
+        kind: PartKind,
+    ) -> Result<()> {
+        match kind {
+            PartKind::Header | PartKind::Body | PartKind::Footer => {
+                if parts.iter().any(|p| p.id != part_id && p.kind == kind) {
+                    bail!("layout already has a {} part", kind.as_str());
+                }
+            }
+            PartKind::GrandSummary => {
+                let Some(part) = parts.iter().find(|p| p.id == part_id) else {
+                    return Ok(());
+                };
+                let body_pos = parts
+                    .iter()
+                    .find(|p| p.kind == PartKind::Body)
+                    .map(|p| p.position)
+                    .unwrap_or(part.position);
+                let wants_trailing = part.position > body_pos;
+                let duplicate = parts.iter().any(|p| {
+                    p.id != part_id
+                        && p.kind == PartKind::GrandSummary
+                        && ((p.position > body_pos) == wants_trailing)
+                });
+                if duplicate {
+                    bail!("layout already has a grand summary on that side of the body");
+                }
+            }
+            PartKind::SubSummary => {}
+        }
+        Ok(())
+    }
+
+    fn insertion_position(&self, parts: &[PartMeta], kind: PartKind) -> i64 {
+        let len = parts.len() as i64;
+        let body_pos = parts
+            .iter()
+            .find(|p| p.kind == PartKind::Body)
+            .map(|p| p.position);
+        let footer_pos = parts
+            .iter()
+            .find(|p| p.kind == PartKind::Footer)
+            .map(|p| p.position);
+        match kind {
+            PartKind::Header => 0,
+            PartKind::Body => footer_pos.unwrap_or(len),
+            PartKind::Footer => len,
+            PartKind::SubSummary => parts
+                .iter()
+                .filter(|p| {
+                    p.kind == PartKind::Footer
+                        || (p.kind == PartKind::GrandSummary
+                            && body_pos.is_some_and(|body| p.position > body))
+                })
+                .map(|p| p.position)
+                .min()
+                .unwrap_or(len),
+            PartKind::GrandSummary => {
+                if !self.has_trailing_grand_summary(parts) {
+                    footer_pos.unwrap_or(len)
+                } else {
+                    body_pos.unwrap_or(len).max(0)
+                }
+            }
+        }
+    }
+
+    fn shift_part_positions(&self, layout_id: i64, from: i64) -> Result<()> {
+        self.app.execute(
+            "UPDATE meta_part SET position = position + 1 WHERE layout_id=?1 AND position >= ?2",
+            params![layout_id, from],
+        )?;
+        Ok(())
+    }
+
+    fn has_leading_grand_summary(&self, parts: &[PartMeta]) -> bool {
+        let Some(body_pos) = parts
+            .iter()
+            .find(|p| p.kind == PartKind::Body)
+            .map(|p| p.position)
+        else {
+            return parts.iter().any(|p| p.kind == PartKind::GrandSummary);
+        };
+        parts
+            .iter()
+            .any(|p| p.kind == PartKind::GrandSummary && p.position < body_pos)
+    }
+
+    fn has_trailing_grand_summary(&self, parts: &[PartMeta]) -> bool {
+        let Some(body_pos) = parts
+            .iter()
+            .find(|p| p.kind == PartKind::Body)
+            .map(|p| p.position)
+        else {
+            return false;
+        };
+        parts
+            .iter()
+            .any(|p| p.kind == PartKind::GrandSummary && p.position > body_pos)
     }
 
     /// Delete an object from a layout (#48) — the undo of a create, and the Create
@@ -614,13 +751,13 @@ impl Solution {
 }
 
 /// Create a default Form layout for a freshly-defined table, inside the caller's
-/// transaction (so table + layout are atomic). One meta_layout (view='form'), one
-/// body meta_part, and — per field — TWO objects stacked down the body (#60): a
-/// `text` label (its `content` = the field name) and, beside it, a value `field`
-/// object bound `<TableName>.<FieldName>` (the frozen binding contract). The label
-/// is independent: it renders the caption while the field renders the value only.
-/// The label is inserted first so it owns the lower id (paints behind / reads
-/// left-to-right). Returns the new layout id. (#21/#60)
+/// transaction (so table + layout are atomic). One meta_layout (view='form'),
+/// header/body/footer meta_parts, and — per field — TWO objects stacked down the
+/// body (#60): a `text` label (its `content` = the field name) and, beside it, a
+/// value `field` object bound `<TableName>.<FieldName>` (the frozen binding
+/// contract). The label is independent: it renders the caption while the field
+/// renders the value only. The label is inserted first so it owns the lower id
+/// (paints behind / reads left-to-right). Returns the new layout id. (#21/#60)
 pub(crate) fn generate_default_form(
     tx: &Transaction<'_>,
     table_id: i64,
@@ -633,10 +770,15 @@ pub(crate) fn generate_default_form(
     )?;
     let layout_id = tx.last_insert_rowid();
     tx.execute(
-        "INSERT INTO meta_part(layout_id, kind, height, position) VALUES (?1, 'body', ?2, 0)",
+        "INSERT INTO meta_part(layout_id, kind, height, position) \
+         VALUES (?1, 'header', 40, 0), (?1, 'body', ?2, 1), (?1, 'footer', 40, 2)",
         params![layout_id, 40 + fields.len() as i64 * 32],
     )?;
-    let part_id = tx.last_insert_rowid();
+    let part_id: i64 = tx.query_row(
+        "SELECT id FROM meta_part WHERE layout_id=?1 AND kind='body'",
+        params![layout_id],
+        |r| r.get(0),
+    )?;
     for (i, (_fid, fname)) in fields.iter().enumerate() {
         let y = 16 + i as i64 * 32;
         // Caption: a separate static-text object to the left of the value.
@@ -706,12 +848,21 @@ pub(crate) fn clone_layout(
 #[cfg(test)]
 mod tests {
     use crate::layout::{NewObject, ObjectKind, PartKind};
+    use crate::PartMeta;
     use crate::{FieldKind, NewField, Solution};
+
+    fn body_part(s: &Solution, layout_id: i64) -> PartMeta {
+        s.parts(layout_id)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.kind == PartKind::Body)
+            .expect("body part")
+    }
 
     #[test]
     fn parts_and_objects_read_the_default_form() {
-        // The default Form layout from create_table (#21) is the fixture: one
-        // body part, one field object per field, bound `<Table>.<Field>`.
+        // The default Form layout from create_table (#21) is the fixture:
+        // header/body/footer parts, with field objects in the body.
         let mut s = Solution::open_in_memory().unwrap();
         s.create_table(
             "Customers",
@@ -730,15 +881,18 @@ mod tests {
         let lay = &s.layouts().unwrap()[0];
 
         let parts = s.parts(lay.id).unwrap();
-        assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0].kind, PartKind::Body);
-        assert!(parts[0].height > 0);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].kind, PartKind::Header);
+        assert_eq!(parts[1].kind, PartKind::Body);
+        assert_eq!(parts[2].kind, PartKind::Footer);
+        assert!(parts.iter().all(|p| p.height > 0));
 
-        let objs = s.objects(parts[0].id).unwrap();
+        let body = parts.iter().find(|p| p.kind == PartKind::Body).unwrap();
+        let objs = s.objects(body.id).unwrap();
         // Per field: a separate label text object + a value field object (#60).
         assert_eq!(objs.len(), 4);
         for o in &objs {
-            assert_eq!(o.part_id, parts[0].id);
+            assert_eq!(o.part_id, body.id);
             assert!(o.w > 0 && o.h > 0 && o.x >= 0 && o.y >= 0);
             // Default-form objects are editable and unstacked (the interim default).
             assert_eq!(o.z, 0);
@@ -890,7 +1044,7 @@ mod tests {
         )
         .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
-        let part = s.parts(lay.id).unwrap()[0].clone();
+        let part = body_part(&s, lay.id);
         let obj_id = s.objects(part.id).unwrap()[0].id;
 
         // A real move updates exactly one row and round-trips.
@@ -938,7 +1092,7 @@ mod tests {
         )
         .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
-        let part = s.parts(lay.id).unwrap()[0].clone();
+        let part = body_part(&s, lay.id);
         let objs = s.objects(part.id).unwrap();
         let (a, b) = (objs[0].id, objs[1].id);
 
@@ -992,8 +1146,8 @@ mod tests {
         let form = layouts.iter().find(|l| l.view == "form").unwrap();
         let list = layouts.iter().find(|l| l.view == "list").unwrap();
 
-        let form_part = s.parts(form.id).unwrap()[0].clone();
-        let list_part = s.parts(list.id).unwrap()[0].clone();
+        let form_part = body_part(&s, form.id);
+        let list_part = body_part(&s, list.id);
         assert_ne!(form_part.id, list_part.id, "parts are distinct rows");
         let form_obj = s.objects(form_part.id).unwrap()[0].id;
         let list_obj = s.objects(list_part.id).unwrap()[0].id;
@@ -1077,7 +1231,7 @@ mod tests {
         )
         .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
-        let part = s.parts(lay.id).unwrap()[0].clone();
+        let part = body_part(&s, lay.id);
         let before = s.objects(part.id).unwrap().len();
 
         let id = s
@@ -1141,7 +1295,7 @@ mod tests {
         )
         .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
-        let part = s.parts(lay.id).unwrap()[0].clone();
+        let part = body_part(&s, lay.id);
 
         let (label_id, field_id) = s
             .create_field_object(
@@ -1176,8 +1330,9 @@ mod tests {
     }
 
     #[test]
-    fn create_part_appends_band_at_next_position() {
-        // #48: a new band stacks below the existing ones.
+    fn create_part_inserts_band_at_legal_position() {
+        // #48: a new summary band inserts before the default footer so footer
+        // remains the bottom singleton part.
         let mut s = Solution::open_in_memory().unwrap();
         s.create_table(
             "Customers",
@@ -1189,15 +1344,24 @@ mod tests {
         .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
         let before = s.parts(lay.id).unwrap();
-        let top_pos = before.iter().map(|p| p.position).max().unwrap();
+        let footer_pos = before
+            .iter()
+            .find(|p| p.kind == PartKind::Footer)
+            .unwrap()
+            .position;
 
-        let pid = s.create_part(lay.id, PartKind::Footer, 48).unwrap();
+        let pid = s.create_part(lay.id, PartKind::SubSummary, 48).unwrap();
         let parts = s.parts(lay.id).unwrap();
         assert_eq!(parts.len(), before.len() + 1);
         let made = parts.iter().find(|p| p.id == pid).unwrap();
-        assert_eq!(made.kind, PartKind::Footer);
+        assert_eq!(made.kind, PartKind::SubSummary);
         assert_eq!(made.height, 48);
-        assert!(made.position > top_pos, "appended below");
+        assert!(made.position < footer_pos + 1, "inserted before shifted footer");
+        assert_eq!(
+            parts.last().unwrap().kind,
+            PartKind::Footer,
+            "footer remains bottom-most"
+        );
     }
 
     #[test]
@@ -1213,8 +1377,9 @@ mod tests {
         )
         .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
-        let part = s.parts(lay.id).unwrap()[0].clone();
-        let object_id = s.objects(part.id).unwrap()[0].id;
+        let body = body_part(&s, lay.id);
+        let part_id = s.create_part(lay.id, PartKind::SubSummary, 80).unwrap();
+        let part = s.part_by_id(lay.id, part_id).unwrap().unwrap();
 
         assert_eq!(s.set_part_height(lay.id, part.id, 180).unwrap(), 1);
         assert_eq!(s.part_by_id(lay.id, part.id).unwrap().unwrap().height, 180);
@@ -1222,12 +1387,16 @@ mod tests {
         assert_eq!(s.part_by_id(lay.id, part.id).unwrap().unwrap().height, 180);
 
         assert_eq!(
-            s.set_part_kind(lay.id, part.id, PartKind::Footer).unwrap(),
+            s.set_part_kind(lay.id, part.id, PartKind::GrandSummary).unwrap(),
             1
         );
         assert_eq!(
             s.part_by_id(lay.id, part.id).unwrap().unwrap().kind,
-            PartKind::Footer
+            PartKind::GrandSummary
+        );
+        assert!(
+            s.set_part_kind(lay.id, body.id, PartKind::Header).is_err(),
+            "body cannot be converted away"
         );
         assert_eq!(
             s.set_part_kind(lay.id + 999, part.id, PartKind::Header)
@@ -1236,21 +1405,39 @@ mod tests {
         );
         assert_eq!(
             s.part_by_id(lay.id, part.id).unwrap().unwrap().kind,
-            PartKind::Footer
+            PartKind::GrandSummary
         );
 
         assert_eq!(s.delete_part(lay.id + 999, part.id).unwrap(), 0);
-        assert!(s
-            .objects(part.id)
-            .unwrap()
-            .iter()
-            .any(|o| o.id == object_id));
+        assert!(s.delete_part(lay.id, body.id).is_err(), "body cannot be deleted");
         assert_eq!(s.delete_part(lay.id, part.id).unwrap(), 1);
         assert!(s.part_by_id(lay.id, part.id).unwrap().is_none());
         assert!(
             s.objects(part.id).unwrap().is_empty(),
             "child objects cascade away"
         );
+    }
+
+    #[test]
+    fn part_rules_reject_duplicate_singletons_and_excess_grand_summaries() {
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
+        let lay = s.layouts().unwrap()[0].clone();
+
+        assert!(s.create_part(lay.id, PartKind::Body, 40).is_err());
+        assert!(s.create_part(lay.id, PartKind::Header, 40).is_err());
+        assert!(s.create_part(lay.id, PartKind::Footer, 40).is_err());
+
+        assert!(s.create_part(lay.id, PartKind::GrandSummary, 40).is_ok());
+        assert!(s.create_part(lay.id, PartKind::GrandSummary, 40).is_ok());
+        assert!(s.create_part(lay.id, PartKind::GrandSummary, 40).is_err());
     }
 
     #[test]
@@ -1266,7 +1453,7 @@ mod tests {
         )
         .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
-        let part = s.parts(lay.id).unwrap()[0].clone();
+        let part = body_part(&s, lay.id);
         let obj_id = s.objects(part.id).unwrap()[0].id;
 
         // Foreign layout ⇒ no-op.
@@ -1292,7 +1479,7 @@ mod tests {
         )
         .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
-        let part = s.parts(lay.id).unwrap()[0].clone();
+        let part = body_part(&s, lay.id);
         let obj_id = s.objects(part.id).unwrap()[0].id;
 
         assert_eq!(
@@ -1329,7 +1516,7 @@ mod tests {
         )
         .unwrap();
         let lay = s.layouts().unwrap()[0].clone();
-        let part = s.parts(lay.id).unwrap()[0].clone();
+        let part = body_part(&s, lay.id);
         let objects = s.objects(part.id).unwrap();
         let label_id = objects
             .iter()

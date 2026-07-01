@@ -19,7 +19,7 @@
     .topbar { grid-area: topbar; display: flex; align-items: center; gap: .6rem;
               padding: .35rem .8rem; background: #f5f5f7; border-bottom: 1px solid #ddd; }
     .brand { font-weight: 600; }
-    .actions { display: flex; gap: .4rem; margin-left: .5rem; }
+    .actions { display: flex; gap: .4rem; margin-left: auto; }
     .act { font-size: .85rem; padding: .25rem .7rem; }
     .act:disabled { color: #aaa; border-color: #ddd; background: #fafafa; cursor: not-allowed; }
     /* Left status sidebar — mode, layout, record stepper, view selector. */
@@ -54,10 +54,11 @@
     .tool-rail { display: flex; flex-direction: column; gap: .7rem;
                  border-top: 1px solid #e3e3e3; padding-top: .6rem; }
     /* View selector — Form / List / Table. */
-    .views { display: flex; flex-direction: column; gap: .2rem; }
-    .views a { padding: .2rem .45rem; border: 1px solid #ccc; border-radius: .35rem;
-               text-decoration: none; color: #1b1b1f; font-size: .8rem; }
-    .views a.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+    .view-switch { display: inline-flex; gap: 0; border: 1px solid #c8c8c8; border-radius: .35rem; overflow: hidden; background: #fff; }
+    .view-switch a { padding: .2rem .55rem; border-left: 1px solid #d8d8d8;
+               text-decoration: none; color: #1b1b1f; font-size: .8rem; line-height: 1.2; }
+    .view-switch a:first-child { border-left: 0; }
+    .view-switch a.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
     .content { grid-area: content; padding: 1rem 1.25rem; overflow: auto; }
     /* Bottom status strip — collapse toggle + mode + per-view detail. */
     .statusbar { grid-area: status; border-top: 1px solid #ddd; background: #fafafa;
@@ -119,6 +120,13 @@
   <div class="app">
     <header class="topbar">
       <span class="brand">record-maker</span>
+      {% if !chrome.view_tabs.is_empty() %}
+      <nav class="view-switch" title="View as">
+        {% for v in chrome.view_tabs %}
+        <a href="{{ v.href }}" class="{% if v.active %}active{% endif %}">{{ v.label }}</a>
+        {% endfor %}
+      </nav>
+      {% endif %}
       <div class="actions">
         {# Record actions belong to Browse; Layout mode manages the design, not records. #}
         {% if chrome.mode == "browse" %}
@@ -214,15 +222,6 @@
         </div>
       </div>
       {% when None %}{% endmatch %}
-
-      {% if !chrome.view_tabs.is_empty() %}
-      <nav class="views" title="View as">
-        <span class="side-label">View</span>
-        {% for v in chrome.view_tabs %}
-        <a href="{{ v.href }}" class="{% if v.active %}active{% endif %}">{{ v.label }}</a>
-        {% endfor %}
-      </nav>
-      {% endif %}
 
       {% if chrome.mode == "design" %}
       {# Design-mode tool rail (#62): the Svelte editor mounts its Create / Style /

@@ -126,6 +126,7 @@
   <div
     class="le-stage"
     class:placing={doc.activeTool !== 'pointer'}
+    class:no-object-selection={doc.selection.size === 0}
     bind:this={stage}
   >
     <div class="le-workspace" style={`transform: scale(${doc.zoom}); transform-origin: top left;`}>
@@ -267,6 +268,27 @@
   .le-stage :global(.le-draw-field) {
     background: rgba(255, 255, 255, 0.75);
   }
+  .le-stage :global(.le-hover-outline) {
+    position: absolute;
+    box-sizing: border-box;
+    z-index: 999;
+    pointer-events: none;
+    border: 1px dashed #6b7280;
+    background: rgba(107, 114, 128, 0.05);
+  }
+  .le-stage :global(.le-inline-text-editor) {
+    position: absolute;
+    box-sizing: border-box;
+    z-index: 1002;
+    resize: none;
+    pointer-events: auto;
+    padding: 0.1rem 0.2rem;
+    border: 1px solid #1f6feb;
+    outline: 2px solid rgba(31, 111, 235, 0.18);
+    background: #fff;
+    color: #1b1b1f;
+    font: 0.8rem system-ui, sans-serif;
+  }
   /* Design mode: make each part band's bounds visible. Browse keeps the bands
      subtle (the faint shell.html divider), but on the canvas the designer needs
      to see where parts begin and end. CSS-only + design-mode-scoped, so the
@@ -286,6 +308,9 @@
   .le-stage :global(.fm-obj) {
     cursor: move;
     user-select: none;
+  }
+  .le-stage.no-object-selection :global(.moveable-control-box) {
+    display: none !important;
   }
   /* A tool is armed → the canvas is a placement surface: show a crosshair and
      stop objects advertising "move". */

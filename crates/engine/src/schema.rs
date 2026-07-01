@@ -22,6 +22,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0003_object_content",
         include_str!("migrations/0003_object_content.sql"),
     ),
+    (
+        "0004_default_header_footer_parts",
+        include_str!("migrations/0004_default_header_footer_parts.sql"),
+    ),
+    (
+        "0005_deduplicate_singleton_parts",
+        include_str!("migrations/0005_deduplicate_singleton_parts.sql"),
+    ),
 ];
 
 /// Schema version this build targets (the number of migrations defined).

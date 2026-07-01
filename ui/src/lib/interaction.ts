@@ -10,12 +10,6 @@
 // store does NOT create a feedback loop. A whole gesture commits as ONE undo step
 // (mark on end) and persists to the engine via the bulk axum contract.
 //
-// Press-drag in one gesture: moveable only drags the element it already targets
-// at mousedown, so we TARGET THE OBJECT UNDER THE CURSOR ON HOVER. By the time
-// you press, moveable is already on it and its native drag starts immediately —
-// no select-then-grab two-step, and no fragile selecto→moveable handoff. A
-// multi-selection keeps the group as the target while you hover its members.
-//
 // Object identity without polluting the parity-checked canvas DOM: the Nth
 // painted `.fm-obj` element maps to the Nth id in renderModel paint order (see
 // canvas-edit.ts), so selections and hits resolve to ids by index — no data-*
@@ -28,7 +22,7 @@ import type { EditorDoc, ToolKind } from './doc.svelte';
 import type { ObjectView } from './model';
 import { GRID, SNAP_THRESHOLD, clampOrigin, elementsToObjectIds, objectIdsInPaintOrder, snapToGrid } from './canvas-edit';
 import { defaultBox, defaultProps, partAtY } from './create';
-import { createObject, deleteObject } from './persist';
+import { createObject, deleteObject, setObjectContent } from './persist';
 import { llog, lerror } from './log';
 
 type DrawTool = Exclude<ToolKind, 'pointer'>;
@@ -60,6 +54,10 @@ export class CanvasInteraction {
   #moved = false;
   /** Object id currently under the cursor (drives hover pre-targeting). */
   #hoverId: number | null = null;
+  #hoverOutline: HTMLElement | null = null;
+  #textEditor: HTMLTextAreaElement | null = null;
+  #textEditingId: number | null = null;
+  #rectFrame: number | null = null;
   /** Object ids moveable currently targets, and a cheap key to dedupe setState. */
   #targetIds = new Set<number>();
   #targetKey = '';
@@ -194,24 +192,30 @@ export class CanvasInteraction {
         this.#updateTarget();
         return;
       }
-      // Hover already made this object (or its group) moveable's target → let
-      // moveable drag it in THIS gesture. This is the press-drag-in-one path.
+      // Already selected/targeted: let Moveable handle this same pointer stream.
       if (this.#targetIds.has(id)) {
-        llog('drag', 'press on pre-targeted object → moveable drags it', { id });
+        llog('drag', 'press on targeted object → moveable drags it', { id });
         e.stop();
         return;
       }
-      // Not pre-targeted (e.g. a touch with no hover): select it so the next press
-      // drags. Retarget immediately so it's grabbable.
-      llog('select', 'press on un-targeted object → select + retarget', { id });
+      // Select and hand the current pointer event to Moveable immediately. Hover
+      // no longer pre-targets objects, so this preserves click-drag in one move
+      // without showing resize handles on mere hover.
+      llog('drag', 'press on un-targeted object → select + start drag', { id });
       this.#doc.selectOnly([id]);
-      this.#updateTarget();
+      this.#targetKey = String(id);
+      this.#targetIds = new Set([id]);
+      const guidelines = this.#paintedElements().filter((el) => el !== objEl);
+      this.#moveable.setState({ target: objEl, elementGuidelines: guidelines }, () => {
+        this.#moveable.dragStart(input, objEl);
+      });
       e.stop();
     });
 
     this.#stage.addEventListener('pointermove', this.#onPointerMove);
     this.#stage.addEventListener('pointerleave', this.#onPointerLeave);
     this.#stage.addEventListener('click', this.#onClick);
+    this.#stage.addEventListener('dblclick', this.#onDoubleClick);
     window.addEventListener('keydown', this.#onKeyDown);
     llog('init', 'CanvasInteraction ready', { layoutId, painted: this.#paintedElements().length });
   }
@@ -438,17 +442,21 @@ export class CanvasInteraction {
     this.#stage.removeEventListener('pointermove', this.#onPointerMove);
     this.#stage.removeEventListener('pointerleave', this.#onPointerLeave);
     this.#stage.removeEventListener('click', this.#onClick);
+    this.#stage.removeEventListener('dblclick', this.#onDoubleClick);
     window.removeEventListener('keydown', this.#onKeyDown);
     window.removeEventListener('pointermove', this.#onDrawMove);
     window.removeEventListener('pointerup', this.#onDrawUp);
     window.removeEventListener('mousemove', this.#onDrawMove);
     window.removeEventListener('mouseup', this.#onDrawUp);
     this.#drawPreview?.remove();
+    this.#hoverOutline?.remove();
+    this.#textEditor?.remove();
+    if (this.#rectFrame !== null) cancelAnimationFrame(this.#rectFrame);
     this.#moveable.destroy();
     this.#selecto.destroy();
   }
 
-  // ── hover pre-targeting ──
+  // ── hover indicator ──
 
   #onPointerMove = (e: PointerEvent): void => {
     if (this.#gesturing) return;
@@ -458,15 +466,41 @@ export class CanvasInteraction {
     const objEl = (t?.closest('.fm-obj') ?? null) as HTMLElement | null;
     const id = objEl ? this.#idForElement(objEl) ?? null : null;
     if (id === this.#hoverId) return;
-    this.#hoverId = id;
-    this.#updateTarget();
+    this.#setHover(id);
   };
 
   #onPointerLeave = (): void => {
     if (this.#gesturing || this.#hoverId === null) return;
-    this.#hoverId = null;
-    this.#updateTarget();
+    this.#setHover(null);
   };
+
+  #setHover(id: number | null): void {
+    this.#hoverId = id;
+    this.#doc.hover(id);
+    this.#paintHover();
+  }
+
+  #paintHover(): void {
+    const id = this.#hoverId;
+    const o = id === null ? undefined : this.#doc.getObject(id);
+    if (!o || this.#doc.isSelected(o.id) || this.#textEditingId !== null) {
+      this.#hoverOutline?.remove();
+      this.#hoverOutline = null;
+      return;
+    }
+    const top = this.#partTop(o.partId);
+    const overlay = this.#partOverlay();
+    if (top === null || !overlay) return;
+    if (!this.#hoverOutline) {
+      this.#hoverOutline = document.createElement('div');
+      this.#hoverOutline.className = 'le-hover-outline';
+      overlay.append(this.#hoverOutline);
+    }
+    this.#hoverOutline.style.left = `${o.x}px`;
+    this.#hoverOutline.style.top = `${top + o.y}px`;
+    this.#hoverOutline.style.width = `${o.w}px`;
+    this.#hoverOutline.style.height = `${o.h}px`;
+  }
 
   #onClick = (e: MouseEvent): void => {
     if (this.#gesturing || this.#doc.activeTool !== 'pointer') return;
@@ -485,8 +519,24 @@ export class CanvasInteraction {
       return;
     }
     this.#hoverId = null;
+    this.#paintHover();
     this.#doc.selectPart(id);
     this.#updateTarget();
+  };
+
+  #onDoubleClick = (e: MouseEvent): void => {
+    if (this.#doc.activeTool !== 'pointer') return;
+    const target = e.target as Element | null;
+    const objEl = (target?.closest('.fm-obj') ?? null) as HTMLElement | null;
+    if (!objEl || this.#moveable.isMoveableElement(objEl)) return;
+    const id = this.#idForElement(objEl);
+    const o = id === undefined ? undefined : this.#doc.getObject(id);
+    if (id === undefined || !o || o.kind !== 'text') return;
+    e.preventDefault();
+    e.stopPropagation();
+    this.#doc.selectOnly([id]);
+    this.#updateTarget();
+    this.#startTextEdit(id);
   };
 
   #onKeyDown = (e: KeyboardEvent): void => {
@@ -508,8 +558,8 @@ export class CanvasInteraction {
       await Promise.all(ids.map((id) => deleteObject(this.#layoutId, id)));
       for (const id of ids) this.#doc.removeObject(id);
       this.#doc.mark();
-      this.#hoverId = null;
-      this.#targetKey = '';
+      this.#setHover(null);
+      this.#targetKey = '__force_empty__';
       this.#updateTarget();
     } catch (e) {
       lerror('persist', 'failed to delete selected object(s)', e);
@@ -519,10 +569,8 @@ export class CanvasInteraction {
     }
   }
 
-  /** Choose moveable's target: the hovered object (so a press grabs it), unless
-   * you're hovering a member of a 2+ selection (then keep the whole group so the
-   * press drags the group). Falls back to the selection when not hovering, and to
-   * nothing when idle. Dedupes redundant setState by a target-id key. */
+  /** Choose moveable's target from the real selection only. Hover uses a separate
+   * lightweight outline, so resize handles never appear on unselected objects. */
   #updateTarget(): void {
     if (this.#gesturing) return;
     // A placement tool is armed → the canvas is a drawing surface, not a select/
@@ -531,26 +579,26 @@ export class CanvasInteraction {
       if (this.#targetKey === '') return;
       this.#targetKey = '';
       this.#targetIds = new Set();
-      this.#moveable.setState({ target: [], elementGuidelines: [] });
+      this.#moveable.setState({ target: null, elementGuidelines: [] }, () => this.#moveable.forceUpdate());
       llog('target', 'tool armed → moveable target cleared');
       return;
     }
     const sel = [...this.#doc.selection];
-    const selSet = new Set(sel);
-    let ids: number[];
-    if (this.#hoverId !== null && selSet.has(this.#hoverId) && sel.length >= 2) {
-      ids = sel; // hovering a group member → drag the whole group
-    } else if (this.#hoverId !== null) {
-      ids = [this.#hoverId]; // hovering any object → grab just it
-    } else if (sel.length > 0) {
-      ids = sel; // not hovering → keep the selection box up
-    } else {
-      ids = [];
-    }
+    const ids = sel.length > 0 ? sel : [];
     const key = ids.slice().sort((a, b) => a - b).join(',');
     if (key === this.#targetKey) return;
     this.#targetKey = key;
     this.#targetIds = new Set(ids);
+    if (ids.length === 0) {
+      this.#moveable.setState({ target: null, elementGuidelines: [] }, () => this.#moveable.forceUpdate());
+      llog('target', 'moveable target cleared', {
+        hoverId: this.#hoverId,
+        selection: sel,
+        paintedCount: this.#paintedElements().length,
+      });
+      this.#paintHover();
+      return;
+    }
     const targets = ids.map((id) => this.#elementForId(id)).filter((el): el is HTMLElement => !!el);
     const guidelines = this.#paintedElements().filter((el) => !targets.includes(el));
     this.#moveable.setState({ target: targets, elementGuidelines: guidelines });
@@ -566,6 +614,60 @@ export class CanvasInteraction {
       paintedCount: this.#paintedElements().length,
       paintOrderIds: objectIdsInPaintOrder(this.#doc.renderModel),
     });
+    this.#paintHover();
+  }
+
+  #startTextEdit(id: number): void {
+    const o = this.#doc.getObject(id);
+    const top = o ? this.#partTop(o.partId) : null;
+    const overlay = this.#partOverlay();
+    if (!o || top === null || !overlay) return;
+    this.#textEditor?.remove();
+    this.#textEditingId = id;
+    this.#paintHover();
+    const editor = document.createElement('textarea');
+    editor.className = 'le-inline-text-editor';
+    editor.value = o.content;
+    editor.style.left = `${o.x}px`;
+    editor.style.top = `${top + o.y}px`;
+    editor.style.width = `${o.w}px`;
+    editor.style.height = `${o.h}px`;
+    overlay.append(editor);
+    this.#textEditor = editor;
+    const finish = (commit: boolean) => {
+      if (this.#textEditor !== editor) return;
+      const next = editor.value;
+      editor.remove();
+      this.#textEditor = null;
+      this.#textEditingId = null;
+      if (commit && next !== o.content) void this.#commitTextEdit(id, next);
+      this.#paintHover();
+    };
+    editor.addEventListener('blur', () => finish(true), { once: true });
+    editor.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        finish(false);
+      } else if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        finish(true);
+      }
+    });
+    editor.focus();
+    editor.select();
+  }
+
+  async #commitTextEdit(id: number, content: string): Promise<void> {
+    llog('persist', 'inline text edit', { id });
+    this.#doc.setProp(id, 'content', content);
+    this.#doc.mark();
+    try {
+      const view = await setObjectContent(this.#layoutId, id, content);
+      this.#doc.setProp(id, 'content', view.content);
+    } catch (e) {
+      lerror('persist', 'inline text edit failed', e);
+      this.#doc.setError(e instanceof Error ? e.message : String(e));
+    }
   }
 
   // ── gesture lifecycle ──
@@ -587,6 +689,7 @@ export class CanvasInteraction {
     }
     this.#targetKey = ''; // force a re-sync after the gesture
     this.#resizeStarts.clear();
+    this.#scheduleRectUpdate();
     this.#updateTarget();
   }
 
@@ -606,6 +709,7 @@ export class CanvasInteraction {
     }
     this.#moved = true;
     this.#doc.setObjectGeometry(id, { x: clampOrigin(left), y: clampOrigin(top) });
+    this.#scheduleRectUpdate();
     llog('drag', 'apply move', { id, x: clampOrigin(left), y: clampOrigin(top) });
   }
 
@@ -670,6 +774,7 @@ export class CanvasInteraction {
       x = clampOrigin(x);
       y = clampOrigin(y);
       this.#doc.setObjectGeometry(id, { x, y, w, h });
+      this.#scheduleRectUpdate();
       llog('resize', 'apply resize from pointer', { id, w, h, x, y, dx: Math.round(dx), dy: Math.round(dy) });
       return;
     }
@@ -679,6 +784,7 @@ export class CanvasInteraction {
       w: Math.max(1, Math.round(width)),
       h: Math.max(1, Math.round(height)),
     });
+    this.#scheduleRectUpdate();
     llog('resize', 'apply resize', {
       id,
       w: Math.max(1, Math.round(width)),
@@ -770,5 +876,23 @@ export class CanvasInteraction {
     const i = this.#partElements().indexOf(el as HTMLElement);
     if (i < 0) return undefined;
     return this.#doc.renderModel.parts[i]?.id;
+  }
+
+  #scheduleRectUpdate(): void {
+    if (this.#rectFrame !== null) return;
+    this.#rectFrame = requestAnimationFrame(() => {
+      this.#rectFrame = null;
+      this.#moveable.updateRect();
+      this.#paintHover();
+    });
+  }
+
+  #partTop(partId: number): number | null {
+    let top = 0;
+    for (const part of this.#doc.renderModel.parts) {
+      if (part.id === partId) return top;
+      top += part.height;
+    }
+    return null;
   }
 }

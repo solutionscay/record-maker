@@ -7,7 +7,6 @@
   <thead>
     <tr>
       {% for f in fields %}<th>{{ f.name }}</th>{% endfor %}
-      <th></th>
     </tr>
   </thead>
   <tbody>
@@ -19,12 +18,6 @@
       {% for c in r.cells %}
       <td><input class="cell-input" name="f{{ c.field_id }}" value="{{ c.value }}" autocomplete="off"></td>
       {% endfor %}
-      <td class="rowactions">
-        <form class="inline" method="post" action="/browse/{{ layout_id }}/{{ r.id }}/delete"
-              onsubmit="return confirm('Delete this record?')">
-          <button type="submit" title="Delete">✕</button>
-        </form>
-      </td>
     </tr>
     {% endfor %}
   </tbody>

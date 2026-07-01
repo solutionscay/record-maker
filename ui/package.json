@@ -6,6 +6,7 @@
   "description": "Layout Mode editor island (Svelte 5 runes + Vite, SSR off). Built to a static bundle in ui/dist and served by the embedded axum server on /design/:layout (ADR #42).",
   "scripts": {
     "build": "vite build",
+    "build:icons": "node scripts/build-icons.mjs",
     "watch": "vite build --watch",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "parity": "node scripts/parity-check.mjs",
@@ -14,6 +15,7 @@
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "pixelarticons": "^2.1.2",
     "playwright-core": "^1.61.1",
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",

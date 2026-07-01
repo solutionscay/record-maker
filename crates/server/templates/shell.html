@@ -38,10 +38,16 @@
               padding: 0 16px; background: var(--rm-toolbar-bg); border-bottom: .5px solid var(--rm-border); }
     .brand { font-size: 13.5px; font-weight: 600; color: var(--rm-text); }
     .actions { display: flex; gap: 8px; margin-left: auto; }
-    .act { font-size: 12px; font-weight: 500; padding: 5px 11px; border-radius: 7px;
-           border: .5px solid var(--rm-border); background: var(--rm-control-bg); color: var(--rm-text);
-           box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+    .act { display: inline-flex; align-items: center; gap: .3em; font-size: 12px; font-weight: 500;
+           padding: 5px 11px; border-radius: 7px; border: .5px solid var(--rm-border);
+           background: var(--rm-control-bg); color: var(--rm-text); box-shadow: 0 1px 2px rgba(0,0,0,.06); }
     .act:disabled { color: #b8b8bd; border-color: var(--rm-border); background: #f0f0f1; cursor: not-allowed; box-shadow: none; }
+    /* Icon system (#72) — pixelarticons `<symbol>`s referenced by `<use>`, shared by
+       the server chrome and the Svelte islands. An `em`-sized `currentColor` box, so
+       every icon inherits its control's colour and active/disabled/hover state. */
+    .icon { width: 1.05em; height: 1.05em; fill: currentColor; vertical-align: -.15em;
+            flex: none; pointer-events: none; }
+    .act .icon { vertical-align: -.12em; }
     /* Left source sidebar. */
     .sidebar { grid-area: rail; border-right: .5px solid var(--rm-border); background: var(--rm-sidebar-bg);
                padding: 16px 14px; overflow: hidden auto; min-width: 0;
@@ -104,6 +110,13 @@
                 border: .5px solid var(--rm-border); background: var(--rm-control-bg); color: var(--rm-text); }
     .status-mode { font-weight: 600; color: var(--rm-text); }
     .status-edit { color: #b8860b; font-weight: 600; }
+    /* Icon system (#72) — pixelarticons `<symbol>`s referenced by `<use>`, shared
+       by the server chrome and the Svelte islands. An `em`-sized `currentColor`
+       box, so every icon inherits its control's colour and active/disabled/hover
+       state. Icons are decorative; controls keep their title/aria-label. */
+    .icon { width: 1.05em; height: 1.05em; fill: currentColor; vertical-align: -.15em;
+            flex: none; pointer-events: none; }
+    .act .icon { vertical-align: -.12em; margin-right: .25em; }
     table { border-collapse: collapse; width: 100%; margin: .5rem 0; }
     th, td { border: 1px solid #ddd; padding: .4rem .6rem; text-align: left; }
     th { background: #f5f5f7; }
@@ -173,6 +186,10 @@
   {% block head_extra %}{% endblock %}
 </head>
 <body>
+  {# Inline pixelarticons sprite (#72): embedded once so both the server chrome
+     below and the Svelte islands (mounted into this same document) can reference
+     its `<symbol>`s via `<use href="#icon-…">`. No CDN, no runtime fetch. #}
+  {% include "_icons.svg" %}
   <div class="app {% if chrome.mode == "design" %}has-inspector{% endif %}">
     <header class="topbar">
       <span class="brand">record-maker</span>
@@ -190,7 +207,7 @@
         {% when Some with (nav) %}
           <form class="inline" method="post" action="/browse/{{ nav.layout_id }}">
             <input type="hidden" name="view" value="{{ nav.view }}">
-            <button type="submit" class="act" title="Add a new record">+ New</button>
+            <button type="submit" class="act" title="Add a new record"><svg class="icon"><use href="#icon-plus"></use></svg>New</button>
           </form>
           {% match nav.current_id %}
           {% when Some with (cid) %}
@@ -198,21 +215,21 @@
                 onsubmit="return confirm('Delete record {{ nav.current }} of {{ nav.total }}? This cannot be undone.');">
             <input type="hidden" name="view" value="{{ nav.view }}">
             <input type="hidden" name="rec" value="{{ nav.current }}">
-            <button type="submit" class="act" title="Delete the current record">Delete</button>
+            <button type="submit" class="act" title="Delete the current record"><svg class="icon"><use href="#icon-delete"></use></svg>Delete</button>
           </form>
           {% when None %}
-          <button type="button" class="act" disabled title="No record to delete">Delete</button>
+          <button type="button" class="act" disabled title="No record to delete"><svg class="icon"><use href="#icon-delete"></use></svg>Delete</button>
           {% endmatch %}
-          <button type="button" class="act" disabled title="Find — coming soon">Find</button>
+          <button type="button" class="act" disabled title="Find — coming soon"><svg class="icon"><use href="#icon-find"></use></svg>Find</button>
         {% when None %}
-          <button type="button" class="act" disabled title="Open a layout to add records">+ New</button>
-          <button type="button" class="act" disabled title="Open a layout to add records">Delete</button>
-          <button type="button" class="act" disabled title="Find — coming soon">Find</button>
+          <button type="button" class="act" disabled title="Open a layout to add records"><svg class="icon"><use href="#icon-plus"></use></svg>New</button>
+          <button type="button" class="act" disabled title="Open a layout to add records"><svg class="icon"><use href="#icon-delete"></use></svg>Delete</button>
+          <button type="button" class="act" disabled title="Find — coming soon"><svg class="icon"><use href="#icon-find"></use></svg>Find</button>
         {% endmatch %}
         {% else %}
-          <button type="button" class="act" disabled title="Records are managed in Browse mode">+ New</button>
-          <button type="button" class="act" disabled title="Records are managed in Browse mode">Delete</button>
-          <button type="button" class="act" disabled title="Find — coming soon">Find</button>
+          <button type="button" class="act" disabled title="Records are managed in Browse mode"><svg class="icon"><use href="#icon-plus"></use></svg>New</button>
+          <button type="button" class="act" disabled title="Records are managed in Browse mode"><svg class="icon"><use href="#icon-delete"></use></svg>Delete</button>
+          <button type="button" class="act" disabled title="Find — coming soon"><svg class="icon"><use href="#icon-find"></use></svg>Find</button>
         {% endif %}
       </div>
     </header>
@@ -247,16 +264,16 @@
       <div class="stepper" title="{% if chrome.mode == "design" %}Layout navigation{% else %}Record navigation{% endif %}">
         <div class="step-row">
           {% if nav.at_first %}
-          <span class="step off">⏮</span><span class="step off">◀</span>
+          <span class="step off" title="First"><svg class="icon"><use href="#icon-first"></use></svg></span><span class="step off" title="Previous"><svg class="icon"><use href="#icon-prev"></use></svg></span>
           {% else %}
-          <a class="step" href="{{ nav.first_href }}" title="First">⏮</a>
-          <a class="step" href="{{ nav.prev_href }}" title="Previous">◀</a>
+          <a class="step" href="{{ nav.first_href }}" title="First"><svg class="icon"><use href="#icon-first"></use></svg></a>
+          <a class="step" href="{{ nav.prev_href }}" title="Previous"><svg class="icon"><use href="#icon-prev"></use></svg></a>
           {% endif %}
           {% if nav.at_last %}
-          <span class="step off">▶</span><span class="step off">⏭</span>
+          <span class="step off" title="Next"><svg class="icon"><use href="#icon-next"></use></svg></span><span class="step off" title="Last"><svg class="icon"><use href="#icon-last"></use></svg></span>
           {% else %}
-          <a class="step" href="{{ nav.next_href }}" title="Next">▶</a>
-          <a class="step" href="{{ nav.last_href }}" title="Last">⏭</a>
+          <a class="step" href="{{ nav.next_href }}" title="Next"><svg class="icon"><use href="#icon-next"></use></svg></a>
+          <a class="step" href="{{ nav.last_href }}" title="Last"><svg class="icon"><use href="#icon-last"></use></svg></a>
           {% endif %}
         </div>
         {% if chrome.mode == "design" %}
@@ -302,7 +319,7 @@
 
     <footer class="statusbar">
       <button type="button" class="collapse" title="Collapse / expand the sidebar"
-              onclick="document.querySelector('.app').classList.toggle('rail-collapsed')">&#10096;&#10097;</button>
+              onclick="document.querySelector('.app').classList.toggle('rail-collapsed')"><svg class="icon"><use href="#icon-collapse"></use></svg></button>
       <span class="status-mode">{% if chrome.mode == "browse" %}Browse{% else %}Layout{% endif %}</span>
       {% if chrome.editing %}<span class="status-edit" title="Record open for editing">&#9679; Editing</span>{% endif %}
       <span class="status-detail">{% block statusbar %}{% endblock %}</span>

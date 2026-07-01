@@ -9,18 +9,21 @@
   import type { EditorDoc, ToolKind } from './doc.svelte';
   import { createPart } from './persist';
   import { llog, lerror } from './log';
+  import Icon from './Icon.svelte';
 
   let { doc, layoutId = '' }: { doc: EditorDoc; layoutId?: string } = $props();
 
-  const MODE_TOOLS: { id: ToolKind; label: string; glyph: string }[] = [
-    { id: 'pointer', label: 'Select / move objects', glyph: '➚' },
+  // Each tool carries the id of the shared sprite symbol (#72) it renders; the
+  // line tool reuses `minus` (a horizontal rule) as its glyph.
+  const MODE_TOOLS: { id: ToolKind; label: string; icon: string }[] = [
+    { id: 'pointer', label: 'Select / move objects', icon: 'pointer' },
   ];
-  const CREATE_TOOLS: { id: ToolKind; label: string; glyph: string }[] = [
-    { id: 'text', label: 'Text label', glyph: 'T' },
-    { id: 'field', label: 'Field', glyph: '▭' },
-    { id: 'rect', label: 'Rectangle', glyph: '▢' },
-    { id: 'ellipse', label: 'Ellipse', glyph: '◯' },
-    { id: 'line', label: 'Line', glyph: '╱' },
+  const CREATE_TOOLS: { id: ToolKind; label: string; icon: string }[] = [
+    { id: 'text', label: 'Text label', icon: 'text' },
+    { id: 'field', label: 'Field', icon: 'field' },
+    { id: 'rect', label: 'Rectangle', icon: 'rect' },
+    { id: 'ellipse', label: 'Ellipse', icon: 'ellipse' },
+    { id: 'line', label: 'Line', icon: 'minus' },
   ];
   const PART_KINDS: { id: string; label: string }[] = [
     { id: 'header', label: 'Header' },
@@ -113,8 +116,9 @@
         class:active={doc.activeTool === t.id}
         aria-pressed={doc.activeTool === t.id}
         title={t.label}
+        aria-label={t.label}
         onclick={() => pickTool(t.id)}
-      >{t.glyph}</button>
+      ><Icon name={t.icon} /></button>
     {/each}
     {#each CREATE_TOOLS as t (t.id)}
       <button
@@ -122,8 +126,9 @@
         class:active={doc.activeTool === t.id}
         aria-pressed={doc.activeTool === t.id}
         title={t.label}
+        aria-label={t.label}
         onclick={() => pickTool(t.id)}
-      >{t.glyph}</button>
+      ><Icon name={t.icon} /></button>
     {/each}
   </div>
   {#if doc.activeTool === 'field'}
@@ -156,16 +161,16 @@
         <option value={p.id} disabled={!canAddPartKind(p.id)}>{p.label}</option>
       {/each}
     </select>
-    <button type="button" class="le-icon-btn" title="Add band" onclick={addPart} disabled={busy || !canAddPartKind(partKind)}>+</button>
+    <button type="button" class="le-icon-btn" title="Add band" aria-label="Add band" onclick={addPart} disabled={busy || !canAddPartKind(partKind)}><Icon name="plus" /></button>
   </div>
 </section>
 
 <section class="le-zone">
   <span class="side-label">Zoom</span>
   <div class="le-zoom">
-    <button type="button" class="le-icon-btn" title="Zoom out" onclick={() => zoomBy(-0.1)}>−</button>
+    <button type="button" class="le-icon-btn" title="Zoom out" aria-label="Zoom out" onclick={() => zoomBy(-0.1)}><Icon name="minus" /></button>
     <span class="le-zoom-num">{Math.round(doc.zoom * 100)}%</span>
-    <button type="button" class="le-icon-btn" title="Zoom in" onclick={() => zoomBy(0.1)}>+</button>
+    <button type="button" class="le-icon-btn" title="Zoom in" aria-label="Zoom in" onclick={() => zoomBy(0.1)}><Icon name="plus" /></button>
   </div>
 </section>
 
@@ -183,6 +188,9 @@
     gap: 7px;
   }
   .le-tools button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     height: 36px;
     padding: 0;
     border: 0.5px solid var(--rm-border);
@@ -190,7 +198,7 @@
     background: var(--rm-control-bg);
     color: var(--rm-text);
     cursor: pointer;
-    font-size: 14px;
+    font-size: 15px;
     line-height: 1;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
   }
@@ -221,6 +229,9 @@
     gap: 7px;
   }
   .le-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     height: 34px;
     width: 100%;
     padding: 0;

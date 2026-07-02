@@ -27,6 +27,8 @@ use record_maker_engine::{
     PartMeta, Solution, TableMeta,
 };
 
+mod format;
+
 /// Default UI asset base directory (relative to the working directory). Used by
 /// [`AppState::new`] and the thin CLI when `RM_UI_DIR` is unset.
 pub const DEFAULT_UI_DIR: &str = "ui/dist";
@@ -388,6 +390,8 @@ struct ObjectView {
 struct FieldChoice {
     id: i64,
     name: String,
+    /// Logical field kind (`FieldKind::as_str`) so the rail can draw type icons (#79).
+    kind: String,
 }
 
 #[derive(Template)]
@@ -462,19 +466,21 @@ async fn index(State(st): State<AppState>) -> impl IntoResponse {
 /// record-dependent (#60). Only the bound value/label come from the record here.
 fn resolve_object(
     o: &ObjectMeta,
-    by_name: &HashMap<String, (i64, String, String)>,
-) -> (bool, Option<i64>, String, String) {
+    by_name: &HashMap<String, (i64, String, String, FieldKind)>,
+) -> (bool, Option<i64>, String, String, Option<FieldKind>) {
     match (o.kind, o.binding.as_deref()) {
         (ObjectKind::Field, Some(binding)) => {
             let seg = binding.rsplit('.').next().unwrap_or(binding).to_lowercase();
             match by_name.get(&seg) {
-                Some((id, label, value)) => (true, Some(*id), label.clone(), value.clone()),
+                Some((id, label, value, kind)) => {
+                    (true, Some(*id), label.clone(), value.clone(), Some(*kind))
+                }
                 // A binding that doesn't resolve yet (e.g. a relationship path)
                 // still renders a useful placeholder instead of a blank object.
-                None => (true, None, binding.to_string(), binding.to_string()),
+                None => (true, None, binding.to_string(), binding.to_string(), None),
             }
         }
-        _ => (false, None, String::new(), String::new()),
+        _ => (false, None, String::new(), String::new(), None),
     }
 }
 
@@ -637,11 +643,14 @@ fn text_style(kind: ObjectKind, props: Option<&str>) -> String {
 
 /// A record's field values keyed by lowercased field name → (field id, display
 /// name, value) — the lookup `resolve_object` binds against.
-fn by_name_map(fields: &[FieldMeta], cells: Vec<String>) -> HashMap<String, (i64, String, String)> {
+fn by_name_map(
+    fields: &[FieldMeta],
+    cells: Vec<String>,
+) -> HashMap<String, (i64, String, String, FieldKind)> {
     fields
         .iter()
         .zip(cells)
-        .map(|(f, value)| (f.name.to_lowercase(), (f.id, f.name.clone(), value)))
+        .map(|(f, value)| (f.name.to_lowercase(), (f.id, f.name.clone(), value, f.kind)))
         .collect()
 }
 
@@ -650,7 +659,7 @@ fn by_name_for_rec(
     table: &TableMeta,
     fields: &[FieldMeta],
     rec: Option<i64>,
-) -> HashMap<String, (i64, String, String)> {
+) -> HashMap<String, (i64, String, String, FieldKind)> {
     let ids = sol.record_ids(table).unwrap();
     let rec = clamp_rec_n(rec, ids.len() as i64);
     if rec < 1 {
@@ -669,8 +678,11 @@ fn by_name_for_rec(
 /// The single per-object projection shared by [`render_part`] and the create
 /// handler, so an object placed on the canvas serialises byte-identically to one
 /// read back from the model — there is no second mapping to drift.
-fn object_view(o: &ObjectMeta, by_name: &HashMap<String, (i64, String, String)>) -> ObjectView {
-    let (field, field_id, label, value) = resolve_object(o, by_name);
+fn object_view(
+    o: &ObjectMeta,
+    by_name: &HashMap<String, (i64, String, String, FieldKind)>,
+) -> ObjectView {
+    let (field, field_id, label, value, field_kind) = resolve_object(o, by_name);
     let shape = o.kind.is_shape();
     // The text slot is only meaningful for `text` objects; fields/shapes carry
     // none, so the renderer never reads a stray content.
@@ -684,7 +696,25 @@ fn object_view(o: &ObjectMeta, by_name: &HashMap<String, (i64, String, String)>)
         String::new()
     };
     let object_style = object_style(o.kind, o.props.as_deref());
-    let text_style = text_style(o.kind, o.props.as_deref());
+    let mut text_style = text_style(o.kind, o.props.as_deref());
+    // Value formatting (#77/#78) is display-only: applied to the resolved value
+    // for BOTH Browse and the design canvas, driven by the `format` sub-bag of
+    // the object's props and the bound field's kind. A negative-number color is
+    // value-dependent, so it rides `text_style` here (appended last, so it wins
+    // over any static textColor) rather than the static props CSS. An unresolved
+    // binding (`field_kind == None`) leaves the placeholder untouched.
+    let value = match field_kind {
+        Some(kind) => {
+            let props = parse_props(o.props.as_deref());
+            let spec = props.as_ref().and_then(|v| v.get("format"));
+            let formatted = format::format_value(&value, spec, kind);
+            if let Some(color) = formatted.color {
+                text_style.push_str(&format!("color:{color};"));
+            }
+            formatted.text
+        }
+        None => value,
+    };
     ObjectView {
         id: o.id,
         kind: o.kind.as_str(),
@@ -726,7 +756,7 @@ fn object_view_for_rec(
 fn render_part(
     sol: &Solution,
     part: &PartMeta,
-    by_name: &HashMap<String, (i64, String, String)>,
+    by_name: &HashMap<String, (i64, String, String, FieldKind)>,
 ) -> PartView {
     let objects = sol
         .objects(part.id)
@@ -1016,6 +1046,7 @@ async fn design_model(
         .map(|f| FieldChoice {
             id: f.id,
             name: f.name.clone(),
+            kind: f.kind.as_str().to_string(),
         })
         .collect();
     let model = DesignModel {

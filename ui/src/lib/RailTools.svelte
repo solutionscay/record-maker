@@ -10,6 +10,7 @@
   import { createPart } from './persist';
   import { llog, lerror } from './log';
   import Icon from './Icon.svelte';
+  import FieldSelect from './FieldSelect.svelte';
 
   let { doc, layoutId = '' }: { doc: EditorDoc; layoutId?: string } = $props();
 
@@ -135,17 +136,15 @@
   {#if doc.activeTool === 'field'}
     <label class="le-control le-control-stack">
       <span>Field to place</span>
-      <select
-        class="le-select"
-        bind:value={fieldId}
-        onchange={onFieldChange}
-        disabled={doc.fields.length === 0}
+      <FieldSelect
+        fields={doc.fields}
+        value={fieldId}
+        onselect={(id) => {
+          fieldId = id;
+          onFieldChange();
+        }}
         title="Field to place"
-      >
-        {#each doc.fields as f (f.id)}
-          <option value={f.id}>{f.name}</option>
-        {/each}
-      </select>
+      />
     </label>
     <label class="le-check">
       <input

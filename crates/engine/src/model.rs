@@ -10,8 +10,13 @@ use crate::Solution;
 pub enum FieldKind {
     Text,
     Number,
+    /// Date only, stored as ISO-8601 TEXT (`YYYY-MM-DD`).
     Date,
     Bool,
+    /// Time-of-day only, stored as ISO-8601 TEXT (`HH:MM:SS`).
+    Time,
+    /// Date + time, stored as ISO-8601 TEXT (`YYYY-MM-DDTHH:MM:SS`).
+    Timestamp,
 }
 
 impl FieldKind {
@@ -21,6 +26,8 @@ impl FieldKind {
             FieldKind::Number => "number",
             FieldKind::Date => "date",
             FieldKind::Bool => "bool",
+            FieldKind::Time => "time",
+            FieldKind::Timestamp => "timestamp",
         }
     }
 
@@ -30,6 +37,8 @@ impl FieldKind {
             "number" => FieldKind::Number,
             "date" => FieldKind::Date,
             "bool" => FieldKind::Bool,
+            "time" => FieldKind::Time,
+            "timestamp" => FieldKind::Timestamp,
             _ => return None,
         })
     }
@@ -37,7 +46,7 @@ impl FieldKind {
     /// SQLite column type (affinity) this kind stores as.
     pub fn sql_type(self) -> &'static str {
         match self {
-            FieldKind::Text | FieldKind::Date => "TEXT",
+            FieldKind::Text | FieldKind::Date | FieldKind::Time | FieldKind::Timestamp => "TEXT",
             FieldKind::Number => "REAL",
             FieldKind::Bool => "INTEGER",
         }
@@ -235,6 +244,27 @@ impl Solution {
 #[cfg(test)]
 mod tests {
     use crate::{FieldKind, NewField, Solution};
+
+    #[test]
+    fn field_kind_str_parse_and_sql_type_round_trip() {
+        for kind in [
+            FieldKind::Text,
+            FieldKind::Number,
+            FieldKind::Date,
+            FieldKind::Bool,
+            FieldKind::Time,
+            FieldKind::Timestamp,
+        ] {
+            assert_eq!(FieldKind::parse(kind.as_str()), Some(kind));
+        }
+
+        assert_eq!(FieldKind::Time.as_str(), "time");
+        assert_eq!(FieldKind::Timestamp.as_str(), "timestamp");
+        // Both temporal kinds land on TEXT affinity (ISO-8601 storage contract).
+        assert_eq!(FieldKind::Time.sql_type(), "TEXT");
+        assert_eq!(FieldKind::Timestamp.sql_type(), "TEXT");
+        assert_eq!(FieldKind::parse("bogus"), None);
+    }
 
     #[test]
     fn create_table_generates_default_form_layout() {

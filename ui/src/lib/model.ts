@@ -59,6 +59,9 @@ export interface ObjectView {
 export interface FieldChoice {
   id: number;
   name: string;
+  /** Logical field kind (`text`/`number`/`date`/`time`/`timestamp`/`bool`) so the
+   * pickers can draw a type icon next to each name (#79). Mirrors the server. */
+  kind: string;
 }
 
 /** One layout part (band) and the objects it contains, ordered back→front. */

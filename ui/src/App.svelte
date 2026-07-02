@@ -227,7 +227,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: flex-start;
+    justify-content: center;
     gap: 2px;
     font: 600 9px/1 -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
     overflow: hidden;
@@ -275,9 +275,9 @@
     border-radius: 50%;
   }
   .le-stage :global(.le-draw-line) {
-    border-style: solid;
-    border-color: #777;
+    border: 0;
     background: #777;
+    transform-origin: center center;
   }
   .le-stage :global(.le-draw-text),
   .le-stage :global(.le-draw-field) {

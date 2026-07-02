@@ -125,6 +125,42 @@ impl Solution {
         Ok(table_id)
     }
 
+    /// Add one field to an existing user table, updating metadata and the dynamic
+    /// data table. The field is appended at the end of the display order.
+    pub fn add_field(&mut self, table_id: i64, f: &NewField) -> Result<FieldMeta> {
+        let table = self
+            .table_by_id(table_id)?
+            .with_context(|| format!("no table {table_id}"))?;
+        let position: i64 = self.app.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM meta_field WHERE table_id=?1",
+            [table_id],
+            |r| r.get(0),
+        )?;
+        let tx = self.app.transaction()?;
+        tx.execute(
+            "INSERT INTO meta_field(table_id, name, phys_name, kind, position) \
+             VALUES (?1, ?2, '', ?3, ?4)",
+            params![table_id, &f.name, f.kind.as_str(), position],
+        )?;
+        let fid = tx.last_insert_rowid();
+        let fphys = format!("f_{fid}");
+        tx.execute(
+            "UPDATE meta_field SET phys_name=?1 WHERE id=?2",
+            params![fphys, fid],
+        )?;
+        tx.commit()?;
+
+        let ddl = format!("ALTER TABLE {} ADD COLUMN {fphys} {}", table.phys, f.kind.sql_type());
+        self.data.execute(&ddl, []).context("add physical column")?;
+        Ok(FieldMeta {
+            id: fid,
+            name: f.name.clone(),
+            phys: fphys,
+            kind: f.kind,
+            position,
+        })
+    }
+
     /// All defined tables, by name.
     pub fn tables(&self) -> Result<Vec<TableMeta>> {
         let mut stmt = self
@@ -261,6 +297,45 @@ mod tests {
         assert_eq!((rows[3].0.as_str(), rows[3].4.as_deref()), ("field", Some("Invoices.Total")));
         assert!(rows[0].1 == rows[1].1 && rows[2].1 == rows[3].1, "label shares its value's row");
         assert!(rows[1].1 < rows[3].1, "rows increase down the form");
+    }
+
+    #[test]
+    fn add_field_appends_metadata_and_physical_column() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s
+            .create_table(
+                "Customers",
+                &[NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                }],
+            )
+            .unwrap();
+
+        let added = s
+            .add_field(
+                tid,
+                &NewField {
+                    name: "Age".into(),
+                    kind: FieldKind::Number,
+                },
+            )
+            .unwrap();
+        assert_eq!(added.name, "Age");
+        assert_eq!(added.position, 1);
+
+        let table = s.table_by_name("Customers").unwrap().unwrap();
+        let fields = s.fields(tid).unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[1].name, "Age");
+
+        s.insert_record(
+            &table,
+            &[(&fields[0], "Ada".into()), (&fields[1], "36".into())],
+        )
+        .unwrap();
+        let rec = s.list_records(&table, &fields).unwrap();
+        assert_eq!(rec[0].cells, vec!["Ada".to_string(), "36".to_string()]);
     }
 
     #[test]

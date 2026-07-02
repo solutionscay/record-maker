@@ -511,6 +511,20 @@ fn shape_style(kind: ObjectKind, props: Option<&str>) -> String {
             .unwrap_or(2)
             .max(1);
         s.push_str(&format!("background:{stroke};height:{width}px;"));
+        if v.get("angle").is_some() || v.get("length").is_some() {
+            let angle = v
+                .get("angle")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            let length = v
+                .get("length")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(1.0)
+                .max(1.0);
+            s.push_str(&format!(
+                "width:{length}px;left:50%;right:auto;transform:translate(-50%,-50%) rotate({angle}deg);transform-origin:center center;"
+            ));
+        }
         return s;
     }
     if let Some(fill) = v.get("fill").and_then(serde_json::Value::as_str) {
@@ -1775,26 +1789,79 @@ fn collect_values<'a>(
 
 /// Seed a demo "Customers" table on first run so there's something to browse.
 pub fn seed(sol: &mut Solution) -> anyhow::Result<()> {
+    let customer_fields = demo_customer_fields();
     if sol.tables()?.is_empty() {
-        sol.create_table(
-            "Customers",
-            &[
-                NewField {
-                    name: "Name".into(),
-                    kind: FieldKind::Text,
-                },
-                NewField {
-                    name: "Email".into(),
-                    kind: FieldKind::Text,
-                },
-                NewField {
-                    name: "Age".into(),
-                    kind: FieldKind::Number,
-                },
-            ],
-        )?;
+        sol.create_table("Customers", &customer_fields)?;
+    } else if let Some(table) = sol.table_by_name("Customers")? {
+        let existing: HashSet<String> = sol
+            .fields(table.id)?
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        for f in customer_fields {
+            if !existing.contains(&f.name) {
+                sol.add_field(table.id, &f)?;
+            }
+        }
     }
     Ok(())
+}
+
+fn demo_customer_fields() -> Vec<NewField> {
+    vec![
+        NewField {
+            name: "Name".into(),
+            kind: FieldKind::Text,
+        },
+        NewField {
+            name: "Email".into(),
+            kind: FieldKind::Text,
+        },
+        NewField {
+            name: "Age".into(),
+            kind: FieldKind::Number,
+        },
+        NewField {
+            name: "DOB".into(),
+            kind: FieldKind::Date,
+        },
+        NewField {
+            name: "Phone".into(),
+            kind: FieldKind::Text,
+        },
+        NewField {
+            name: "Street".into(),
+            kind: FieldKind::Text,
+        },
+        NewField {
+            name: "City".into(),
+            kind: FieldKind::Text,
+        },
+        NewField {
+            name: "State".into(),
+            kind: FieldKind::Text,
+        },
+        NewField {
+            name: "ZIP".into(),
+            kind: FieldKind::Text,
+        },
+        NewField {
+            name: "Balance".into(),
+            kind: FieldKind::Number,
+        },
+        NewField {
+            name: "CreditLimit".into(),
+            kind: FieldKind::Number,
+        },
+        NewField {
+            name: "LoyaltyPoints".into(),
+            kind: FieldKind::Number,
+        },
+        NewField {
+            name: "DiscountPct".into(),
+            kind: FieldKind::Number,
+        },
+    ]
 }
 
 /// Build the router. A fn so the Tauri shell (#16) embeds the same app.

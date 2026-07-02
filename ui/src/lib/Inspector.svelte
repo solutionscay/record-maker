@@ -12,6 +12,7 @@
     movePart as persistMovePart,
     setObjectBinding as persistBinding,
     setObjectContent as persistContent,
+    setObjectGeometry as persistGeometry,
     setObjectProps as persistProps,
     setObjectReadOnly as persistReadOnly,
     setPartHeight as persistPartHeight,
@@ -139,6 +140,30 @@
   function alignValue(v: unknown): string {
     return typeof v === 'string' && ['left', 'center', 'right'].includes(v) ? v : 'left';
   }
+  function normalizeAngle(value: number): number {
+    if (!Number.isFinite(value)) return 0;
+    const normalized = ((value % 360) + 360) % 360;
+    return Math.round(normalized * 100) / 100;
+  }
+  function lineLength(): number {
+    if (!selected || selected.kind !== 'line') return 1;
+    return Math.max(1, numberValue(selectedProps.length, Math.hypot(selected.w, selected.h) || selected.w || 1));
+  }
+  function lineGeometryForAngle(angle: number): { x: number; y: number; w: number; h: number } | null {
+    if (!selected || selected.kind !== 'line') return null;
+    const length = lineLength();
+    const radians = (angle * Math.PI) / 180;
+    const w = Math.max(1, Math.round(Math.abs(Math.cos(radians)) * length));
+    const h = Math.max(1, Math.round(Math.abs(Math.sin(radians)) * length));
+    const cx = selected.x + selected.w / 2;
+    const cy = selected.y + selected.h / 2;
+    return {
+      x: Math.max(0, Math.round(cx - w / 2)),
+      y: Math.max(0, Math.round(cy - h / 2)),
+      w,
+      h,
+    };
+  }
 
   function isSingletonPartKind(kind: string): boolean {
     return kind === 'header' || kind === 'body' || kind === 'footer';
@@ -184,6 +209,27 @@
       doc.setObjectStyles(selectedId, styles);
     } catch (e) {
       lerror('persist', 'set style failed', e);
+      doc.setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function setLineAngle(value: number): Promise<void> {
+    if (selectedId === null || selected?.kind !== 'line') return;
+    const angle = normalizeAngle(value);
+    const length = lineLength();
+    const geom = lineGeometryForAngle(angle);
+    if (!geom) return;
+    const next = { ...selectedProps, angle, length };
+    llog('persist', 'inspector: set line angle', { id: selectedId, angle, length, geom });
+    doc.setObjectGeometry(selectedId, geom);
+    doc.setObjectProps(selectedId, JSON.stringify(next));
+    doc.mark();
+    try {
+      await persistGeometry(layoutId, selectedId, geom);
+      const styles = await persistProps(layoutId, selectedId, next);
+      doc.setObjectStyles(selectedId, styles);
+    } catch (e) {
+      lerror('persist', 'set line angle failed', e);
       doc.setError(e instanceof Error ? e.message : String(e));
     }
   }
@@ -414,6 +460,20 @@
             />
           </div>
         </div>
+        {#if selected.kind === 'line'}
+          <div class="insp-row">
+            <span>Angle</span>
+            <input
+              class="ctl-num"
+              type="number"
+              min="0"
+              max="359"
+              step="1"
+              value={numberValue(selectedProps.angle, 0)}
+              onchange={(e) => setLineAngle(Number(e.currentTarget.value))}
+            />
+          </div>
+        {/if}
       </section>
     {/if}
 

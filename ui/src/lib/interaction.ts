@@ -22,10 +22,42 @@ import type { EditorDoc, ObjectDoc, ToolKind } from './doc.svelte';
 import type { ObjectView } from './model';
 import { GRID, SNAP_THRESHOLD, clampOrigin, elementsToObjectIds, objectIdsInPaintOrder, snapToGrid } from './canvas-edit';
 import { defaultBox, defaultProps, partAtY } from './create';
-import { createObject, deleteObject, setObjectContent, setObjectPart } from './persist';
+import { createObject, deleteObject, setObjectContent, setObjectPart, setObjectProps as persistObjectProps } from './persist';
 import { llog, lerror } from './log';
 
 type DrawTool = Exclude<ToolKind, 'pointer'>;
+
+function numberProp(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function parseProps(props: string): Record<string, unknown> {
+  if (!props) return {};
+  try {
+    const parsed = JSON.parse(props) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeAngle(angle: number): number {
+  if (!Number.isFinite(angle)) return 0;
+  const normalized = ((angle % 360) + 360) % 360;
+  return Math.round(normalized * 100) / 100;
+}
+
+function lineAngle(x1: number, y1: number, x2: number, y2: number): number {
+  return normalizeAngle((Math.atan2(y2 - y1, x2 - x1) * 180) / Math.PI);
+}
+
+function lineShapeStyle(props: Record<string, unknown>): string {
+  const stroke = typeof props.stroke === 'string' ? props.stroke : '#888';
+  const strokeWidth = Math.max(1, Math.round(numberProp(props.strokeWidth, 2)));
+  const length = Math.max(1, numberProp(props.length, 1));
+  const angle = numberProp(props.angle, 0);
+  return `background:${stroke};height:${strokeWidth}px;width:${length}px;left:50%;right:auto;transform:translate(-50%,-50%) rotate(${angle}deg);transform-origin:center center;`;
+}
 
 interface DrawPlacement {
   tool: DrawTool;
@@ -37,6 +69,7 @@ interface DrawPlacement {
   startY: number;
   dragged: boolean;
   box: { x: number; y: number; w: number; h: number };
+  line: { angle: number; length: number } | null;
 }
 
 export class CanvasInteraction {
@@ -92,6 +125,9 @@ export class CanvasInteraction {
       clientY: number;
     }
   >();
+  #rotatingLineId: number | null = null;
+  #rotateStartLength = 0;
+  #dirtyLineProps = new Set<number>();
 
   constructor(stage: HTMLElement, doc: EditorDoc, layoutId: string) {
     this.#stage = stage;
@@ -102,6 +138,7 @@ export class CanvasInteraction {
       target: [],
       draggable: true,
       resizable: true,
+      rotatable: false,
       snappable: true,
       snapGridWidth: GRID,
       snapGridHeight: GRID,
@@ -142,6 +179,23 @@ export class CanvasInteraction {
     );
     this.#moveable.on('resizeGroupEnd', () => this.#end('resize'));
 
+    // ── rotate (line objects only) ──────────────────────────────────────────
+    this.#moveable.on('rotateStart', (e) => {
+      const id = this.#idForElement(e.target);
+      const o = id === undefined ? undefined : this.#doc.getObject(id);
+      if (id === undefined || !o || o.kind !== 'line') return false;
+      this.#begin();
+      this.#selectFromTarget(e.target);
+      const props = this.#propsForObject(o);
+      const angle = numberProp(props.angle, 0);
+      this.#rotatingLineId = id;
+      this.#rotateStartLength = this.#lineLength(o, props);
+      e.set(angle);
+      llog('rotate', 'rotateStart', { id, angle, length: this.#rotateStartLength });
+    });
+    this.#moveable.on('rotate', (e) => this.#applyLineRotate(e.beforeRotation));
+    this.#moveable.on('rotateEnd', () => this.#endLineRotate());
+
     // ── marquee multi-select ──
     this.#selecto = new Selecto({
       container: stage,
@@ -162,13 +216,15 @@ export class CanvasInteraction {
     // the control box appear and populates `#targetIds` before the next pointer
     // stream, so a press on any selected object drags the whole group.
     this.#selecto.on('selectEnd', (e) => {
-      this.#doc.selectOnly(this.#elementsToIds(e.selected));
+      const selectedIds = this.#elementsToIds(e.selected);
+      this.#doc.selectOnly(selectedIds);
       this.#updateTarget();
-      // A real marquee (not a bare click) is followed by a native `click` on the
-      // canvas/band; swallow that one click so `#onClick` doesn't deselect the set
-      // we just pinned. Auto-expire on the next tick so it never eats a later click
-      // if the browser happened not to emit one.
-      if (!e.isClick) {
+      // Selecto's pointer sequence is followed by a native `click` on the
+      // canvas/band. Swallow it after marquee drags, and also after object clicks
+      // that produced a selection. Rotated lines can visually extend outside their
+      // tiny `.fm-obj` box, so that trailing click may look like empty canvas even
+      // though Selecto correctly selected the line.
+      if (!e.isClick || selectedIds.length > 0) {
         this.#suppressNextClick = true;
         setTimeout(() => {
           this.#suppressNextClick = false;
@@ -304,6 +360,7 @@ export class CanvasInteraction {
       startY: point.y,
       dragged: false,
       box: { x: point.x, y: where.localY, w: 1, h: 1 },
+      line: null,
     };
     this.#drawPreview = document.createElement('div');
     this.#drawPreview.className = `le-draw-preview le-draw-${tool}`;
@@ -351,10 +408,18 @@ export class CanvasInteraction {
       w = 1;
       h = 1;
     } else if (drawing.tool === 'line') {
-      x = Math.min(drawing.startX, endX);
-      yGlobal = drawing.startY;
-      w = Math.max(8, Math.abs(endX - drawing.startX));
-      h = Math.max(2, Math.min(defaultBox(drawing.tool).h, Math.abs(endY - drawing.startY) || defaultBox(drawing.tool).h));
+      const sx = snapToGrid(drawing.startX);
+      const sy = snapToGrid(drawing.startY);
+      const ex = snapToGrid(endX);
+      const ey = snapToGrid(endY);
+      x = Math.min(sx, ex);
+      yGlobal = Math.min(sy, ey);
+      w = Math.max(1, Math.abs(ex - sx));
+      h = Math.max(1, Math.abs(ey - sy));
+      drawing.line = {
+        angle: lineAngle(sx, sy, ex, ey),
+        length: Math.max(1, Math.hypot(ex - sx, ey - sy)),
+      };
     } else {
       x = Math.min(drawing.startX, endX);
       yGlobal = Math.min(drawing.startY, endY);
@@ -378,10 +443,20 @@ export class CanvasInteraction {
 
   #paintDrawPreview(drawing: DrawPlacement): void {
     if (!this.#drawPreview) return;
+    if (drawing.tool === 'line') {
+      const line = drawing.line ?? { angle: 0, length: Math.max(1, drawing.box.w) };
+      this.#drawPreview.style.left = `${drawing.box.x + drawing.box.w / 2 - line.length / 2}px`;
+      this.#drawPreview.style.top = `${drawing.partTop + drawing.box.y + drawing.box.h / 2 - 1}px`;
+      this.#drawPreview.style.width = `${line.length}px`;
+      this.#drawPreview.style.height = '2px';
+      this.#drawPreview.style.transform = `rotate(${line.angle}deg)`;
+      return;
+    }
     this.#drawPreview.style.left = `${drawing.box.x}px`;
     this.#drawPreview.style.top = `${drawing.partTop + drawing.box.y}px`;
     this.#drawPreview.style.width = `${drawing.box.w}px`;
     this.#drawPreview.style.height = `${drawing.box.h}px`;
+    this.#drawPreview.style.transform = '';
   }
 
   /** Persist the drawn object and add the returned view(s) to the store as one
@@ -430,7 +505,7 @@ export class CanvasInteraction {
           w: finalBox.w,
           h: finalBox.h,
           content: tool === 'text' ? 'Text' : null,
-          props: defaultProps(tool) ?? null,
+          props: this.#placementProps(tool, drawing, finalBox),
           rec: this.#doc.rec,
         });
       }
@@ -439,20 +514,30 @@ export class CanvasInteraction {
       });
       for (const v of views) this.#doc.addObject(v, partId);
       this.#doc.mark();
+      // Return to pointer mode before selecting so the reactive target refresh
+      // attaches moveable to the newly-created objects instead of clearing it.
+      this.#doc.setTool('pointer');
       const placed = views.at(-1); // the field VALUE (its label sorts before it)
+      const selectedIds = tool === 'field' ? views.map((v) => v.id) : placed ? [placed.id] : [];
       if (placed) {
-        this.#doc.selectOnly([placed.id]);
+        this.#doc.selectOnly(selectedIds);
         // The cursor now sits over the freshly-placed object, so make it the hover
         // too: otherwise `#updateTarget` prefers a stale hover from before create.
         this.#hoverId = placed.id;
-        llog('place', 'added to store + selected + hover pinned to placed', { selectedId: placed.id });
+        llog('place', 'added to store + selected + hover pinned to placed', {
+          selectedIds,
+          hoverId: placed.id,
+        });
+        if (tool === 'text') {
+          this.#startTextEdit(placed.id);
+        }
       }
     } catch (e) {
       lerror('place', 'create failed', e);
       this.#doc.setError(e instanceof Error ? e.message : String(e));
     } finally {
       this.#placing = false;
-      this.#doc.setTool('pointer');
+      if (this.#doc.activeTool !== 'pointer') this.#doc.setTool('pointer');
     }
   }
 
@@ -629,7 +714,7 @@ export class CanvasInteraction {
       if (this.#targetKey === '') return;
       this.#targetKey = '';
       this.#targetIds = new Set();
-      this.#moveable.setState({ target: null, elementGuidelines: [] }, () => this.#moveable.forceUpdate());
+      this.#moveable.setState({ target: null, elementGuidelines: [], rotatable: false }, () => this.#moveable.forceUpdate());
       llog('target', 'tool armed → moveable target cleared');
       return;
     }
@@ -640,7 +725,7 @@ export class CanvasInteraction {
     this.#targetKey = key;
     this.#targetIds = new Set(ids);
     if (ids.length === 0) {
-      this.#moveable.setState({ target: null, elementGuidelines: [] }, () => this.#moveable.forceUpdate());
+      this.#moveable.setState({ target: null, elementGuidelines: [], rotatable: false }, () => this.#moveable.forceUpdate());
       llog('target', 'moveable target cleared', {
         hoverId: this.#hoverId,
         selection: sel,
@@ -651,7 +736,7 @@ export class CanvasInteraction {
     }
     const targets = ids.map((id) => this.#elementForId(id)).filter((el): el is HTMLElement => !!el);
     const guidelines = this.#paintedElements().filter((el) => !targets.includes(el));
-    this.#moveable.setState({ target: targets, elementGuidelines: guidelines });
+    this.#moveable.setState({ target: targets, elementGuidelines: guidelines, rotatable: this.#canRotate(ids) });
     // THE key line for "resize does nothing": if `chosenIds` has an id but
     // `resolvedEls` is fewer, moveable has no element to attach handles to — the
     // store id didn't map to a painted `.fm-obj` (stale paint order / DOM not yet
@@ -810,6 +895,7 @@ export class CanvasInteraction {
     if (this.#moved) {
       this.#doc.mark();
       void this.#persistSelection(reparented);
+      void this.#persistDirtyLineProps();
     }
     this.#targetKey = ''; // force a re-sync after the gesture
     this.#resizeStarts.clear();
@@ -944,6 +1030,7 @@ export class CanvasInteraction {
       x = clampOrigin(x);
       y = clampOrigin(y);
       this.#doc.setObjectGeometry(id, { x, y, w, h });
+      this.#syncLineToBox(id);
       this.#scheduleRectUpdate();
       llog('resize', 'apply resize from pointer', { id, w, h, x, y, dx: Math.round(dx), dy: Math.round(dy) });
       return;
@@ -954,6 +1041,7 @@ export class CanvasInteraction {
       w: Math.max(1, Math.round(width)),
       h: Math.max(1, Math.round(height)),
     });
+    this.#syncLineToBox(id);
     this.#scheduleRectUpdate();
     llog('resize', 'apply resize', {
       id,
@@ -962,6 +1050,116 @@ export class CanvasInteraction {
       x: clampOrigin(left),
       y: clampOrigin(top),
     });
+  }
+
+  #applyLineRotate(angle: number): void {
+    const id = this.#rotatingLineId;
+    const o = id === null ? undefined : this.#doc.getObject(id);
+    if (id === null || !o || o.kind !== 'line') return;
+    const nextAngle = normalizeAngle(angle);
+    const length = this.#rotateStartLength || this.#lineLength(o, this.#propsForObject(o));
+    const radians = (nextAngle * Math.PI) / 180;
+    const w = Math.max(1, Math.round(Math.abs(Math.cos(radians)) * length));
+    const h = Math.max(1, Math.round(Math.abs(Math.sin(radians)) * length));
+    const cx = o.x + o.w / 2;
+    const cy = o.y + o.h / 2;
+    const x = clampOrigin(Math.round(cx - w / 2));
+    const y = clampOrigin(Math.round(cy - h / 2));
+    const props = { ...this.#propsForObject(o), angle: nextAngle, length };
+    const propsJson = JSON.stringify(props);
+    this.#moved = true;
+    this.#doc.setObjectGeometry(id, { x, y, w, h });
+    this.#doc.setObjectProps(id, propsJson);
+    this.#setLineShapeStyle(id, props);
+    this.#dirtyLineProps.add(id);
+    this.#scheduleRectUpdate();
+  }
+
+  #endLineRotate(): void {
+    const id = this.#rotatingLineId;
+    const moved = this.#moved;
+    this.#gesturing = false;
+    this.#rotatingLineId = null;
+    this.#rotateStartLength = 0;
+    if (id !== null && moved) {
+      this.#doc.mark();
+      void this.#persistSelection();
+      void this.#persistDirtyLineProps();
+    }
+    this.#targetKey = '';
+    this.#scheduleRectUpdate();
+    this.#updateTarget();
+  }
+
+  async #persistLineProps(id: number): Promise<void> {
+    const o = this.#doc.getObject(id);
+    if (!o) return;
+    const props = this.#propsForObject(o);
+    try {
+      const styles = await persistObjectProps(this.#layoutId, id, props);
+      this.#doc.setObjectStyles(id, styles);
+    } catch (e) {
+      lerror('persist', 'failed to persist line rotation', e);
+      this.#doc.setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async #persistDirtyLineProps(): Promise<void> {
+    const ids = [...this.#dirtyLineProps];
+    this.#dirtyLineProps.clear();
+    await Promise.all(ids.map((id) => this.#persistLineProps(id)));
+  }
+
+  #placementProps(tool: DrawTool, drawing: DrawPlacement, box: { w: number }): Record<string, unknown> | null {
+    const base = defaultProps(tool);
+    if (tool !== 'line') return base ?? null;
+    const line = drawing.dragged && drawing.line ? drawing.line : { angle: 0, length: Math.max(1, box.w) };
+    return { ...(base ?? {}), angle: line.angle, length: line.length };
+  }
+
+  #canRotate(ids: number[]): boolean {
+    if (ids.length !== 1) return false;
+    return this.#doc.getObject(ids[0])?.kind === 'line';
+  }
+
+  #propsForObject(o: Readonly<ObjectDoc>): Record<string, unknown> {
+    return parseProps(o.props);
+  }
+
+  #lineLength(o: Readonly<ObjectDoc>, props: Record<string, unknown>): number {
+    return Math.max(1, numberProp(props.length, Math.hypot(o.w, o.h) || o.w || 1));
+  }
+
+  #setLineShapeStyle(id: number, props: Record<string, unknown>): void {
+    const view = this.#objectView(id);
+    if (!view) return;
+    this.#doc.setObjectStyles(id, {
+      objectStyle: view.objectStyle,
+      textStyle: view.textStyle,
+      shapeStyle: lineShapeStyle(props),
+    });
+  }
+
+  #syncLineToBox(id: number): void {
+    const o = this.#doc.getObject(id);
+    if (!o || o.kind !== 'line') return;
+    const props = this.#propsForObject(o);
+    const currentAngle = numberProp(props.angle, 0);
+    const radians = (currentAngle * Math.PI) / 180;
+    const horizontalish = currentAngle <= 5 || currentAngle >= 355 || Math.abs(currentAngle - 180) <= 5;
+    const verticalish = Math.abs(currentAngle - 90) <= 5 || Math.abs(currentAngle - 270) <= 5;
+    const w = Math.max(1, o.w);
+    const h = horizontalish && o.h <= 2 ? 0 : Math.max(1, o.h);
+    const dx = (Math.cos(radians) < 0 ? -1 : 1) * (verticalish && o.w <= 2 ? 0 : w);
+    const dy = (Math.sin(radians) < 0 ? -1 : 1) * h;
+    const next = {
+      ...props,
+      angle: lineAngle(0, 0, dx, dy),
+      length: Math.max(1, Math.hypot(dx, dy)),
+    };
+    this.#doc.setObjectProps(id, JSON.stringify(next));
+    this.#setLineShapeStyle(id, next);
+    this.#dirtyLineProps.add(id);
   }
 
   // ── persistence (#46 bulk axum contract) ──

@@ -119,6 +119,20 @@ export async function setObjectPart(
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
 }
 
+/** Persist one object's geometry. */
+export async function setObjectGeometry(
+  layoutId: string,
+  id: number,
+  geom: { x: number; y: number; w: number; h: number },
+): Promise<void> {
+  const r = await fetch(`/design/${layoutId}/object/${id}/geometry`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(geom),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+}
+
 /** Delete an object (the undo of a create / the Create-zone delete). */
 export async function deleteObject(layoutId: string, id: number): Promise<void> {
   const r = await fetch(`/design/${layoutId}/object/${id}/delete`, { method: 'POST' });

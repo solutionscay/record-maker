@@ -23,6 +23,7 @@ export type LogCat =
   | 'target' // moveable target reconciliation (id ↔ element)
   | 'drag' // moveable drag lifecycle
   | 'resize' // moveable resize lifecycle
+  | 'rotate' // moveable rotate lifecycle
   | 'zoom' // canvas zoom
   | 'error'; // surfaced failures
 
@@ -37,6 +38,7 @@ const COLOR: Record<LogCat, string> = {
   target: '#d97706',
   drag: '#db2777',
   resize: '#e11d48',
+  rotate: '#c026d3',
   zoom: '#9333ea',
   error: '#dc2626',
 };

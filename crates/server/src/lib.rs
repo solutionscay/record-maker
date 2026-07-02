@@ -3458,17 +3458,36 @@ mod tests {
         let tid = sol
             .create_table(
                 "Invoices",
-                &[NewField { name: "Total".into(), kind: FieldKind::Number }],
+                &[
+                    NewField {
+                        name: "Total".into(),
+                        kind: FieldKind::Number,
+                    },
+                    NewField {
+                        name: "Due".into(),
+                        kind: FieldKind::Date,
+                    },
+                ],
             )
             .unwrap();
         let table = sol.table_by_name("Invoices").unwrap().unwrap();
         let fields = sol.fields(tid).unwrap();
-        sol.insert_record(&table, &[(&fields[0], "1234.5".into())]).unwrap();
-        // Set a decimal + thousands-separator format on every layout's Total object.
+        sol.insert_record(
+            &table,
+            &[(&fields[0], "1234.5".into()), (&fields[1], "12/25/2003".into())],
+        )
+        .unwrap();
+        // Set formats on every layout's field objects.
         sol.app
             .execute(
                 "UPDATE meta_object SET props=?1 WHERE binding='Invoices.Total'",
                 [r#"{"format":{"mode":"decimal","fixedDecimals":true,"decimalDigits":2,"thousandsSeparator":","}}"#],
+            )
+            .unwrap();
+        sol.app
+            .execute(
+                "UPDATE meta_object SET props=?1 WHERE binding='Invoices.Due'",
+                [r#"{"format":{"mode":"predefined","predefined":"yyyy-mm-dd"}}"#],
             )
             .unwrap();
         let layouts = sol.layouts().unwrap();
@@ -3484,11 +3503,16 @@ mod tests {
             let (status, html) = get_body(state.clone(), &format!("/browse/{lid}")).await;
             assert_eq!(status, StatusCode::OK, "{label} renders");
             assert!(html.contains("1,234.50"), "{label} shows the formatted value");
+            assert!(html.contains("2003-12-25"), "{label} shows the formatted date");
             // The raw value must ride data-raw (so the editable input commits raw),
             // not be the visible/committed default.
             assert!(
                 html.contains(r#"data-raw="1234.5""#),
                 "{label} keeps the raw value in data-raw for safe commit"
+            );
+            assert!(
+                html.contains(r#"data-raw="12/25/2003""#),
+                "{label} keeps the raw date in data-raw for safe commit"
             );
         }
     }

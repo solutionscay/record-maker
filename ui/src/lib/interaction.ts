@@ -61,7 +61,7 @@ function lineShapeStyle(props: Record<string, unknown>): string {
 
 interface DrawPlacement {
   tool: DrawTool;
-  fieldId: number | null;
+  fieldIds: number[];
   partId: number;
   partTop: number;
   partHeight: number;
@@ -344,15 +344,15 @@ export class CanvasInteraction {
     }
     const part = this.#doc.getPart(where.partId);
     if (!part) return;
-    const fieldId = tool === 'field' ? this.#doc.toolFieldId : null;
-    if (tool === 'field' && fieldId == null) {
+    const fieldIds = tool === 'field' ? this.#doc.toolFieldIds.slice() : [];
+    if (tool === 'field' && fieldIds.length === 0) {
       llog('place', 'field tool armed but no field chosen — nothing to draw');
       this.#doc.setTool('pointer');
       return;
     }
     this.#drawing = {
       tool,
-      fieldId,
+      fieldIds,
       partId: where.partId,
       partTop: point.y - where.localY,
       partHeight: part.height,
@@ -375,6 +375,7 @@ export class CanvasInteraction {
       partId: where.partId,
       startX: Math.round(point.x),
       startY: Math.round(where.localY),
+      fieldCount: fieldIds.length,
     });
   }
 
@@ -480,22 +481,29 @@ export class CanvasInteraction {
     try {
       let views: ObjectView[];
       if (tool === 'field') {
-        const fieldId = drawing.fieldId;
-        if (fieldId == null) {
+        const fieldIds = drawing.fieldIds;
+        if (fieldIds.length === 0) {
           llog('place', 'field draw finished but no field chosen — nothing to create');
           return;
         }
-        views = await createObject(this.#layoutId, {
-          partId,
-          kind: 'field',
-          x: finalBox.x,
-          y: finalBox.y,
-          w: finalBox.w,
-          h: finalBox.h,
-          fieldId,
-          createLabel: this.#doc.toolCreateLabel,
-          rec: this.#doc.rec,
-        });
+        const rowStep = Math.max(32, finalBox.h + GRID);
+        const batches = await Promise.all(
+          fieldIds.map((fieldId, i) => {
+            const y = Math.min(drawing.partHeight - 1, finalBox.y + i * rowStep);
+            return createObject(this.#layoutId, {
+              partId,
+              kind: 'field',
+              x: finalBox.x,
+              y,
+              w: finalBox.w,
+              h: Math.min(finalBox.h, Math.max(1, drawing.partHeight - y)),
+              fieldId,
+              createLabel: this.#doc.toolCreateLabel,
+              rec: this.#doc.rec,
+            });
+          }),
+        );
+        views = batches.flat();
       } else {
         views = await createObject(this.#layoutId, {
           partId,

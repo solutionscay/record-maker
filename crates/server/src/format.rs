@@ -191,13 +191,31 @@ struct DateParts {
 }
 
 /// Parse the date portion of an ISO value (`YYYY-MM-DD`, or the date half of a
-/// `YYYY-MM-DDThh:mm:ss` timestamp).
+/// `YYYY-MM-DDThh:mm:ss` timestamp). For Browse-entered values, also accept the
+/// common slash form `MM/DD/YYYY` (or `DD/MM/YYYY` when the first segment is > 12).
 fn parse_date(raw: &str) -> Option<DateParts> {
     let date = raw.trim().split(['T', ' ']).next()?;
-    let mut it = date.split('-');
-    let y = it.next()?.parse().ok()?;
-    let mo = it.next()?.parse().ok()?;
-    let d = it.next()?.parse().ok()?;
+    let (y, mo, d) = if date.contains('-') {
+        let mut it = date.split('-');
+        (it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?)
+    } else if date.contains('/') {
+        let parts = date
+            .split('/')
+            .map(str::parse::<i32>)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        if parts.len() != 3 {
+            return None;
+        }
+        let y = normalize_year(parts[2]);
+        if parts[0] > 12 {
+            (y, parts[1] as u32, parts[0] as u32)
+        } else {
+            (y, parts[0] as u32, parts[1] as u32)
+        }
+    } else {
+        return None;
+    };
     // Reject out-of-range components so a malformed-but-numeric value (e.g.
     // "2013-13-01") degrades to the raw string instead of panicking downstream:
     // weekday()/month_name() index fixed 12-element tables by month.
@@ -205,6 +223,16 @@ fn parse_date(raw: &str) -> Option<DateParts> {
         return None;
     }
     Some(DateParts { y, mo, d })
+}
+
+fn normalize_year(y: i32) -> i32 {
+    if (0..=69).contains(&y) {
+        2000 + y
+    } else if (70..=99).contains(&y) {
+        1900 + y
+    } else {
+        y
+    }
 }
 
 const MONTHS_LONG: [&str; 12] = [
@@ -680,6 +708,14 @@ mod tests {
             ),
             "2003.12.25"
         );
+    }
+
+    #[test]
+    fn date_predefined_accepts_slash_entered_dates() {
+        let spec = json!({"mode": "predefined", "predefined": "yyyy-mm-dd"});
+        assert_eq!(fmt("12/25/2003", spec.clone(), FieldKind::Date), "2003-12-25");
+        assert_eq!(fmt("25/12/2003", spec.clone(), FieldKind::Date), "2003-12-25");
+        assert_eq!(fmt("1/5/03", spec, FieldKind::Date), "2003-01-05");
     }
 
     #[test]

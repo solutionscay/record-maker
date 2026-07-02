@@ -14,7 +14,10 @@
   let {
     fields,
     value,
+    values = [],
     onselect,
+    onselectMany,
+    multi = false,
     disabled = false,
     placeholder = 'Select field…',
     title = 'Field',
@@ -22,8 +25,13 @@
     fields: readonly FieldChoice[];
     /** Currently-bound field id, or null when unset (e.g. an unresolved binding). */
     value: number | null;
+    /** Currently selected field ids for multi-select placement. */
+    values?: readonly number[];
     /** Commit the chosen field id — the moral equivalent of the old `onchange`. */
     onselect: (id: number) => void;
+    /** Commit the chosen field ids for multi-select placement. */
+    onselectMany?: (ids: number[]) => void;
+    multi?: boolean;
     disabled?: boolean;
     placeholder?: string;
     title?: string;
@@ -51,6 +59,21 @@
 
   let isEmpty = $derived(fields.length === 0);
   let selectedField = $derived(fields.find((f) => f.id === value) ?? null);
+  let selectedSet = $derived(new Set(values));
+  let selectedFields = $derived(fields.filter((f) => selectedSet.has(f.id)));
+  let hasTriggerSelection = $derived(multi ? selectedFields.length > 0 : selectedField !== null);
+  let triggerLabel = $derived(
+    multi
+      ? selectedFields.length === 0
+        ? isEmpty
+          ? 'No fields'
+          : placeholder
+        : selectedFields.length === 1
+          ? selectedFields[0].name
+          : `${selectedFields.length} fields`
+      : selectedField?.name ?? (isEmpty ? 'No fields' : placeholder),
+  );
+  let triggerIcon = $derived(multi ? selectedFields[0]?.kind : selectedField?.kind);
   let filtered = $derived(
     query.trim() === ''
       ? fields.slice()
@@ -72,6 +95,20 @@
     if (!f) return;
     onselect(f.id);
     close();
+  }
+  function toggle(f: FieldChoice | undefined): void {
+    if (!f) return;
+    const next = new Set(values);
+    if (next.has(f.id)) next.delete(f.id);
+    else next.add(f.id);
+    onselectMany?.([...next]);
+  }
+  function wantsMultiToggle(e: KeyboardEvent | MouseEvent): boolean {
+    return multi && (e.shiftKey || e.ctrlKey || e.metaKey);
+  }
+  function choose(f: FieldChoice | undefined, e: KeyboardEvent | MouseEvent): void {
+    if (wantsMultiToggle(e)) toggle(f);
+    else commit(f);
   }
 
   // Keep the highlight within bounds as the filter shrinks the list.
@@ -117,7 +154,7 @@
         break;
       case 'Enter':
         e.preventDefault();
-        commit(filtered[highlight]);
+        choose(filtered[highlight], e);
         break;
       case 'Escape':
         e.preventDefault();
@@ -131,7 +168,7 @@
   <button
     type="button"
     class="fs-trigger"
-    class:fs-placeholder={!selectedField}
+    class:fs-placeholder={!hasTriggerSelection}
     {title}
     disabled={disabled || isEmpty}
     aria-haspopup="listbox"
@@ -140,11 +177,14 @@
     onkeydown={onTriggerKeydown}
   >
     <span class="fs-current">
-      {#if selectedField}
-        <Icon name={iconFor(selectedField.kind)} />
-        <span class="fs-name">{selectedField.name}</span>
+      {#if hasTriggerSelection}
+        <Icon name={iconFor(triggerIcon ?? 'text')} />
+        <span class="fs-name">{triggerLabel}</span>
       {:else}
-        <span class="fs-name">{isEmpty ? 'No fields' : placeholder}</span>
+        <span class="fs-name">{triggerLabel}</span>
+      {/if}
+      {#if multi && selectedFields.length > 1}
+        <span class="fs-count">{selectedFields.length}</span>
       {/if}
     </span>
     <svg class="fs-caret" width="10" height="7" viewBox="0 0 10 7" aria-hidden="true"
@@ -162,19 +202,23 @@
         bind:value={query}
         onkeydown={onInputKeydown}
       />
-      <ul class="fs-list" role="listbox" bind:this={listEl}>
+      <ul class="fs-list" role="listbox" aria-multiselectable={multi || undefined} bind:this={listEl}>
         {#each filtered as f, i (f.id)}
           <!-- Combobox pattern: arrow/Enter/Escape are handled on the filter input
                above; the row click is a pointer affordance for the same commit. -->
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <li
             role="option"
-            aria-selected={f.id === value}
+            aria-selected={multi ? selectedSet.has(f.id) : f.id === value}
             class="fs-opt"
             class:fs-active={i === highlight}
+            class:fs-selected={multi && selectedSet.has(f.id)}
             onpointerenter={() => (highlight = i)}
-            onclick={() => commit(f)}
+            onclick={(e) => choose(f, e)}
           >
+            {#if multi}
+              <span class="fs-check">{selectedSet.has(f.id) ? '✓' : ''}</span>
+            {/if}
             <Icon name={iconFor(f.kind)} />
             <span class="fs-name">{f.name}</span>
           </li>
@@ -183,6 +227,11 @@
           <li class="fs-none">No matches</li>
         {/if}
       </ul>
+      {#if multi}
+        <div class="fs-actions">
+          <button type="button" onclick={close}>Done</button>
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -226,6 +275,17 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .fs-count {
+    flex: 0 0 auto;
+    min-width: 18px;
+    padding: 1px 5px;
+    border-radius: 999px;
+    background: var(--rm-accent);
+    color: #fff;
+    font-size: 11px;
+    line-height: 1.3;
+    text-align: center;
   }
   .fs-caret {
     flex: 0 0 auto;
@@ -276,6 +336,16 @@
     color: var(--rm-text);
     cursor: pointer;
   }
+  .fs-selected:not(.fs-active) {
+    background: rgba(10, 132, 255, 0.12);
+  }
+  .fs-check {
+    width: 14px;
+    flex: 0 0 14px;
+    text-align: center;
+    font-size: 12px;
+    font-weight: 700;
+  }
   .fs-active {
     background: var(--rm-accent);
     color: #fff;
@@ -285,5 +355,22 @@
     font-size: 12px;
     color: var(--rm-text-dim);
     text-align: center;
+  }
+  .fs-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding-top: 5px;
+    margin-top: 5px;
+    border-top: 0.5px solid var(--rm-border);
+  }
+  .fs-actions button {
+    font: inherit;
+    font-size: 12px;
+    padding: 4px 8px;
+    border: 0.5px solid var(--rm-border);
+    border-radius: 6px;
+    background: var(--rm-control-bg);
+    color: var(--rm-text);
+    cursor: pointer;
   }
 </style>

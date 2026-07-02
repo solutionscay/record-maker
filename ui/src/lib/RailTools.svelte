@@ -34,7 +34,7 @@
     { id: 'grandsummary', label: 'Grand summary' },
   ];
 
-  let fieldId = $state<number | null>(null);
+  let fieldIds = $state<number[]>([]);
   let createLabel = $state(true);
   let partKind = $state('body');
   let busy = $state(false);
@@ -48,7 +48,7 @@
 
   // Default the Field dropdown to the first field once the model has hydrated.
   $effect(() => {
-    if (fieldId === null && doc.fields.length > 0) fieldId = doc.fields[0].id;
+    if (fieldIds.length === 0 && doc.fields.length > 0) fieldIds = [doc.fields[0].id];
   });
 
   $effect(() => {
@@ -60,14 +60,14 @@
   // ── Mode / create zones ─────────────────────────────────────────────────
 
   function pickTool(t: ToolKind): void {
-    llog('tool', 'rail: pick tool', { tool: t, fieldId, createLabel });
-    doc.setTool(t, t === 'field' ? fieldId : null, createLabel);
+    llog('tool', 'rail: pick tool', { tool: t, fieldIds, createLabel });
+    doc.setTool(t, t === 'field' ? fieldIds : null, createLabel);
   }
   function onFieldChange(): void {
-    if (doc.activeTool === 'field') doc.setTool('field', fieldId, createLabel);
+    if (doc.activeTool === 'field') doc.setTool('field', fieldIds, createLabel);
   }
   function onCreateLabelChange(): void {
-    if (doc.activeTool === 'field') doc.setTool('field', fieldId, createLabel);
+    if (doc.activeTool === 'field') doc.setTool('field', fieldIds, createLabel);
   }
   async function addPart(): Promise<void> {
     if (busy || !canAddPartKind(partKind)) return;
@@ -138,12 +138,18 @@
       <span>Field to place</span>
       <FieldSelect
         fields={doc.fields}
-        value={fieldId}
+        value={fieldIds[0] ?? null}
+        values={fieldIds}
+        multi
         onselect={(id) => {
-          fieldId = id;
+          fieldIds = [id];
           onFieldChange();
         }}
-        title="Field to place"
+        onselectMany={(ids) => {
+          fieldIds = ids;
+          onFieldChange();
+        }}
+        title="Field to place; Shift/Ctrl/Cmd-click for multiple"
       />
     </label>
     <label class="le-check">

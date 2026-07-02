@@ -134,13 +134,38 @@ interface DateParts {
 
 function parseDate(raw: string): DateParts | null {
   const date = raw.trim().split(/[T ]/)[0] ?? '';
-  const parts = date.split('-');
-  if (parts.length < 3) return null;
-  const y = Number(parts[0]);
-  const mo = Number(parts[1]);
-  const d = Number(parts[2]);
+  let y: number;
+  let mo: number;
+  let d: number;
+  if (date.includes('-')) {
+    const parts = date.split('-');
+    if (parts.length < 3) return null;
+    y = Number(parts[0]);
+    mo = Number(parts[1]);
+    d = Number(parts[2]);
+  } else if (date.includes('/')) {
+    const parts = date.split('/').map(Number);
+    if (parts.length !== 3 || !parts.every((n) => Number.isInteger(n))) return null;
+    y = normalizeYear(parts[2]);
+    if (parts[0] > 12) {
+      mo = parts[1];
+      d = parts[0];
+    } else {
+      mo = parts[0];
+      d = parts[1];
+    }
+  } else {
+    return null;
+  }
   if (![y, mo, d].every((n) => Number.isInteger(n))) return null;
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
   return { y, mo, d };
+}
+
+function normalizeYear(y: number): number {
+  if (y >= 0 && y <= 69) return 2000 + y;
+  if (y >= 70 && y <= 99) return 1900 + y;
+  return y;
 }
 
 const MONTHS_LONG = [

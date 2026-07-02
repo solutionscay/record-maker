@@ -77,9 +77,10 @@ export interface PartDoc {
 
 /** The Create-zone tool palette (#62/#48). `pointer` is the select/drag tool
  * (the canvas's default behaviour); every other value ARMS the canvas so the next
- * click places that object kind. A `field` placement also needs a bound field —
- * carried in [`EditorDoc.toolFieldId`]. Part bands are added by a separate rail
- * action (they stack, not click-placed), so they are not a placement tool. */
+ * click places that object kind. A `field` placement also needs one or more bound
+ * fields — carried in [`EditorDoc.toolFieldIds`]. Part bands are added by a
+ * separate rail action (they stack, not click-placed), so they are not a placement
+ * tool. */
 export type ToolKind = 'pointer' | 'text' | 'line' | 'rect' | 'ellipse' | 'field';
 
 /** The server-resolved render projection of an object (#44/#60): whether it is a
@@ -220,8 +221,10 @@ export class EditorDoc {
   /** Active Create-zone tool (#62). `pointer` is select/drag; any other value arms
    * the canvas to place that kind on the next click. */
   #activeTool = $state<ToolKind>('pointer');
-  /** The field a `field`-tool placement binds (the rail's field dropdown). */
+  /** The primary field a `field`-tool placement binds (legacy single-select path). */
   #toolFieldId = $state<number | null>(null);
+  /** All fields the rail's `field` tool should place as a batch. */
+  #toolFieldIds = $state<number[]>([]);
   /** Whether a field placement should also create a static label object. */
   #toolCreateLabel = $state(true);
   /** Canvas zoom factor (#62 Zoom zone): 1 = 100%. A viewport concern — applied as
@@ -741,17 +744,23 @@ export class EditorDoc {
     return this.#toolFieldId;
   }
 
+  get toolFieldIds(): readonly number[] {
+    return this.#toolFieldIds;
+  }
+
   get toolCreateLabel(): boolean {
     return this.#toolCreateLabel;
   }
 
   /** Arm a Create-zone tool. `pointer` returns the canvas to select/drag; for the
-   * `field` tool, `fieldId` is the field a placement binds (ignored otherwise). */
-  setTool(tool: ToolKind, fieldId: number | null = null, createLabel = true): void {
+   * `field` tool, `fieldIds` are the fields a placement binds (ignored otherwise). */
+  setTool(tool: ToolKind, fieldIds: number | number[] | null = null, createLabel = true): void {
     this.#activeTool = tool;
-    this.#toolFieldId = tool === 'field' ? fieldId : null;
+    const ids = tool === 'field' ? (Array.isArray(fieldIds) ? fieldIds.slice() : fieldIds === null ? [] : [fieldIds]) : [];
+    this.#toolFieldIds = ids;
+    this.#toolFieldId = ids[0] ?? null;
     this.#toolCreateLabel = tool === 'field' ? createLabel : true;
-    llog('tool', 'setTool', { tool, fieldId: this.#toolFieldId, createLabel: this.#toolCreateLabel });
+    llog('tool', 'setTool', { tool, fieldIds: this.#toolFieldIds, createLabel: this.#toolCreateLabel });
   }
 
   // ── session: canvas zoom (#62 Zoom zone) ─────────────────────────────────

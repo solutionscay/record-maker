@@ -19,7 +19,7 @@
     {% if editable && !o.read_only %}
       {% match o.field_id %}
       {% when Some with (fid) %}
-      <input class="fm-finput" name="f{{ fid }}" value="{{ o.value }}" autocomplete="off"{% if o.text_style != "" %} style="{{ o.text_style }}"{% endif %}>
+      <input class="fm-finput" name="f{{ fid }}" value="{{ o.value }}"{% if o.raw != o.value %} data-raw="{{ o.raw }}" data-fmt="{{ o.value }}"{% endif %} autocomplete="off"{% if o.text_style != "" %} style="{{ o.text_style }}"{% endif %}>
       {% when None %}
       <span class="fm-fvalue"{% if o.text_style != "" %} style="{{ o.text_style }}"{% endif %}>{{ o.value }}</span>
       {% endmatch %}

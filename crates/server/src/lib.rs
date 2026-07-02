@@ -379,6 +379,14 @@ struct ObjectView {
     text_style: String,
     label: String,
     value: String,
+    /// The RAW (unformatted) field value. `value` above carries the display
+    /// string (value formatting #77/#78 applied); `raw` is what an editable
+    /// Browse input must commit so a formatted field is never written back as its
+    /// formatted text. Skipped from the design-model JSON (the canvas renders the
+    /// display `value`); the askama browse band reads it directly. Equal to
+    /// `value` when no format is active.
+    #[serde(skip)]
+    raw: String,
     shape_style: String,
 }
 
@@ -427,7 +435,14 @@ struct RecordView {
 /// and the current value.
 struct CellView {
     field_id: i64,
+    /// RAW cell value — what the editable Table input commits.
     value: String,
+    /// Display value (value formatting #77/#78 applied). Equals `value` when the
+    /// column's field object carries no `format` bag.
+    display: String,
+    /// Inline CSS for the cell input (e.g. the value-dependent negative color);
+    /// empty when unstyled.
+    style: String,
 }
 
 #[derive(Template)]
@@ -682,7 +697,7 @@ fn object_view(
     o: &ObjectMeta,
     by_name: &HashMap<String, (i64, String, String, FieldKind)>,
 ) -> ObjectView {
-    let (field, field_id, label, value, field_kind) = resolve_object(o, by_name);
+    let (field, field_id, label, raw_value, field_kind) = resolve_object(o, by_name);
     let shape = o.kind.is_shape();
     // The text slot is only meaningful for `text` objects; fields/shapes carry
     // none, so the renderer never reads a stray content.
@@ -707,13 +722,13 @@ fn object_view(
         Some(kind) => {
             let props = parse_props(o.props.as_deref());
             let spec = props.as_ref().and_then(|v| v.get("format"));
-            let formatted = format::format_value(&value, spec, kind);
+            let formatted = format::format_value(&raw_value, spec, kind);
             if let Some(color) = formatted.color {
                 text_style.push_str(&format!("color:{color};"));
             }
             formatted.text
         }
-        None => value,
+        None => raw_value.clone(),
     };
     ObjectView {
         id: o.id,
@@ -734,6 +749,7 @@ fn object_view(
         text_style,
         label,
         value,
+        raw: raw_value,
         shape_style,
     }
 }
@@ -870,6 +886,45 @@ fn build_list(
     (header, rows, footer)
 }
 
+/// Map each table column to its value-format bag (the `format` sub-object of a
+/// field object's props) drawn from `layout_id`'s objects. Table columns are
+/// field-derived, so a column formats iff the layout holds a field object bound
+/// to it that carries a `format` bag; later objects win on a duplicate binding.
+/// Form/List format per-object via [`object_view`]; this brings Table to parity.
+fn layout_field_formats(
+    sol: &Solution,
+    layout_id: i64,
+    fields: &[FieldMeta],
+) -> HashMap<i64, serde_json::Value> {
+    let by_name: HashMap<String, i64> = fields
+        .iter()
+        .map(|f| (f.name.to_lowercase(), f.id))
+        .collect();
+    let mut map = HashMap::new();
+    let Ok(parts) = sol.parts(layout_id) else {
+        return map;
+    };
+    for p in parts {
+        let Ok(objects) = sol.objects(p.id) else {
+            continue;
+        };
+        for o in objects {
+            let Some(binding) = o.binding.as_deref() else {
+                continue;
+            };
+            let seg = binding.rsplit('.').next().unwrap_or(binding).to_lowercase();
+            let Some(&fid) = by_name.get(&seg) else {
+                continue;
+            };
+            if let Some(fmt) = parse_props(o.props.as_deref()).and_then(|v| v.get("format").cloned())
+            {
+                map.insert(fid, fmt);
+            }
+        }
+    }
+    map
+}
+
 /// Browse a layout. `?view=table|form|list` (frozen #20) picks the renderer;
 /// Table is the field-derived grid, Form/List render the layout's objects.
 async fn browse(
@@ -932,6 +987,7 @@ async fn browse(
         _ => {
             let fields = sol.fields(table.id).unwrap();
             let records = sol.list_records(&table, &fields).unwrap();
+            let formats = layout_field_formats(&sol, layout_id, &fields);
             let (header, footer) = build_bands(&sol, layout_id);
             let tmpl = TableTemplate {
                 chrome,
@@ -952,9 +1008,27 @@ async fn browse(
                         cells: fields
                             .iter()
                             .zip(r.cells)
-                            .map(|(f, value)| CellView {
-                                field_id: f.id,
-                                value,
+                            .map(|(f, value)| {
+                                // Format the DISPLAY value only; the input still
+                                // commits the raw `value` (see _band controller).
+                                let (display, style) = match formats.get(&f.id) {
+                                    Some(spec) => {
+                                        let fmt =
+                                            format::format_value(&value, Some(spec), f.kind);
+                                        let style = fmt
+                                            .color
+                                            .map(|c| format!("color:{c};"))
+                                            .unwrap_or_default();
+                                        (fmt.text, style)
+                                    }
+                                    None => (value.clone(), String::new()),
+                                };
+                                CellView {
+                                    field_id: f.id,
+                                    value,
+                                    display,
+                                    style,
+                                }
                             })
                             .collect(),
                     })
@@ -2010,6 +2084,7 @@ mod tests {
             text_style: String::new(),
             label: format!("Field {field_id}"),
             value: value.to_string(),
+            raw: value.to_string(),
             shape_style: String::new(),
         }
     }
@@ -3371,5 +3446,50 @@ mod tests {
         let canvas = normalize_html(&html[start..end]);
         assert!(canvas.starts_with(r#"<div class="fm-canvas""#) && canvas.ends_with("</div>"));
         assert_or_regen("canvas.parity.html", &canvas);
+    }
+
+    /// Value formatting (#77/#78) must reach ALL Browse views — including Table,
+    /// which renders a field-derived grid that used to bypass the formatter. The
+    /// editable input DISPLAYS the formatted value but carries the RAW value in
+    /// data-raw so committing never writes the formatted string back (#80 guard).
+    #[tokio::test]
+    async fn browse_applies_value_format_in_form_list_and_table() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        let tid = sol
+            .create_table(
+                "Invoices",
+                &[NewField { name: "Total".into(), kind: FieldKind::Number }],
+            )
+            .unwrap();
+        let table = sol.table_by_name("Invoices").unwrap().unwrap();
+        let fields = sol.fields(tid).unwrap();
+        sol.insert_record(&table, &[(&fields[0], "1234.5".into())]).unwrap();
+        // Set a decimal + thousands-separator format on every layout's Total object.
+        sol.app
+            .execute(
+                "UPDATE meta_object SET props=?1 WHERE binding='Invoices.Total'",
+                [r#"{"format":{"mode":"decimal","fixedDecimals":true,"decimalDigits":2,"thousandsSeparator":","}}"#],
+            )
+            .unwrap();
+        let layouts = sol.layouts().unwrap();
+        let by_view = |v: &str| layouts.iter().find(|l| canonical_view(&l.view) == v).map(|l| l.id);
+        let (form, list, table_l) = (
+            by_view("form").unwrap(),
+            by_view("list").unwrap(),
+            by_view("table").unwrap(),
+        );
+        let state = state_for(sol);
+
+        for (label, lid) in [("form", form), ("list", list), ("table", table_l)] {
+            let (status, html) = get_body(state.clone(), &format!("/browse/{lid}")).await;
+            assert_eq!(status, StatusCode::OK, "{label} renders");
+            assert!(html.contains("1,234.50"), "{label} shows the formatted value");
+            // The raw value must ride data-raw (so the editable input commits raw),
+            // not be the visible/committed default.
+            assert!(
+                html.contains(r#"data-raw="1234.5""#),
+                "{label} keeps the raw value in data-raw for safe commit"
+            );
+        }
     }
 }

@@ -458,12 +458,25 @@
     function recordBody(el) {
       var p = new URLSearchParams();
       el.querySelectorAll('input[name], select[name], textarea[name]').forEach(function (i) {
-        p.append(i.name, i.value);
+        // Value formatting (#77/#78): a formatted field's input DISPLAYS the
+        // formatted string but must COMMIT its raw value, tracked in data-raw
+        // (kept in sync as the user types). Non-formatted controls have no
+        // data-raw and commit their value verbatim, exactly as before.
+        p.append(i.name, i.dataset.raw != null ? i.dataset.raw : i.value);
       });
       if (el.dataset.view) p.append('view', el.dataset.view);
       if (el.dataset.rec) p.append('rec', el.dataset.rec);
       return p;
     }
+    // For formatted-field inputs, show the RAW value while editing and restore the
+    // formatted display on a clean blur; keep data-raw current as the user types.
+    document.querySelectorAll('.rec-edit input[data-raw]').forEach(function (i) {
+      i.addEventListener('focus', function () { i.value = i.dataset.raw; });
+      i.addEventListener('input', function () { i.dataset.raw = i.value; i.dataset.dirty = '1'; });
+      i.addEventListener('blur', function () {
+        if (i.dataset.dirty !== '1' && i.dataset.fmt != null) i.value = i.dataset.fmt;
+      });
+    });
     document.querySelectorAll('.rec-edit').forEach(function (el) {
       var open = false;
       function openRec() { if (open) return; open = true; beacon(el.dataset.open); }

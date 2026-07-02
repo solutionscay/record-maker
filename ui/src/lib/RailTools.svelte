@@ -134,7 +134,7 @@
     {/each}
   </div>
   {#if doc.activeTool === 'field'}
-    <label class="le-control le-control-stack">
+    <div class="le-control le-control-stack">
       <span>Field to place</span>
       <FieldSelect
         fields={doc.fields}
@@ -149,9 +149,9 @@
           fieldIds = ids;
           onFieldChange();
         }}
-        title="Field to place; Shift/Ctrl/Cmd-click for multiple"
+        title="Field to place; Shift-click range, Ctrl/Cmd-click individual"
       />
-    </label>
+    </div>
     <label class="le-check">
       <input
         type="checkbox"

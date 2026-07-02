@@ -53,6 +53,7 @@
   let open = $state(false);
   let query = $state('');
   let highlight = $state(0);
+  let rangeAnchorId = $state<number | null>(null);
   let root = $state<HTMLDivElement | null>(null);
   let input = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLUListElement | null>(null);
@@ -87,12 +88,14 @@
     // Highlight the current selection when it survives the (empty) filter.
     const cur = value === null ? -1 : filtered.findIndex((f) => f.id === value);
     highlight = cur >= 0 ? cur : 0;
+    rangeAnchorId = value;
   }
   function close(): void {
     open = false;
   }
   function commit(f: FieldChoice | undefined): void {
     if (!f) return;
+    rangeAnchorId = f.id;
     onselect(f.id);
     close();
   }
@@ -101,13 +104,27 @@
     const next = new Set(values);
     if (next.has(f.id)) next.delete(f.id);
     else next.add(f.id);
+    rangeAnchorId = f.id;
     onselectMany?.([...next]);
   }
-  function wantsMultiToggle(e: KeyboardEvent | MouseEvent): boolean {
-    return multi && (e.shiftKey || e.ctrlKey || e.metaKey);
+  function addRange(f: FieldChoice | undefined): void {
+    if (!f) return;
+    const anchorId = rangeAnchorId ?? f.id;
+    const anchorIndex = filtered.findIndex((field) => field.id === anchorId);
+    const targetIndex = filtered.findIndex((field) => field.id === f.id);
+    if (anchorIndex < 0 || targetIndex < 0) {
+      toggle(f);
+      return;
+    }
+    const [from, to] = anchorIndex <= targetIndex ? [anchorIndex, targetIndex] : [targetIndex, anchorIndex];
+    const next = new Set(values);
+    for (const field of filtered.slice(from, to + 1)) next.add(field.id);
+    rangeAnchorId = f.id;
+    onselectMany?.([...next]);
   }
   function choose(f: FieldChoice | undefined, e: KeyboardEvent | MouseEvent): void {
-    if (wantsMultiToggle(e)) toggle(f);
+    if (multi && e.shiftKey) addRange(f);
+    else if (multi && (e.ctrlKey || e.metaKey)) toggle(f);
     else commit(f);
   }
 

@@ -49,6 +49,10 @@
     }
   }
 
+  function partLabelChars(kind: string): string[] {
+    return [...partLabel(kind)];
+  }
+
   // Stand the interaction layer up once the canvas is in the DOM; tear it down on
   // unmount. moveable + selecto bind to the shared store, not this island.
   let interaction = $state<CanvasInteraction | null>(null);
@@ -146,7 +150,9 @@
               title={`Select ${partLabel(band.part.kind)} band`}
               onclick={(e) => selectPart(band.part.id, e)}
             >
-              {partLabel(band.part.kind)}
+              {#each partLabelChars(band.part.kind) as char}
+                <span>{char}</span>
+              {/each}
             </button>
             <button
               type="button"
@@ -218,12 +224,13 @@
     border-radius: 0;
     background: rgba(0, 0, 0, 0.025);
     color: #9a9aa0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 2px;
     font: 600 9px/1 -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-    letter-spacing: 0.14em;
-    writing-mode: vertical-rl;
-    text-orientation: upright;
     overflow: hidden;
-    white-space: nowrap;
     cursor: pointer;
     pointer-events: auto;
     box-sizing: border-box;

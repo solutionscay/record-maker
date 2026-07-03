@@ -310,6 +310,11 @@ export class CanvasInteraction {
    * selection or geometry changes — e.g. after an undo). No-op during a gesture. */
   refresh(): void {
     this.#updateTarget();
+    // #updateTarget early-returns when the selection set is unchanged, so a
+    // geometry-only change (align/distribute/resize-match, undo of same) would
+    // leave moveable's control box on the old rect. Whenever a target is live,
+    // re-measure it from the (now updated) DOM so the box follows the objects.
+    if (!this.#gesturing && this.#targetIds.size > 0) this.#scheduleRectUpdate();
   }
 
   /** Tell the interaction layer the current canvas zoom (#62), so client→model

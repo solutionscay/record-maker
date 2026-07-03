@@ -304,9 +304,15 @@ export class CanvasInteraction {
       this.#targetKey = String(id);
       this.#targetIds = new Set([id]);
       const guidelines = this.#paintedElements().filter((el) => el !== objEl);
-      this.#moveable.setState({ target: objEl, elementGuidelines: guidelines }, () => {
-        this.#moveable.dragStart(input, objEl);
-      });
+      // Set the target, then start the drag SYNCHRONOUSLY on this same pointerdown.
+      // moveable.dragStart() flushes the just-set target (its internal `$_timer`
+      // guard forceUpdates before triggering) and only fires if `objEl` matches the
+      // live target — so the press latches straight into a drag, one gesture. The
+      // old code ran dragStart inside setState's async callback, a frame late and
+      // past the live pointer stream, so the first press only selected and the user
+      // had to press again to drag.
+      this.#moveable.setState({ target: objEl, elementGuidelines: guidelines });
+      this.#moveable.dragStart(input, objEl);
       e.stop();
     });
 

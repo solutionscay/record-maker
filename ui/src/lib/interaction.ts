@@ -23,6 +23,7 @@ import type { ObjectView } from './model';
 import { GRID, SNAP_THRESHOLD, clampOrigin, elementsToObjectIds, objectIdsInPaintOrder, snapToGrid } from './canvas-edit';
 import { defaultBox, defaultProps, partAtY } from './create';
 import { createObject, deleteObject, setObjectContent, setObjectPart, setObjectProps as persistObjectProps } from './persist';
+import { FIELD_DRAG_MIME } from './dnd';
 import { llog, lerror } from './log';
 
 type DrawTool = Exclude<ToolKind, 'pointer'>;
@@ -113,6 +114,10 @@ export class CanvasInteraction {
   /** Active draw-to-create gesture while a non-pointer tool is armed. */
   #drawing: DrawPlacement | null = null;
   #drawPreview: HTMLElement | null = null;
+  /** Ghost box tracking a field drag-and-drop from the picker (see #onDragOver);
+   * separate from #drawPreview since a drop can land while no tool is armed and
+   * no #drawing gesture is in progress. */
+  #dropPreview: HTMLElement | null = null;
   #resizeStarts = new Map<
     number,
     {
@@ -303,6 +308,12 @@ export class CanvasInteraction {
     this.#stage.addEventListener('click', this.#onClick);
     this.#stage.addEventListener('dblclick', this.#onDoubleClick);
     window.addEventListener('keydown', this.#onKeyDown);
+    // Field drag-and-drop (#79 follow-up) — native HTML5 DnD, not a pointer
+    // gesture, so it coexists with moveable/selecto's own pointer handling
+    // above without fighting over the same events.
+    this.#stage.addEventListener('dragover', this.#onDragOver);
+    this.#stage.addEventListener('dragleave', this.#onDragLeave);
+    this.#stage.addEventListener('drop', this.#onDrop);
     llog('init', 'CanvasInteraction ready', { layoutId, painted: this.#paintedElements().length });
   }
 
@@ -561,6 +572,141 @@ export class CanvasInteraction {
     };
   }
 
+  // ── field drag-and-drop (drag from the field picker onto the canvas) ──────
+  // A second, independent way to place a field object, alongside the draw-tool
+  // gesture above. Deliberately its OWN small pipeline rather than a refactor
+  // of #finishDraw's field branch into a shared helper: the two have different
+  // inputs (a live drag point with no start/end box vs. a completed press-drag
+  // rectangle) and the draw-tool path is exercised by the existing undo/redo +
+  // parity tests, so this stays additive instead of risking that path.
+
+  /** Resolve a client point to "what would placing a field here look like" —
+   * used both to paint the drag preview on every `dragover` and, identically,
+   * to compute the box actually persisted on `drop`. Null when the point isn't
+   * over a part (no canvas under the cursor, or past the last part's row —
+   * partAtY still returns the last part then, so this is really just "no
+   * `.fm-canvas` under the cursor at all"). */
+  #dropTargetFor(clientX: number, clientY: number): { partId: number; partTop: number; partHeight: number; box: { x: number; y: number; w: number; h: number } } | null {
+    const point = this.#canvasPoint(clientX, clientY);
+    if (!point) return null;
+    const where = partAtY(this.#doc.renderModel, point.y);
+    if (!where) return null;
+    const part = this.#doc.getPart(where.partId);
+    if (!part) return null;
+    const size = defaultBox('field');
+    const x = clampOrigin(snapToGrid(point.x));
+    const y = clampOrigin(snapToGrid(where.localY));
+    return {
+      partId: where.partId,
+      partTop: point.y - where.localY,
+      partHeight: part.height,
+      box: { x, y, w: size.w, h: Math.min(size.h, Math.max(1, part.height - y)) },
+    };
+  }
+
+  #onDragOver = (e: DragEvent): void => {
+    if (!e.dataTransfer?.types.includes(FIELD_DRAG_MIME)) return;
+    e.preventDefault(); // required for `drop` to fire on this target at all
+    e.dataTransfer.dropEffect = 'copy';
+    this.#paintDropPreview(this.#dropTargetFor(e.clientX, e.clientY));
+  };
+
+  #onDragLeave = (e: DragEvent): void => {
+    // `dragleave` also fires when moving between child elements WITHIN the
+    // stage (e.g. crossing from the canvas onto a part label); only clear the
+    // preview once the pointer has actually left the stage entirely.
+    const related = e.relatedTarget as Node | null;
+    if (!related || !this.#stage.contains(related)) this.#paintDropPreview(null);
+  };
+
+  #onDrop = (e: DragEvent): void => {
+    this.#paintDropPreview(null);
+    const raw = e.dataTransfer?.getData(FIELD_DRAG_MIME);
+    if (!raw) return; // some other kind of drop (e.g. dragging in browser text) — ignore
+    e.preventDefault();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(parsed) || parsed.length === 0 || !parsed.every((v) => typeof v === 'number')) return;
+    const target = this.#dropTargetFor(e.clientX, e.clientY);
+    if (!target) {
+      llog('place', 'field drop outside any part — ignored', { clientX: e.clientX, clientY: e.clientY });
+      return;
+    }
+    void this.#placeFieldsAt(target, parsed);
+  };
+
+  #paintDropPreview(
+    target: { partTop: number; box: { x: number; y: number; w: number; h: number } } | null,
+  ): void {
+    if (!target) {
+      this.#dropPreview?.remove();
+      this.#dropPreview = null;
+      return;
+    }
+    if (!this.#dropPreview) {
+      this.#dropPreview = document.createElement('div');
+      this.#dropPreview.className = 'le-draw-preview le-draw-field';
+      this.#partOverlay()?.append(this.#dropPreview);
+    }
+    this.#dropPreview.style.left = `${target.box.x}px`;
+    this.#dropPreview.style.top = `${target.partTop + target.box.y}px`;
+    this.#dropPreview.style.width = `${target.box.w}px`;
+    this.#dropPreview.style.height = `${target.box.h}px`;
+  }
+
+  /** Persist the dropped field(s) as one undoable create step, mirroring the
+   * field branch of #finishDraw (same box-per-field stacking, same "select the
+   * placed objects and drop back to the pointer tool" tail). */
+  async #placeFieldsAt(
+    target: { partId: number; partHeight: number; box: { x: number; y: number; w: number; h: number } },
+    fieldIds: number[],
+  ): Promise<void> {
+    if (this.#placing) return;
+    this.#placing = true;
+    try {
+      const { partId, partHeight, box } = target;
+      const rowStep = Math.max(32, box.h + GRID);
+      const batches = await Promise.all(
+        fieldIds.map((fieldId, i) => {
+          const y = Math.min(partHeight - 1, box.y + i * rowStep);
+          return createObject(this.#layoutId, {
+            partId,
+            kind: 'field',
+            x: box.x,
+            y,
+            w: box.w,
+            h: Math.min(box.h, Math.max(1, partHeight - y)),
+            fieldId,
+            createLabel: this.#doc.toolCreateLabel,
+            rec: this.#doc.rec,
+          });
+        }),
+      );
+      const views = batches.flat();
+      llog('create', 'server created object(s) via drop', {
+        objects: views.map((v) => ({ id: v.id, kind: v.kind, x: v.x, y: v.y, w: v.w, h: v.h })),
+      });
+      for (const v of views) this.#doc.addObject(v, partId);
+      this.#doc.mark();
+      this.#doc.setTool('pointer');
+      const placed = views.at(-1);
+      if (placed) {
+        this.#doc.selectOnly(views.map((v) => v.id));
+        this.#hoverId = placed.id;
+      }
+    } catch (e) {
+      lerror('place', 'drop create failed', e);
+      this.#doc.setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      this.#placing = false;
+      if (this.#doc.activeTool !== 'pointer') this.#doc.setTool('pointer');
+    }
+  }
+
   destroy(): void {
     this.#stage.removeEventListener('pointermove', this.#onPointerMove);
     this.#stage.removeEventListener('pointerleave', this.#onPointerLeave);
@@ -571,7 +717,11 @@ export class CanvasInteraction {
     window.removeEventListener('pointerup', this.#onDrawUp);
     window.removeEventListener('mousemove', this.#onDrawMove);
     window.removeEventListener('mouseup', this.#onDrawUp);
+    this.#stage.removeEventListener('dragover', this.#onDragOver);
+    this.#stage.removeEventListener('dragleave', this.#onDragLeave);
+    this.#stage.removeEventListener('drop', this.#onDrop);
     this.#drawPreview?.remove();
+    this.#dropPreview?.remove();
     this.#hoverOutline?.remove();
     this.#textEditorCleanup?.();
     this.#textEditor?.remove();
@@ -674,6 +824,19 @@ export class CanvasInteraction {
       return;
     }
 
+    // Cmd/Ctrl+D duplicates the current selection (#48). Unlike Delete/Backspace
+    // this backs off in an editable field: Ctrl+D is also Cocoa's native
+    // "delete forward character" text-editing binding on macOS, and browsers use
+    // it for "bookmark this page" — preventDefault only once we're actually
+    // going to act, so neither gets clobbered when it wouldn't do anything here.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'd') {
+      if (inEditable) return;
+      if (this.#doc.selection.size === 0 || this.#placing) return;
+      e.preventDefault();
+      void this.#duplicateSelectedObjects();
+      return;
+    }
+
     if (e.key !== 'Delete' && e.key !== 'Backspace') return;
     if (e.altKey || e.ctrlKey || e.metaKey) return;
     if (inEditable) return;
@@ -709,6 +872,70 @@ export class CanvasInteraction {
       this.#doc.setError(e instanceof Error ? e.message : String(e));
     } finally {
       this.#deleting = false;
+    }
+  }
+
+  /** Duplicate the current selection (#48), offset by one placement step so the
+   * copies land visibly next to the originals rather than exactly on top of
+   * them, then select the copies (not the originals) — the usual "duplicate
+   * leaves you holding the new one" convention. One create call per selected
+   * object, each an exact clone of its geometry/binding/content/appearance;
+   * `createLabel: false` throughout so duplicating a field VALUE never conjures
+   * an extra label that wasn't already there — duplicate what's selected, not
+   * more. NOTE: doesn't carry over a per-object read-only flag (there's no slot
+   * for it in the create request); low-priority gap since nothing in the editor
+   * exposes setting that flag yet (see field-editability-in-layout-mode). */
+  async #duplicateSelectedObjects(): Promise<void> {
+    const ids = new Set(this.#doc.selection);
+    if (ids.size === 0 || this.#placing) return;
+    // ObjectView (unlike the store's own ObjectDoc) carries the resolved
+    // fieldId a duplicate needs, but not which part it's in — that's implicit
+    // in which PartView it's nested under in renderModel, so pair the two here.
+    const found: { partId: number; view: ObjectView }[] = [];
+    for (const part of this.#doc.renderModel.parts) {
+      for (const view of part.objects) {
+        if (ids.has(view.id)) found.push({ partId: part.id, view });
+      }
+    }
+    if (found.length === 0) return;
+    this.#placing = true;
+    const offset = GRID * 2;
+    try {
+      const created = await Promise.all(
+        found.map(async ({ partId, view }) => {
+          const views = await createObject(this.#layoutId, {
+            partId,
+            kind: view.kind,
+            x: clampOrigin(snapToGrid(view.x + offset)),
+            y: clampOrigin(snapToGrid(view.y + offset)),
+            w: view.w,
+            h: view.h,
+            rec: this.#doc.rec,
+            fieldId: view.fieldId,
+            createLabel: false,
+            content: view.kind === 'text' ? view.content : null,
+            props: view.props ? parseProps(view.props) : null,
+          });
+          return { partId, views };
+        }),
+      );
+      llog('create', 'duplicated object(s)', {
+        from: [...ids],
+        created: created.flatMap((c) => c.views.map((v) => v.id)),
+      });
+      for (const { partId, views } of created) {
+        for (const v of views) this.#doc.addObject(v, partId);
+      }
+      this.#doc.mark();
+      const newIds = created.flatMap((c) => c.views.map((v) => v.id));
+      this.#doc.selectOnly(newIds);
+      const placed = newIds.at(-1);
+      if (placed !== undefined) this.#hoverId = placed;
+    } catch (e) {
+      lerror('persist', 'failed to duplicate selected object(s)', e);
+      this.#doc.setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      this.#placing = false;
     }
   }
 

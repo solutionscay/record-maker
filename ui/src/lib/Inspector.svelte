@@ -918,6 +918,17 @@
       {/if}
     {/if}
   {:else if selected}
+    <section class="insp-sec">
+      <span class="side-label">Arrange</span>
+      <div class="fmt-sub">Order</div>
+      <div class="arr-grid">
+        <button type="button" class="arr-btn" title="Bring to front" onclick={() => zorder('front')}><Icon name="z-front" /></button>
+        <button type="button" class="arr-btn" title="Bring forward" onclick={() => zorder('forward')}><Icon name="z-forward" /></button>
+        <button type="button" class="arr-btn" title="Send backward" onclick={() => zorder('backward')}><Icon name="z-backward" /></button>
+        <button type="button" class="arr-btn" title="Send to back" onclick={() => zorder('back')}><Icon name="z-back" /></button>
+      </div>
+    </section>
+    <div class="insp-div"></div>
     {#if selected.kind === 'field' || selected.kind === 'text'}
       <section class="insp-sec">
         <span class="side-label">{selected.kind === 'text' ? 'Text' : 'Binding'}</span>

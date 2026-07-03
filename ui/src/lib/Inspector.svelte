@@ -5,7 +5,7 @@
   // canvas's EditorDoc store with the rail-tools island. Like the rail, it
   // reads/writes ONLY through the store + persist helpers; it never touches the
   // parity-checked canvas DOM. Styling follows the "modern Mac" design ref.
-  import type { EditorDoc } from './doc.svelte';
+  import type { EditorDoc, ObjectDoc } from './doc.svelte';
   import {
     deleteObject as persistDeleteObject,
     deletePart as persistDeletePart,
@@ -50,11 +50,38 @@
   let selectedId = $derived(selectedIds[0] ?? null);
   let selected = $derived(selectedId === null ? undefined : doc.getObject(selectedId));
   let selectedProps = $derived(parseProps(selected?.props ?? ''));
-  let canFillLine = $derived(
-    !!selected && (selected.kind === 'field' || selected.kind === 'rect' || selected.kind === 'ellipse' || selected.kind === 'line'),
-  );
-  let canTextFormat = $derived(!!selected && (selected.kind === 'field' || selected.kind === 'text'));
+  // Per-object capability predicates (kind-based) so single- and multi-select share
+  // exactly one definition of "can this kind be filled / text-formatted".
+  let canFillLine = $derived(!!selected && kindCanFillLine(selected.kind));
+  let canTextFormat = $derived(!!selected && kindCanTextFormat(selected.kind));
   let selectedBindingFieldId = $derived(selected?.kind === 'field' ? fieldIdForBinding(selected.binding) : null);
+
+  // ── Multi-select derived state (#82) ──────────────────────────────────────
+  // A control appears only when EVERY selected object shares the capability (not
+  // just the first one), and each control reports a mixed-value state when the
+  // selected objects disagree. Writes fan out to all of them as one undo step.
+  let selectedObjects = $derived(
+    selectedIds.map((id) => doc.getObject(id)).filter((o): o is Readonly<ObjectDoc> => !!o),
+  );
+  let allCanFillLine = $derived(
+    selectedObjects.length > 0 && selectedObjects.every((o) => kindCanFillLine(o.kind)),
+  );
+  let allCanTextFormat = $derived(
+    selectedObjects.length > 0 && selectedObjects.every((o) => kindCanTextFormat(o.kind)),
+  );
+  let allText = $derived(selectedObjects.length > 0 && selectedObjects.every((o) => o.kind === 'text'));
+
+  // Shared style/text attributes across the whole selection, each as {mixed, value}.
+  let mFill = $derived(sharedValue((p) => colorValue(p.fill, '#f7f8fa')));
+  let mStrokeWidth = $derived(sharedValue((p) => numberValue(p.strokeWidth, 1)));
+  let mStroke = $derived(sharedValue((p) => colorValue(p.stroke, '#d3d8de')));
+  let mFontSize = $derived(sharedValue((p) => numberValue(p.fontSize, 13)));
+  let mBold = $derived(sharedValue((p) => boolValue(p.bold)));
+  let mItalic = $derived(sharedValue((p) => boolValue(p.italic)));
+  let mUnderline = $derived(sharedValue((p) => boolValue(p.underline)));
+  let mAlign = $derived(sharedValue((p) => alignValue(p.align)));
+  let mTextColor = $derived(sharedValue((p) => colorValue(p.textColor, '#1b1b1f')));
+  let mTextBg = $derived(sharedValue((p) => colorValue(p.fill, '#ffffff')));
 
   // ── Value-format (#77 number/Boolean, #78 date/time) ──────────────────────
   // Contextual by the bound field's kind (resolved through the binding, #79/#76).
@@ -162,6 +189,25 @@
     const fieldName = binding.split('.').at(-1)?.toLowerCase() ?? '';
     const found = doc.fields.find((f) => f.name.toLowerCase() === fieldName);
     return found?.id ?? null;
+  }
+
+  // Kind-based capability predicates — the single source both the single-object
+  // (`canFillLine`/`canTextFormat`) and the whole-selection (`allCan*`) gates use.
+  function kindCanFillLine(kind: string): boolean {
+    return kind === 'field' || kind === 'rect' || kind === 'ellipse' || kind === 'line';
+  }
+  function kindCanTextFormat(kind: string): boolean {
+    return kind === 'field' || kind === 'text';
+  }
+
+  /** Resolve one attribute across the whole selection into `{ mixed, value }`:
+   * `mixed` is true when the selected objects disagree, and `value` is the first
+   * object's resolved value (the control's shown value when not mixed). Reads each
+   * object's props bag through the same coercers as the single-object controls. */
+  function sharedValue<T>(resolve: (props: Record<string, unknown>) => T): { mixed: boolean; value: T } {
+    const vals = selectedObjects.map((o) => resolve(parseProps(o.props)));
+    const mixed = vals.some((v) => v !== vals[0]);
+    return { mixed, value: vals[0] };
   }
 
   function parseProps(raw: string): Record<string, unknown> {
@@ -286,6 +332,39 @@
       doc.setObjectStyles(selectedId, styles);
     } catch (e) {
       lerror('persist', 'set style failed', e);
+      doc.setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** Multi-select generalization of `setStyle` (#82): write one style/text key to
+   * EVERY selected object as a SINGLE undo step. Each object's own props bag is
+   * merged optimistically (unchanged objects produce no diff), the whole batch is
+   * sealed with one `doc.mark()`, then persisted in parallel so each object's
+   * server-derived style refreshes. Callers gate the control by shared capability,
+   * so the key already applies to all selected objects. */
+  async function setStyleMany(key: string, value: string | number | boolean): Promise<void> {
+    const ids = selectedIds;
+    if (ids.length === 0) return;
+    llog('persist', 'inspector: set style (many)', { ids, key, value });
+    // Optimistic + undoable: apply to each object, accumulating into the open group.
+    const nexts = new Map<number, Record<string, unknown>>();
+    for (const id of ids) {
+      const o = doc.getObject(id);
+      if (!o) continue;
+      const next = { ...parseProps(o.props), [key]: value };
+      nexts.set(id, next);
+      doc.setObjectProps(id, JSON.stringify(next));
+    }
+    doc.mark(); // one atomic undo step for the whole batch
+    try {
+      await Promise.all(
+        [...nexts].map(async ([id, next]) => {
+          const styles = await persistProps(layoutId, id, next);
+          doc.setObjectStyles(id, styles);
+        }),
+      );
+    } catch (e) {
+      lerror('persist', 'set style (many) failed', e);
       doc.setError(e instanceof Error ? e.message : String(e));
     }
   }
@@ -517,7 +596,134 @@
 
 <div class="insp-body">
   {#if hasMultipleSelection}
-    <p class="insp-empty">Multiple items selected.</p>
+    {#if allCanFillLine || allCanTextFormat}
+      {#if allCanFillLine}
+        <section class="insp-sec">
+          <span class="side-label">Style</span>
+          <div class="insp-row">
+            <span>Fill</span>
+            <div class="insp-ctls">
+              {#if mFill.mixed}<span class="mixed-tag">Mixed</span>{/if}
+              <input
+                class="swatch"
+                type="color"
+                value={mFill.value}
+                onchange={(e) => setStyleMany('fill', e.currentTarget.value)}
+              />
+            </div>
+          </div>
+          <div class="insp-row">
+            <span>Border</span>
+            <div class="insp-ctls">
+              <input
+                class="ctl-num"
+                type="number"
+                min="0"
+                max="12"
+                placeholder={mStrokeWidth.mixed ? 'Mixed' : ''}
+                value={mStrokeWidth.mixed ? '' : mStrokeWidth.value}
+                onchange={(e) => setStyleMany('strokeWidth', Number(e.currentTarget.value))}
+              />
+              {#if mStroke.mixed}<span class="mixed-tag">Mixed</span>{/if}
+              <input
+                class="swatch"
+                type="color"
+                value={mStroke.value}
+                onchange={(e) => setStyleMany('stroke', e.currentTarget.value)}
+              />
+            </div>
+          </div>
+        </section>
+      {/if}
+
+      {#if allCanTextFormat}
+        {#if allCanFillLine}<div class="insp-div"></div>{/if}
+        <section class="insp-sec">
+          <span class="side-label">Text</span>
+          <div class="insp-row">
+            <span>Size</span>
+            <input
+              class="ctl-num"
+              type="number"
+              min="6"
+              max="96"
+              placeholder={mFontSize.mixed ? 'Mixed' : ''}
+              value={mFontSize.mixed ? '' : mFontSize.value}
+              onchange={(e) => setStyleMany('fontSize', Number(e.currentTarget.value))}
+            />
+          </div>
+          <div class="seg-row">
+            <div class="seg">
+              <button
+                type="button"
+                class="seg-btn"
+                class:active={!mBold.mixed && mBold.value}
+                class:mixed={mBold.mixed}
+                title="Bold"
+                onclick={() => setStyleMany('bold', mBold.mixed ? true : !mBold.value)}
+              ><b>B</b></button>
+              <button
+                type="button"
+                class="seg-btn"
+                class:active={!mItalic.mixed && mItalic.value}
+                class:mixed={mItalic.mixed}
+                title="Italic"
+                onclick={() => setStyleMany('italic', mItalic.mixed ? true : !mItalic.value)}
+              ><i>I</i></button>
+              <button
+                type="button"
+                class="seg-btn"
+                class:active={!mUnderline.mixed && mUnderline.value}
+                class:mixed={mUnderline.mixed}
+                title="Underline"
+                onclick={() => setStyleMany('underline', mUnderline.mixed ? true : !mUnderline.value)}
+              ><u>U</u></button>
+            </div>
+            <div class="seg">
+              {#each ['left', 'center', 'right'] as a}
+                <button
+                  type="button"
+                  class="seg-btn"
+                  class:active={!mAlign.mixed && mAlign.value === a}
+                  title={`Align ${a}`}
+                  onclick={() => setStyleMany('align', a)}
+                ><Icon name={`align-${a}`} /></button>
+              {/each}
+            </div>
+          </div>
+          <div class="insp-row">
+            <span>Color</span>
+            <div class="insp-ctls">
+              {#if mTextColor.mixed}<span class="mixed-tag">Mixed</span>{/if}
+              <input
+                class="swatch"
+                type="color"
+                value={mTextColor.value}
+                onchange={(e) => setStyleMany('textColor', e.currentTarget.value)}
+              />
+            </div>
+          </div>
+          {#if allText}
+            <!-- Background fill is a text-object attribute (Issue 7); shown only when
+                 every selected object is a text label. -->
+            <div class="insp-row">
+              <span>Background</span>
+              <div class="insp-ctls">
+                {#if mTextBg.mixed}<span class="mixed-tag">Mixed</span>{/if}
+                <input
+                  class="swatch"
+                  type="color"
+                  value={mTextBg.value}
+                  onchange={(e) => setStyleMany('fill', e.currentTarget.value)}
+                />
+              </div>
+            </div>
+          {/if}
+        </section>
+      {/if}
+    {:else}
+      <p class="insp-empty">The selected objects share no editable attributes.</p>
+    {/if}
   {:else if selected}
     {#if selected.kind === 'field' || selected.kind === 'text'}
       <section class="insp-sec">
@@ -1435,6 +1641,22 @@
     color: var(--rm-text);
     font-weight: 600;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.14);
+  }
+  /* A mixed toggle across a multi-selection (#82): neither on nor off — a dashed
+     outline signals the indeterminate state without claiming a value. */
+  .seg-btn.mixed {
+    outline: 1px dashed var(--rm-border-strong);
+    outline-offset: -3px;
+  }
+  /* "Mixed" pill shown beside a control when the selection's values disagree (#82). */
+  .mixed-tag {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--rm-text-dim);
+    padding: 2px 7px;
+    border-radius: 5px;
+    background: var(--rm-segment-track);
   }
   /* Pinned delete footer. */
   .insp-foot {

@@ -263,12 +263,12 @@
           </form>
           {% match nav.current_id %}
           {% when Some with (cid) %}
-          <form class="inline" method="post" action="/browse/{{ nav.layout_id }}/{{ cid }}/delete"
+          <form id="rm-delete-record" class="inline" method="post" action="/browse/{{ nav.layout_id }}/{{ cid }}/delete"
                 data-confirm data-confirm-title="Delete record" data-confirm-ok="Delete" data-confirm-danger
                 data-confirm-message="Delete record {{ nav.current }} of {{ nav.total }}? This cannot be undone.">
             <input type="hidden" name="view" value="{{ nav.view }}">
             <input type="hidden" name="rec" value="{{ nav.current }}">
-            <button type="submit" class="act" title="Delete the current record"><svg class="icon"><use href="#icon-delete"></use></svg>Delete</button>
+            <button type="submit" class="act" title="Delete the current record (Ctrl/⌘ E)"><svg class="icon"><use href="#icon-delete"></use></svg>Delete</button>
           </form>
           {% when None %}
           <button type="button" class="act" disabled title="No record to delete"><svg class="icon"><use href="#icon-delete"></use></svg>Delete</button>
@@ -529,6 +529,19 @@
         if (!newForm) return;
         e.preventDefault();
         newForm.requestSubmit ? newForm.requestSubmit() : newForm.submit();
+        return;
+      }
+      // Ctrl/⌘ E — delete the current record (Browse only; present when a record
+      // exists). Routed through requestSubmit so it fires the `submit` event the
+      // data-confirm dialog intercepts — the "cannot be undone" prompt appears.
+      // Never form.submit() here: that skips the submit event and would delete
+      // WITHOUT confirmation; the button click fallback keeps the prompt too.
+      if (k === 'e') {
+        var delForm = document.getElementById('rm-delete-record');
+        if (!delForm) return;
+        e.preventDefault();
+        if (delForm.requestSubmit) delForm.requestSubmit();
+        else { var delBtn = delForm.querySelector('button[type="submit"]'); if (delBtn) delBtn.click(); }
         return;
       }
       if (k !== 'l' && k !== 'b') return;

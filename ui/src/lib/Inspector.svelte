@@ -15,6 +15,7 @@
     setObjectGeometry as persistGeometry,
     setObjectProps as persistProps,
     setObjectReadOnly as persistReadOnly,
+    setObjectsZ as persistObjectsZ,
     setPartHeight as persistPartHeight,
     setPartKind as persistPartKind,
     setPartProps as persistPartProps,
@@ -70,6 +71,13 @@
     selectedObjects.length > 0 && selectedObjects.every((o) => kindCanTextFormat(o.kind)),
   );
   let allText = $derived(selectedObjects.length > 0 && selectedObjects.every((o) => o.kind === 'text'));
+
+  // Arrange gating (#83): align/z-order need ≥2 (the multi-panel is already ≥2);
+  // distribute needs ≥3; resize-to-match needs ≥2 objects that aren't lines (a
+  // line's w/h encode its direction, so matching size would distort it).
+  let canDistribute = $derived(selectedIds.length >= 3);
+  let resizableCount = $derived(selectedObjects.filter((o) => o.kind !== 'line').length);
+  let canResizeMatch = $derived(resizableCount >= 2);
 
   // Shared style/text attributes across the whole selection, each as {mixed, value}.
   let mFill = $derived(sharedValue((p) => colorValue(p.fill, '#f7f8fa')));
@@ -369,6 +377,166 @@
     }
   }
 
+  // ── Arrange: align / distribute / resize-to-match / z-order (#83) ─────────
+  // All align/distribute/resize edits are pure per-object geometry writes,
+  // batched into a SINGLE undo step (mirrors setStyleMany over the geometry path).
+  // z-order rewrites the `z` prop instead; it reaches the DOM straight from the
+  // document `z` (Band.svelte), so no server style refresh is needed either way.
+
+  type Geom = { x: number; y: number; w: number; h: number };
+
+  /** Apply a batch of absolute geometries as one undo step, then persist each in
+   * parallel (per-object endpoint, as #83 specifies). No-op writes are skipped by
+   * the store's diff, and only changed objects are passed in by the callers. */
+  async function applyGeometryMany(geoms: Map<number, Geom>): Promise<void> {
+    if (geoms.size === 0) return;
+    llog('persist', 'inspector: arrange geometry', { ids: [...geoms.keys()] });
+    for (const [id, g] of geoms) doc.setObjectGeometry(id, g);
+    doc.mark(); // one atomic undo step for the whole align/distribute action
+    try {
+      await Promise.all([...geoms].map(([id, g]) => persistGeometry(layoutId, id, g)));
+    } catch (e) {
+      lerror('persist', 'arrange geometry failed', e);
+      doc.setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** The union bounding box of the current selection (the v1 reference frame). */
+  function selectionBounds(): { minX: number; minY: number; maxX: number; maxY: number; cx: number; cy: number } {
+    const os = selectedObjects;
+    const minX = Math.min(...os.map((o) => o.x));
+    const minY = Math.min(...os.map((o) => o.y));
+    const maxX = Math.max(...os.map((o) => o.x + o.w));
+    const maxY = Math.max(...os.map((o) => o.y + o.h));
+    return { minX, minY, maxX, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
+  }
+
+  type AlignEdge = 'left' | 'hcenter' | 'right' | 'top' | 'vmiddle' | 'bottom';
+
+  /** Align every selected object to the selection bounding box. Only x/y move —
+   * w/h (and a line's angle/length) are untouched, so lines never distort. */
+  function align(edge: AlignEdge): void {
+    if (selectedObjects.length < 2) return;
+    const b = selectionBounds();
+    const geoms = new Map<number, Geom>();
+    for (const o of selectedObjects) {
+      let x = o.x;
+      let y = o.y;
+      switch (edge) {
+        case 'left': x = b.minX; break;
+        case 'right': x = b.maxX - o.w; break;
+        case 'hcenter': x = Math.round(b.cx - o.w / 2); break;
+        case 'top': y = b.minY; break;
+        case 'bottom': y = b.maxY - o.h; break;
+        case 'vmiddle': y = Math.round(b.cy - o.h / 2); break;
+      }
+      x = Math.max(0, x);
+      y = Math.max(0, y);
+      if (x !== o.x || y !== o.y) geoms.set(o.id, { x, y, w: o.w, h: o.h });
+    }
+    void applyGeometryMany(geoms);
+  }
+
+  /** Distribute with equal gaps between adjacent edges along one axis (#83, locked
+   * decision). Outermost objects stay put; interior objects move so the empty space
+   * between neighbours is equal. Needs ≥3 objects. */
+  function distribute(axis: 'h' | 'v'): void {
+    const os = selectedObjects.slice();
+    if (os.length < 3) return;
+    const geoms = new Map<number, Geom>();
+    if (axis === 'h') {
+      const sorted = os.sort((a, b) => a.x - b.x || a.id - b.id);
+      const left = sorted[0].x;
+      const right = sorted[sorted.length - 1].x + sorted[sorted.length - 1].w;
+      const sumW = sorted.reduce((s, o) => s + o.w, 0);
+      const gap = (right - left - sumW) / (sorted.length - 1);
+      let cursor = left;
+      for (const o of sorted) {
+        const nx = Math.max(0, Math.round(cursor));
+        if (nx !== o.x) geoms.set(o.id, { x: nx, y: o.y, w: o.w, h: o.h });
+        cursor += o.w + gap;
+      }
+    } else {
+      const sorted = os.sort((a, b) => a.y - b.y || a.id - b.id);
+      const top = sorted[0].y;
+      const bottom = sorted[sorted.length - 1].y + sorted[sorted.length - 1].h;
+      const sumH = sorted.reduce((s, o) => s + o.h, 0);
+      const gap = (bottom - top - sumH) / (sorted.length - 1);
+      let cursor = top;
+      for (const o of sorted) {
+        const ny = Math.max(0, Math.round(cursor));
+        if (ny !== o.y) geoms.set(o.id, { x: o.x, y: ny, w: o.w, h: o.h });
+        cursor += o.h + gap;
+      }
+    }
+    void applyGeometryMany(geoms);
+  }
+
+  /** Resize selected objects to the largest width/height/both among them. Lines are
+   * excluded (their w/h encode direction); needs ≥2 non-line objects. */
+  function resizeMatch(dim: 'w' | 'h' | 'both'): void {
+    const targets = selectedObjects.filter((o) => o.kind !== 'line');
+    if (targets.length < 2) return;
+    const w = Math.max(...targets.map((o) => o.w));
+    const h = Math.max(...targets.map((o) => o.h));
+    const geoms = new Map<number, Geom>();
+    for (const o of targets) {
+      const nw = dim === 'w' || dim === 'both' ? w : o.w;
+      const nh = dim === 'h' || dim === 'both' ? h : o.h;
+      if (nw !== o.w || nh !== o.h) geoms.set(o.id, { x: o.x, y: o.y, w: nw, h: nh });
+    }
+    void applyGeometryMany(geoms);
+  }
+
+  type ZCmd = 'front' | 'back' | 'forward' | 'backward';
+
+  /** Reorder a part's object ids for one z-command, preserving the selection's own
+   * relative order when it moves as a block. `ids` is back→front; the result is the
+   * new back→front order (index becomes the densified `z`). */
+  function reorderZ(ids: number[], sel: Set<number>, cmd: ZCmd): number[] {
+    const isSel = (id: number): boolean => sel.has(id);
+    if (cmd === 'front') return [...ids.filter((id) => !isSel(id)), ...ids.filter((id) => isSel(id))];
+    if (cmd === 'back') return [...ids.filter((id) => isSel(id)), ...ids.filter((id) => !isSel(id))];
+    const a = ids.slice();
+    if (cmd === 'forward') {
+      // Shift each selected one step toward the front (higher index), as a block.
+      for (let i = a.length - 2; i >= 0; i--) if (isSel(a[i]) && !isSel(a[i + 1])) [a[i], a[i + 1]] = [a[i + 1], a[i]];
+    } else {
+      for (let i = 1; i < a.length; i++) if (isSel(a[i]) && !isSel(a[i - 1])) [a[i], a[i - 1]] = [a[i - 1], a[i]];
+    }
+    return a;
+  }
+
+  /** Rewrite the stacking order of every part that holds a selected object, then
+   * persist the changed `z` values as ONE undo step. z-order is per-part (paint
+   * order is `(z, id)` within a band), so a selection spanning bands reorders each
+   * independently. */
+  async function zorder(cmd: ZCmd): Promise<void> {
+    if (selectedIds.length === 0) return;
+    const sel = new Set(selectedIds);
+    const zmap = new Map<number, number>();
+    for (const part of doc.renderModel.parts) {
+      const ids = part.objects.map((o) => o.id); // already back→front by (z, id)
+      if (!ids.some((id) => sel.has(id))) continue;
+      reorderZ(ids, sel, cmd).forEach((id, i) => zmap.set(id, i));
+    }
+    // Densifying z touches non-selected objects too; keep only real changes.
+    const changed = [...zmap].filter(([id, z]) => {
+      const o = doc.getObject(id);
+      return o !== undefined && o.z !== z;
+    });
+    if (changed.length === 0) return;
+    llog('persist', 'inspector: z-order', { cmd, changed });
+    for (const [id, z] of changed) doc.setProp(id, 'z', z);
+    doc.mark(); // one atomic undo step for the whole restack
+    try {
+      await persistObjectsZ(layoutId, changed.map(([id, z]) => ({ id, z })));
+    } catch (e) {
+      lerror('persist', 'z-order failed', e);
+      doc.setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   async function setLineAngle(value: number): Promise<void> {
     if (selectedId === null || selected?.kind !== 'line') return;
     const angle = normalizeAngle(value);
@@ -596,7 +764,34 @@
 
 <div class="insp-body">
   {#if hasMultipleSelection}
+    <section class="insp-sec">
+      <span class="side-label">Arrange</span>
+      <div class="fmt-sub">Align</div>
+      <div class="arr-grid">
+        <button type="button" class="arr-btn" title="Align left edges" onclick={() => align('left')}><Icon name="obj-align-left" /></button>
+        <button type="button" class="arr-btn" title="Align horizontal centers" onclick={() => align('hcenter')}><Icon name="obj-align-hcenter" /></button>
+        <button type="button" class="arr-btn" title="Align right edges" onclick={() => align('right')}><Icon name="obj-align-right" /></button>
+        <button type="button" class="arr-btn" title="Align top edges" onclick={() => align('top')}><Icon name="obj-align-top" /></button>
+        <button type="button" class="arr-btn" title="Align vertical middles" onclick={() => align('vmiddle')}><Icon name="obj-align-vmiddle" /></button>
+        <button type="button" class="arr-btn" title="Align bottom edges" onclick={() => align('bottom')}><Icon name="obj-align-bottom" /></button>
+      </div>
+      <div class="fmt-sub">Distribute &amp; resize</div>
+      <div class="arr-grid">
+        <button type="button" class="arr-btn" title="Distribute horizontally (equal gaps)" disabled={!canDistribute} onclick={() => distribute('h')}><Icon name="obj-distribute-h" /></button>
+        <button type="button" class="arr-btn" title="Distribute vertically (equal gaps)" disabled={!canDistribute} onclick={() => distribute('v')}><Icon name="obj-distribute-v" /></button>
+        <button type="button" class="arr-btn" title="Match width (widest)" disabled={!canResizeMatch} onclick={() => resizeMatch('w')}><Icon name="obj-same-width" /></button>
+        <button type="button" class="arr-btn" title="Match height (tallest)" disabled={!canResizeMatch} onclick={() => resizeMatch('h')}><Icon name="obj-same-height" /></button>
+      </div>
+      <div class="fmt-sub">Order</div>
+      <div class="arr-grid">
+        <button type="button" class="arr-btn" title="Bring to front" onclick={() => zorder('front')}><Icon name="z-front" /></button>
+        <button type="button" class="arr-btn" title="Bring forward" onclick={() => zorder('forward')}><Icon name="z-forward" /></button>
+        <button type="button" class="arr-btn" title="Send backward" onclick={() => zorder('backward')}><Icon name="z-backward" /></button>
+        <button type="button" class="arr-btn" title="Send to back" onclick={() => zorder('back')}><Icon name="z-back" /></button>
+      </div>
+    </section>
     {#if allCanFillLine || allCanTextFormat}
+      <div class="insp-div"></div>
       {#if allCanFillLine}
         <section class="insp-sec">
           <span class="side-label">Style</span>
@@ -721,8 +916,6 @@
           {/if}
         </section>
       {/if}
-    {:else}
-      <p class="insp-empty">The selected objects share no editable attributes.</p>
     {/if}
   {:else if selected}
     {#if selected.kind === 'field' || selected.kind === 'text'}
@@ -1550,6 +1743,34 @@
     background: #f0f0f2;
   }
   .ord-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  /* Arrange panel (#83): wrapping grids of icon buttons for align / distribute /
+     resize-to-match / z-order. */
+  .arr-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .arr-btn {
+    width: 34px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0.5px solid var(--rm-border);
+    border-radius: 7px;
+    background: var(--rm-control-bg);
+    color: var(--rm-text);
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  }
+  .arr-btn:hover:not(:disabled) {
+    background: #f0f0f2;
+  }
+  .arr-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }

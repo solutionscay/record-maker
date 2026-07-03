@@ -133,6 +133,23 @@ export async function setObjectGeometry(
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
 }
 
+/** Batch-persist objects' stacking order (#83 Arrange z-order). The panel
+ * re-densifies a part's `z` after a Bring-to-Front / Send-to-Back / step command
+ * and POSTs `[{id,z}, …]`; the server writes them in one transaction, scoped to
+ * the layout. No body needed on success (the server returns a count, which the
+ * store doesn't consume — z reaches the DOM straight from the document `z`). */
+export async function setObjectsZ(
+  layoutId: string,
+  items: { id: number; z: number }[],
+): Promise<void> {
+  const r = await fetch(`/design/${layoutId}/z`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(items),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+}
+
 /** Delete an object (the undo of a create / the Create-zone delete). */
 export async function deleteObject(layoutId: string, id: number): Promise<void> {
   const r = await fetch(`/design/${layoutId}/object/${id}/delete`, { method: 'POST' });

@@ -404,6 +404,28 @@ impl Solution {
         Ok(updated)
     }
 
+    /// Persist several objects' stacking order (`z`) atomically (#83 Arrange
+    /// panel). Align/distribute never touch `z`; only the explicit Bring-to-Front
+    /// / Send-to-Back / Bring-Forward / Send-Backward commands rewrite it, so the
+    /// canvas POSTs the whole part's re-densified `[(id, z)]` in one call. Each
+    /// UPDATE is layout-scoped like [`Solution::set_objects_geometry`], so
+    /// foreign/unknown ids are no-ops. Returns the total number of rows updated.
+    pub fn set_objects_z(&mut self, layout_id: i64, items: &[(i64, i64)]) -> Result<usize> {
+        let tx = self.app.transaction()?;
+        let mut updated = 0usize;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE meta_object SET z=?1 \
+                 WHERE id=?2 AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?3)",
+            )?;
+            for &(id, z) in items {
+                updated += stmt.execute(params![z, id, layout_id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
+
     /// Insert one object on a part of `layout_id` (#48). **Layout-scoped**: the
     /// part must belong to the layout, otherwise this is a no-op returning `None`
     /// (so a stale/forged part id can't graft an object onto a foreign layout,
@@ -1243,6 +1265,47 @@ mod tests {
             ),
             (10, 20)
         );
+    }
+
+    #[test]
+    fn set_objects_z_commits_group_atomically_and_scoped() {
+        // #83 z-order: a Bring-to-Front/Send-to-Back re-densifies a part's stacking
+        // order and persists every changed z in one transaction; foreign/unknown ids
+        // are skipped and the count reflects only real updates.
+        let mut s = Solution::open_in_memory().unwrap();
+        s.create_table(
+            "Customers",
+            &[
+                NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                },
+                NewField {
+                    name: "Email".into(),
+                    kind: FieldKind::Text,
+                },
+            ],
+        )
+        .unwrap();
+        let lay = s.layouts().unwrap()[0].clone();
+        let part = body_part(&s, lay.id);
+        let objs = s.objects(part.id).unwrap();
+        let (a, b) = (objs[0].id, objs[1].id);
+
+        // Re-stack both, plus an unknown id that must be ignored.
+        let n = s
+            .set_objects_z(lay.id, &[(a, 3), (b, 7), (999_999, 1)])
+            .unwrap();
+        assert_eq!(n, 2, "only the two real objects update");
+        // `objects()` sorts by (z, id), so read back by id rather than position.
+        let za = |s: &Solution| s.objects(part.id).unwrap().into_iter().find(|o| o.id == a).unwrap().z;
+        let zb = |s: &Solution| s.objects(part.id).unwrap().into_iter().find(|o| o.id == b).unwrap().z;
+        assert_eq!(za(&s), 3);
+        assert_eq!(zb(&s), 7);
+
+        // A foreign layout id updates nothing.
+        assert_eq!(s.set_objects_z(lay.id + 999, &[(a, 9)]).unwrap(), 0);
+        assert_eq!(za(&s), 3);
     }
 
     #[test]

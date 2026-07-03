@@ -46,6 +46,22 @@ const ICONS = {
   'align-left': 'text-align-left',
   'align-center': 'text-align-center',
   'align-right': 'text-align-right',
+  // Multi-select Arrange panel (Inspector.svelte, #83): align / distribute /
+  // resize-to-match / z-order. Names read as the operation, not the glyph.
+  'obj-align-left': 'align-start-vertical',
+  'obj-align-hcenter': 'align-center-vertical',
+  'obj-align-right': 'align-end-vertical',
+  'obj-align-top': 'align-start-horizontal',
+  'obj-align-vmiddle': 'align-center-horizontal',
+  'obj-align-bottom': 'align-end-horizontal',
+  'obj-distribute-h': 'align-horizontal-distribute-center',
+  'obj-distribute-v': 'align-vertical-distribute-center',
+  'obj-same-width': 'arrows-horizontal',
+  'obj-same-height': 'arrows-vertical',
+  'z-front': 'chevron-up-2',
+  'z-back': 'chevron-down-2',
+  'z-forward': 'chevron-up',
+  'z-backward': 'chevron-down',
   // Shared +/− glyphs: New / add-band / zoom-in reuse `plus`; the line tool and
   // zoom-out reuse `minus`. One symbol each, referenced from several controls.
   plus: 'plus',

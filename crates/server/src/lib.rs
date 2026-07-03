@@ -1232,6 +1232,29 @@ async fn update_objects_geometry(
     (StatusCode::OK, updated.to_string()).into_response()
 }
 
+/// One object's stacking order in a bulk commit (#83): the object id plus its new `z`.
+#[derive(serde::Deserialize)]
+struct ObjectZ {
+    id: i64,
+    z: i64,
+}
+
+/// Persist a group's stacking order from the Arrange panel (#83): the panel
+/// re-densifies a part's `z` after a Bring-to-Front / Send-to-Back / step command
+/// and POSTs `[{id,z}, …]`; this writes them in one transaction, each scoped to
+/// the layout. Always 200 (unknown ids are simply skipped); the body is the count
+/// actually updated, mirroring [`update_objects_geometry`].
+async fn update_objects_z(
+    State(st): State<AppState>,
+    Path(layout_id): Path<i64>,
+    Json(items): Json<Vec<ObjectZ>>,
+) -> impl IntoResponse {
+    let pairs: Vec<(i64, i64)> = items.iter().map(|z| (z.id, z.z)).collect();
+    let mut sol = st.sol.lock().unwrap();
+    let updated = sol.set_objects_z(layout_id, &pairs).unwrap();
+    (StatusCode::OK, updated.to_string()).into_response()
+}
+
 /// Clamp a client-sent record number into the found set (1-based, `0` when
 /// empty) — the create handler's equivalent of [`clamp_rec`] for a typed body.
 fn clamp_rec_n(rec: Option<i64>, total: i64) -> i64 {
@@ -2013,6 +2036,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/design/:layout/object/:id/part", post(update_object_part))
         .route("/design/:layout/geometry", post(update_objects_geometry))
+        .route("/design/:layout/z", post(update_objects_z))
         .route("/ui/*path", get(ui_asset))
         .with_state(state)
 }
@@ -2660,6 +2684,64 @@ mod tests {
             (0, 40),
             "negative x clamped to origin"
         );
+    }
+
+    /// #83 z-order: a bulk POST to `/z` persists every object's stacking order in
+    /// one request (scoped), returns the updated count, and skips unknown ids.
+    #[tokio::test]
+    async fn design_bulk_z_persists_group() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        sol.create_table(
+            "Customers",
+            &[
+                NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                },
+                NewField {
+                    name: "Email".into(),
+                    kind: FieldKind::Text,
+                },
+            ],
+        )
+        .unwrap();
+        let layout_id = sol.layouts().unwrap()[0].id;
+        let part = body_part(&sol, layout_id);
+        let objs = sol.objects(part.id).unwrap();
+        let (a, b) = (objs[0].id, objs[1].id);
+        let state = state_for(sol);
+
+        let resp = {
+            use axum::http::Request;
+            use tower::ServiceExt;
+            let body = format!(r#"[{{"id":{a},"z":3}},{{"id":{b},"z":7}},{{"id":999999,"z":1}}]"#);
+            app(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/design/{layout_id}/z"))
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        };
+        assert_eq!(resp.status(), StatusCode::OK);
+        let count = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(count.to_vec()).unwrap(),
+            "2",
+            "only real ids count"
+        );
+
+        let sol = state.sol.lock().unwrap();
+        let after = sol.objects(part.id).unwrap();
+        // `objects()` sorts by (z, id), so read back by id rather than position.
+        assert_eq!(after.iter().find(|o| o.id == a).unwrap().z, 3);
+        assert_eq!(after.iter().find(|o| o.id == b).unwrap().z, 7);
     }
 
     /// #62 two-mount rail: the design page renders the `#layout-tools` mount node

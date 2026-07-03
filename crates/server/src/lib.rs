@@ -1354,7 +1354,10 @@ async fn create_design_object(
                 h: body.h,
                 binding: Some(binding),
                 content: None,
-                props: None,
+                // Honor props on a value-only field create (paste, #85) so a pasted
+                // field keeps its fill/border/format bag; the label-spawning branch
+                // above is normal placement and has no props to carry yet.
+                props: body.props.as_ref().map(|v| v.to_string()),
             };
             match sol.create_object(layout_id, &new).unwrap() {
                 Some(id) => vec![id],
@@ -3004,6 +3007,43 @@ mod tests {
             sol.objects(part_id).unwrap().len(),
             before + 3,
             "second placement inserted value only"
+        );
+    }
+
+    /// #85 paste: a value-only field create (createLabel:false) honors `props` so a
+    /// pasted field keeps its appearance. Regression for the value-only branch
+    /// silently dropping props — the derived shape style must round-trip + persist.
+    #[tokio::test]
+    async fn design_field_paste_create_honors_props() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
+        let table = sol.table_by_name("Customers").unwrap().unwrap();
+        let name_fid = sol.fields(table.id).unwrap()[0].id;
+        let layout_id = sol.layouts().unwrap()[0].id;
+        let part_id = body_part(&sol, layout_id).id;
+        let state = state_for(sol);
+
+        let body = format!(
+            r##"{{"partId":{part_id},"kind":"field","x":10,"y":10,"w":120,"h":24,"fieldId":{name_fid},"createLabel":false,"rec":1,"props":{{"fill":"#ffeecc","stroke":"#335577","strokeWidth":3}}}}"##
+        );
+        let (status, resp) =
+            post_json_body(state.clone(), &format!("/design/{layout_id}/object"), &body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            resp.contains(r#""objectStyle":"background:#ffeecc;box-shadow:0 0 0 3px #335577;""#),
+            "pasted field keeps props-derived style\n{resp}"
+        );
+        let (_, model) = get_body(state, &format!("/design/{layout_id}/model")).await;
+        assert!(
+            model.contains(r#""objectStyle":"background:#ffeecc;box-shadow:0 0 0 3px #335577;""#),
+            "pasted field props persist in the model\n{model}"
         );
     }
 

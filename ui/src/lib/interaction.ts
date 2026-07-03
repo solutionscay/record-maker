@@ -22,7 +22,18 @@ import type { EditorDoc, ObjectDoc, ToolKind } from './doc.svelte';
 import type { ObjectView } from './model';
 import { GRID, SNAP_THRESHOLD, clampOrigin, elementsToObjectIds, objectIdsInPaintOrder, snapToGrid } from './canvas-edit';
 import { defaultBox, defaultProps, partAtY } from './create';
-import { createObject, deleteObject, setObjectContent, setObjectPart, setObjectProps as persistObjectProps } from './persist';
+import {
+  createObject,
+  deleteObject,
+  setObjectContent,
+  setObjectPart,
+  setObjectProps as persistObjectProps,
+  setObjectReadOnly,
+  setObjectsZ,
+} from './persist';
+import type { NewObjectRequest } from './persist';
+import { clipboard } from './clipboard.svelte';
+import type { ClipboardObject } from './clipboard.svelte';
 import { runUndo, runRedo } from './history';
 import { llog, lerror } from './log';
 
@@ -680,6 +691,28 @@ export class CanvasInteraction {
       return;
     }
 
+    // Cut / Copy / Paste. Native clipboard wins inside editable fields, so bail on
+    // inEditable BEFORE preventDefault (same ordering as undo/redo).
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
+      const k = e.key.toLowerCase();
+      if (k === 'c' || k === 'x' || k === 'v') {
+        if (inEditable) return; // let the browser copy/cut/paste text
+        if (this.#gesturing || this.#drawing || this.#deleting || this.#placing) return; // never mutate mid-gesture/async
+        if (k === 'v') {
+          if (!clipboard.hasContent) return; // nothing to paste → let event pass
+          e.preventDefault();
+          void this.#pasteClipboard();
+        } else {
+          // 'c' or 'x' need a selection
+          if (this.#doc.selection.size === 0) return;
+          e.preventDefault();
+          if (k === 'c') this.#copySelectionToClipboard();
+          else void this.#cutSelectedObjects();
+        }
+        return;
+      }
+    }
+
     // Undo / redo. Cmd/Ctrl+Z = undo; Cmd/Ctrl+Shift+Z or Ctrl+Y = redo.
     if ((e.metaKey || e.ctrlKey) && !e.altKey) {
       const k = e.key.toLowerCase();
@@ -731,6 +764,219 @@ export class CanvasInteraction {
     } finally {
       this.#deleting = false;
     }
+  }
+
+  // ── clipboard: cut / copy / paste (#85) ──
+
+  /** Snapshot the current object selection into the session clipboard. Reads
+   *  structural fields from getObject (ObjectDoc) and fieldId from #objectView
+   *  (the render-model projection — there is no doc.getResolved). No store
+   *  mutation, no persist, not undoable. */
+  #copySelectionToClipboard(): boolean {
+    const ids = [...this.#doc.selection];
+    if (ids.length === 0) return false;
+
+    const objects: ClipboardObject[] = [];
+    for (const id of ids) {
+      const d = this.#doc.getObject(id); // ObjectDoc: kind/partId/x/y/w/h/z/readOnly/binding/content/props
+      if (!d) continue;
+      const v = this.#objectView(id); // ObjectView: fieldId
+      objects.push({
+        kind: d.kind,
+        partId: d.partId,
+        x: d.x,
+        y: d.y,
+        w: d.w,
+        h: d.h,
+        z: d.z,
+        readOnly: d.readOnly,
+        binding: d.binding,
+        content: d.content,
+        props: d.props, // string, verbatim
+        fieldId: v?.fieldId ?? null,
+      });
+    }
+    if (objects.length === 0) return false;
+    clipboard.write({ objects });
+    llog('clipboard', 'copied objects', { count: objects.length, ids });
+    return true;
+  }
+
+  /** Cut = copy the selection, then run the existing delete+persist path. One
+   *  atomic undo step (the delete's single mark()). */
+  async #cutSelectedObjects(): Promise<void> {
+    if (this.#deleting) return;
+    if (!this.#copySelectionToClipboard()) return; // capture BEFORE removal: after removeObject, fieldId is gone
+    await this.#deleteSelectedObjects(); // deleteObject×N → removeObject×N → ONE mark() → detach moveable
+  }
+
+  /** Paste every clipboard object as a NEW server object into its source part,
+   *  at a cascade offset, preserving relative layout / z / readOnly. All-or-nothing:
+   *  either every object is created+added under one mark(), or none is and any
+   *  server rows created before a failure are rolled back. */
+  async #pasteClipboard(): Promise<void> {
+    const payload = clipboard.payload;
+    if (!payload || payload.objects.length === 0) return;
+    if (this.#placing || this.#deleting || this.#gesturing || this.#drawing) return;
+
+    this.#placing = true;
+    const step = clipboard.nextPasteStep(); // 1,2,3…
+    const desired = step * GRID; // n * 8px down-right, before in-band capping
+    const model = this.#doc.renderModel;
+
+    // Create in ascending source-z order so server insert order tracks original
+    // stacking; a later z-normalization pass makes it exact.
+    const clips = [...payload.objects].sort((a, b) => a.z - b.z);
+
+    // Resolve each clip's target part (its source part, or the last band if that
+    // part is gone), then compute ONE (dx,dy) per target part: every object in a
+    // band shifts by the same delta, so relative layout is preserved exactly, and
+    // the delta is capped so the group's far edge stays in-band on BOTH axes (a
+    // per-object clamp would collapse offsets for objects near an edge).
+    const resolved = clips.map((c) => {
+      const part = this.#doc.getPart(c.partId) ?? model.parts.at(-1);
+      return { c, partId: part?.id ?? c.partId, partH: part?.height ?? Number.MAX_SAFE_INTEGER };
+    });
+    const ext = new Map<number, { maxX: number; maxY: number; partH: number }>();
+    for (const { c, partId, partH } of resolved) {
+      const e = ext.get(partId) ?? { maxX: 0, maxY: 0, partH };
+      e.maxX = Math.max(e.maxX, c.x + c.w);
+      e.maxY = Math.max(e.maxY, c.y + c.h);
+      ext.set(partId, e);
+    }
+    // Floor each capped delta to a whole GRID step: keeps the paste grid-aligned
+    // and guarantees the group's far edge never snaps a few px past the in-band cap.
+    const capToGrid = (max: number) => Math.max(0, Math.floor(Math.min(desired, max) / GRID) * GRID);
+    const offset = new Map<number, { dx: number; dy: number }>();
+    for (const [partId, e] of ext) {
+      offset.set(partId, {
+        dx: capToGrid(model.width - e.maxX),
+        dy: capToGrid(e.partH - e.maxY),
+      });
+    }
+
+    // Build one create request per clip, offset by its part's shared (dx,dy).
+    const plans = resolved.map(({ c, partId }) => {
+      const { dx, dy } = offset.get(partId) ?? { dx: 0, dy: 0 };
+      const x = clampOrigin(snapToGrid(c.x + dx));
+      const y = clampOrigin(snapToGrid(c.y + dy));
+      const isField = c.kind === 'field' && c.fieldId != null;
+      const req: NewObjectRequest = {
+        partId,
+        kind: c.kind,
+        x,
+        y,
+        w: c.w,
+        h: c.h,
+        rec: this.#doc.rec,
+        fieldId: isField ? c.fieldId : null,
+        createLabel: isField ? false : undefined, // NEVER auto-spawn a caption
+        content: c.kind === 'text' ? c.content : null,
+        props: c.props ? parseProps(c.props) : null, // string → object for the wire
+      };
+      return { req, partId, clip: c };
+    });
+
+    const created: { view: ObjectView; partId: number; clip: ClipboardObject }[] = [];
+    const landedIds: number[] = []; // every server row created this paste — for rollback
+    let committed = false; // true once addObject + mark() fold the paste into store/undo
+    try {
+      // 1. Persist all (fresh ids). allSettled so a partial failure rolls back cleanly.
+      const results = await Promise.allSettled(plans.map((p) => createObject(this.#layoutId, p.req)));
+      for (const r of results) if (r.status === 'fulfilled') for (const v of r.value) landedIds.push(v.id);
+
+      // 2. Any create failed → nothing enters the store/undo; the catch deletes
+      //    whatever DID land so the server never keeps phantom rows.
+      if (results.some((r) => r.status === 'rejected')) {
+        const firstRej = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+        throw firstRej?.reason ?? new Error('paste failed');
+      }
+
+      // 3. All succeeded. Collect views (each field is length-1: createLabel:false).
+      results.forEach((r, i) => {
+        for (const v of (r as PromiseFulfilledResult<ObjectView[]>).value) {
+          created.push({ view: v, partId: plans[i].partId, clip: plans[i].clip });
+        }
+      });
+
+      // 4. z / readOnly fidelity: place the pasted group ON TOP of each target part
+      //    in preserved relative order, and restore readOnly. Persist first, then
+      //    mirror into the doc so store + server agree; all diffs fold into ONE step.
+      //    A failure here also unwinds through the catch (rows created in step 1 are
+      //    rolled back), so a network drop mid-paste never leaves phantom rows.
+      await this.#applyPasteZAndReadOnly(created);
+
+      // 5. Add every view (undoable life diffs) THEN a single mark() = one undo step.
+      for (const { view, partId } of created) this.#doc.addObject(view, partId);
+      for (const { view, clip } of created) {
+        // mirror z/readOnly into the doc
+        if (clip._targetZ !== undefined && view.z !== clip._targetZ) this.#doc.setProp(view.id, 'z', clip._targetZ);
+        if (view.readOnly !== clip.readOnly) this.#doc.setProp(view.id, 'readOnly', clip.readOnly);
+      }
+      this.#doc.mark(); // ← ONE atomic undo step
+      committed = true; // past here the paste lives in store + undo; never roll back
+
+      // 6. Force pointer mode (a still-armed draw tool clears moveable's target), then
+      //    select the pasted objects; rely on the reactive moveable sync (like #finishDraw).
+      this.#doc.setTool('pointer');
+      const newIds = created.map((c) => c.view.id);
+      this.#doc.selectOnly(newIds);
+      this.#hoverId = newIds.at(-1) ?? null; // pin hover so #updateTarget resolves right
+      llog('clipboard', 'pasted objects', { count: newIds.length, step, newIds });
+    } catch (e) {
+      // Roll back any rows that landed before the paste committed, so store and
+      // server never diverge (no phantom rows surfacing on the next reload).
+      if (!committed && landedIds.length) {
+        await Promise.allSettled(landedIds.map((id) => deleteObject(this.#layoutId, id)));
+      }
+      lerror('clipboard', 'failed to paste', e);
+      this.#doc.setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      this.#placing = false;
+    }
+  }
+
+  /** Assign each pasted object a z that stacks the whole paste group on top of
+   *  its target part in preserved relative order, and persist z + readOnly. Stamps
+   *  the chosen z onto each clip as `_targetZ` for the doc-mirror step. */
+  async #applyPasteZAndReadOnly(
+    created: { view: ObjectView; partId: number; clip: ClipboardObject }[],
+  ): Promise<void> {
+    // Next free z per target part = 1 + max z currently in that part.
+    const nextZ = new Map<number, number>();
+    const model = this.#doc.renderModel;
+    for (const p of model.parts) {
+      const maxZ = p.objects.reduce((m, o) => Math.max(m, o.z), -1);
+      nextZ.set(p.id, maxZ + 1);
+    }
+    const zItems: { id: number; z: number }[] = [];
+    const roItems: { id: number; readOnly: boolean }[] = [];
+    // created is already in ascending source-z order (creation order), so ranking
+    // by iteration preserves the group's internal stacking.
+    for (const c of created) {
+      const z = nextZ.get(c.partId) ?? c.view.z;
+      nextZ.set(c.partId, z + 1);
+      c.clip._targetZ = z;
+      if (z !== c.view.z) zItems.push({ id: c.view.id, z });
+      if (c.clip.readOnly !== c.view.readOnly) roItems.push({ id: c.view.id, readOnly: c.clip.readOnly });
+    }
+    if (zItems.length) await setObjectsZ(this.#layoutId, zItems);
+    for (const r of roItems) await setObjectReadOnly(this.#layoutId, r.id, r.readOnly, this.#doc.rec);
+  }
+
+  // ── public clipboard surface (for a future menu / rail; zero-refactor add) ──
+
+  copy(): void {
+    this.#copySelectionToClipboard();
+  }
+  cut(): void {
+    void this.#cutSelectedObjects();
+  }
+  paste(): void {
+    void this.#pasteClipboard();
+  }
+  canPaste(): boolean {
+    return clipboard.hasContent;
   }
 
   /** Choose moveable's target from the real selection only. Hover uses a separate

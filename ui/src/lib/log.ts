@@ -25,6 +25,7 @@ export type LogCat =
   | 'resize' // moveable resize lifecycle
   | 'rotate' // moveable rotate lifecycle
   | 'zoom' // canvas zoom
+  | 'clipboard' // cut/copy/paste of objects
   | 'error'; // surfaced failures
 
 const COLOR: Record<LogCat, string> = {
@@ -40,6 +41,7 @@ const COLOR: Record<LogCat, string> = {
   resize: '#e11d48',
   rotate: '#c026d3',
   zoom: '#9333ea',
+  clipboard: '#0d9488',
   error: '#dc2626',
 };
 

@@ -62,6 +62,9 @@ const ICONS = {
   'z-back': 'chevron-down-2',
   'z-forward': 'chevron-up',
   'z-backward': 'chevron-down',
+  // Undo/redo history controls (RailTools.svelte History zone, #84).
+  undo: 'undo',
+  redo: 'redo',
   // Shared +/− glyphs: New / add-band / zoom-in reuse `plus`; the line tool and
   // zoom-out reuse `minus`. One symbol each, referenced from several controls.
   plus: 'plus',

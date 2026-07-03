@@ -24,7 +24,7 @@ use axum::{
 };
 use record_maker_engine::{
     FieldKind, FieldMeta, LayoutMeta, NewField, NewObject, ObjectKind, ObjectMeta, PartKind,
-    PartMeta, Solution, TableMeta,
+    PartMeta, RestoreObject, RestoreResult, Solution, TableMeta,
 };
 
 mod format;
@@ -1395,6 +1395,82 @@ async fn create_design_object(
     axum::Json(views).into_response()
 }
 
+/// One object restored at its ORIGINAL id (#84). The client sends the store's
+/// full `ObjectDoc` for each object it recreated on undo-of-delete / redo-of-
+/// create, so the server re-inserts it byte-identically at the same id.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreObjectBody {
+    id: i64,
+    part_id: i64,
+    kind: String,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    z: i64,
+    read_only: bool,
+    binding: Option<String>,
+    content: Option<String>,
+    props: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct RestoreObjectsBody {
+    objects: Vec<RestoreObjectBody>,
+    rec: Option<i64>,
+}
+
+/// Restore deleted objects at their ORIGINAL ids (#84 undo/redo replay) and return
+/// each one's `ObjectView` resolved against `rec` — byte-identical to a model
+/// fetch, so the store's already-recreated objects match the server without a
+/// re-hydrate. 400 on a bad kind; 404 if a part isn't in the layout; 409 if an id
+/// is already occupied (reused by an intervening create). The batch is atomic.
+async fn restore_design_objects(
+    State(st): State<AppState>,
+    Path(layout_id): Path<i64>,
+    Json(body): Json<RestoreObjectsBody>,
+) -> impl IntoResponse {
+    let mut sol = st.sol.lock().unwrap();
+    if layout_table(&sol, layout_id).is_none() {
+        return not_found("layout", layout_id);
+    }
+    let mut restores = Vec::with_capacity(body.objects.len());
+    for o in &body.objects {
+        let Some(kind) = ObjectKind::parse(&o.kind) else {
+            return (StatusCode::BAD_REQUEST, "bad object kind").into_response();
+        };
+        restores.push(RestoreObject {
+            id: o.id,
+            part_id: o.part_id,
+            kind,
+            x: o.x,
+            y: o.y,
+            w: o.w,
+            h: o.h,
+            z: o.z,
+            read_only: o.read_only,
+            binding: o.binding.clone(),
+            content: o.content.clone(),
+            props: o.props.clone(),
+        });
+    }
+    match sol.restore_objects(layout_id, &restores).unwrap() {
+        RestoreResult::Restored => {}
+        RestoreResult::PartNotFound => return StatusCode::NOT_FOUND.into_response(),
+        RestoreResult::IdInUse => return (StatusCode::CONFLICT, "id in use").into_response(),
+    }
+    let rec = body.rec;
+    let mut views = Vec::with_capacity(restores.len());
+    for o in &restores {
+        match object_view_for_rec(&sol, layout_id, o.id, rec) {
+            Some(v) => views.push(v),
+            None => return StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+    axum::Json(views).into_response()
+}
+
 /// A band the Create zone adds (#48): the [`PartKind`] string and an optional
 /// height (defaults to a workable band height).
 #[derive(serde::Deserialize)]
@@ -1707,6 +1783,38 @@ async fn update_object_binding(
 }
 
 #[derive(serde::Deserialize)]
+struct BindingPathBody {
+    binding: String,
+    rec: Option<i64>,
+}
+
+/// Set an object's binding dot-path VERBATIM (history replay of a binding diff,
+/// #84). Unlike [`update_object_binding`] (keyed by `fieldId` for live field-
+/// picking) this writes the already-resolved path the undo diff carries, so a
+/// binding undo/redo round-trips without re-deriving from a field id.
+async fn update_object_binding_path(
+    State(st): State<AppState>,
+    Path((layout_id, object_id)): Path<(i64, i64)>,
+    Json(body): Json<BindingPathBody>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    if layout_table(&sol, layout_id).is_none() {
+        return not_found("layout", layout_id);
+    }
+    if sol
+        .set_object_binding(layout_id, object_id, &body.binding)
+        .unwrap()
+        == 0
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match object_view_for_rec(&sol, layout_id, object_id, body.rec) {
+        Some(view) => axum::Json(view).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
 struct ContentBody {
     content: String,
 }
@@ -2004,6 +2112,10 @@ pub fn app(state: AppState) -> Router {
         .route("/design/:layout", get(design))
         .route("/design/:layout/model", get(design_model))
         .route("/design/:layout/object", post(create_design_object))
+        .route(
+            "/design/:layout/object/restore",
+            post(restore_design_objects),
+        )
         .route("/design/:layout/part", post(create_design_part))
         .route("/design/:layout/part/:id/height", post(update_part_height))
         .route("/design/:layout/part/:id/kind", post(update_part_kind))
@@ -2021,6 +2133,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/design/:layout/object/:id/binding",
             post(update_object_binding),
+        )
+        .route(
+            "/design/:layout/object/:id/binding-path",
+            post(update_object_binding_path),
         )
         .route(
             "/design/:layout/object/:id/content",
@@ -3416,6 +3532,167 @@ mod tests {
             .unwrap()
             .iter()
             .any(|o| o.id == rect_id));
+    }
+
+    /// #84 restore: helper that creates a rect and returns (state, layout_id,
+    /// part_id, rect_id) ready for a delete→restore round-trip.
+    async fn seeded_rect() -> (AppState, i64, i64, i64) {
+        let mut sol = Solution::open_in_memory().unwrap();
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
+        let layout_id = sol.layouts().unwrap()[0].id;
+        let part_id = body_part(&sol, layout_id).id;
+        let state = state_for(sol);
+        let (status, _) = post_json_body(
+            state.clone(),
+            &format!("/design/{layout_id}/object"),
+            &format!(r#"{{"partId":{part_id},"kind":"rect","x":7,"y":9,"w":40,"h":40}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let rect_id = {
+            let sol = state.sol.lock().unwrap();
+            sol.objects(part_id)
+                .unwrap()
+                .iter()
+                .find(|o| o.kind == ObjectKind::Rect)
+                .unwrap()
+                .id
+        };
+        (state, layout_id, part_id, rect_id)
+    }
+
+    fn object_ids(state: &AppState, part_id: i64) -> Vec<i64> {
+        state
+            .sol
+            .lock()
+            .unwrap()
+            .objects(part_id)
+            .unwrap()
+            .iter()
+            .map(|o| o.id)
+            .collect()
+    }
+
+    /// #84 undo-of-delete: restore re-inserts a deleted object at its EXACT
+    /// original id (identity preserved so bindings/labels survive), with its
+    /// geometry and props intact and visible on the next model read.
+    #[tokio::test]
+    async fn design_object_restore_preserves_identity() {
+        let (state, layout_id, part_id, rect_id) = seeded_rect().await;
+        assert_eq!(
+            post_json(
+                state.clone(),
+                &format!("/design/{layout_id}/object/{rect_id}/delete"),
+                ""
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert!(!object_ids(&state, part_id).contains(&rect_id));
+
+        let body = format!(
+            r##"{{"objects":[{{"id":{rect_id},"partId":{part_id},"kind":"rect","x":7,"y":9,"w":40,"h":40,"z":0,"readOnly":false,"binding":null,"content":null,"props":"{{\"fill\":\"#102030\",\"radius\":6}}"}}],"rec":null}}"##
+        );
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/design/{layout_id}/object/restore"),
+            &body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "restore 200\n{resp}");
+
+        // Same id, back in the part.
+        assert!(object_ids(&state, part_id).contains(&rect_id));
+        // Geometry + props survived: the model re-derives the shape_style.
+        let (_, model) = get_body(state.clone(), &format!("/design/{layout_id}/model")).await;
+        assert!(
+            model.contains("background:#102030;border-radius:6px;"),
+            "restored props drive shape_style\n{model}"
+        );
+    }
+
+    /// #84 restore rejects an id already in use (reused by an intervening create):
+    /// 409 and the live row is untouched — never clobbered.
+    #[tokio::test]
+    async fn design_object_restore_rejects_id_in_use() {
+        let (state, layout_id, part_id, rect_id) = seeded_rect().await;
+        let before = object_ids(&state, part_id);
+        let body = format!(
+            r##"{{"objects":[{{"id":{rect_id},"partId":{part_id},"kind":"rect","x":0,"y":0,"w":10,"h":10,"z":0,"readOnly":false,"binding":null,"content":null,"props":null}}],"rec":null}}"##
+        );
+        assert_eq!(
+            post_json(
+                state.clone(),
+                &format!("/design/{layout_id}/object/restore"),
+                &body
+            )
+            .await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(object_ids(&state, part_id), before, "live row untouched");
+    }
+
+    /// #84 restore rejects a part not in the layout: 404, nothing written.
+    #[tokio::test]
+    async fn design_object_restore_rejects_unknown_part() {
+        let (state, layout_id, part_id, rect_id) = seeded_rect().await;
+        post_json(
+            state.clone(),
+            &format!("/design/{layout_id}/object/{rect_id}/delete"),
+            "",
+        )
+        .await;
+        let bogus_part = part_id + 9999;
+        let body = format!(
+            r##"{{"objects":[{{"id":{rect_id},"partId":{bogus_part},"kind":"rect","x":0,"y":0,"w":10,"h":10,"z":0,"readOnly":false,"binding":null,"content":null,"props":null}}],"rec":null}}"##
+        );
+        assert_eq!(
+            post_json(
+                state.clone(),
+                &format!("/design/{layout_id}/object/restore"),
+                &body
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+        assert!(!object_ids(&state, part_id).contains(&rect_id), "nothing written");
+    }
+
+    /// #84 restore is atomic: a valid object followed by one referencing a bad part
+    /// rolls the whole batch back — the field+label pair never half-restores.
+    #[tokio::test]
+    async fn design_object_restore_is_atomic() {
+        let (state, layout_id, part_id, rect_id) = seeded_rect().await;
+        post_json(
+            state.clone(),
+            &format!("/design/{layout_id}/object/{rect_id}/delete"),
+            "",
+        )
+        .await;
+        let free_id = rect_id + 1000; // unused rowid for the second (doomed) object
+        let bogus_part = part_id + 9999;
+        let body = format!(
+            r##"{{"objects":[{{"id":{rect_id},"partId":{part_id},"kind":"rect","x":0,"y":0,"w":10,"h":10,"z":0,"readOnly":false,"binding":null,"content":null,"props":null}},{{"id":{free_id},"partId":{bogus_part},"kind":"rect","x":0,"y":0,"w":10,"h":10,"z":0,"readOnly":false,"binding":null,"content":null,"props":null}}],"rec":null}}"##
+        );
+        assert_eq!(
+            post_json(
+                state.clone(),
+                &format!("/design/{layout_id}/object/restore"),
+                &body
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+        let ids = object_ids(&state, part_id);
+        assert!(!ids.contains(&rect_id), "first object rolled back with the batch");
+        assert!(!ids.contains(&free_id));
     }
 
     /// #15 round-trip: POSTing new geometry persists to `meta_object` (scoped to

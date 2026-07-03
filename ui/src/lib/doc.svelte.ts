@@ -167,7 +167,7 @@ export type Diff =
 
 /** One atomic undo step: an ordered group of diffs that undo/redo together.
  * `mark()` seals the open group into a step — an atomic stopping point. */
-type Step = Diff[];
+export type Step = Diff[];
 
 /** Absolute geometry to set on an object; any omitted side is left unchanged.
  * A resize handle may move x/y while changing w/h, so all four are optional. */
@@ -628,22 +628,24 @@ export class EditorDoc {
   /** Undo the most recent step. Any open group is sealed first, so a mid-gesture
    * undo still steps cleanly. Reverts diffs in reverse order, restoring exact
    * geometry, and (session-side) selects the objects the step touched. */
-  undo(): void {
+  undo(): Step | null {
     this.mark();
     const step = this.#past.pop();
-    if (!step) return;
+    if (!step) return null;
     for (let i = step.length - 1; i >= 0; i--) this.#set(step[i], step[i].before);
     this.#future.push(step);
     this.#selectTouched(step);
+    return step;
   }
 
   /** Redo the most recently undone step, re-applying its diffs in order. */
-  redo(): void {
+  redo(): Step | null {
     const step = this.#future.pop();
-    if (!step) return;
+    if (!step) return null;
     for (const d of step) this.#set(d, d.after);
     this.#past.push(step);
     this.#selectTouched(step);
+    return step;
   }
 
   // ── session: selection ───────────────────────────────────────────────────

@@ -57,6 +57,8 @@
   <symbol id="icon-z-back" viewBox="0 0 24 24"><path d="M17 9v2h-2v2h-2v2h-2v-2H9v-2H7V9h10Z"/></symbol>
   <symbol id="icon-z-forward" viewBox="0 0 24 24"><path d="M13 8h-2v2h2V8Zm-2 2H9v2h2v-2Zm4 0h-2v2h2v-2Zm-6 2H7v2h2v-2Zm8 0h-2v2h2v-2ZM7 14H5v2h2v-2Zm12 0h-2v2h2v-2Z"/></symbol>
   <symbol id="icon-z-backward" viewBox="0 0 24 24"><path d="M13 16h-2v-2h2v2Zm-2-2H9v-2h2v2Zm4 0h-2v-2h2v2Zm-6-2H7v-2h2v2Zm8 0h-2v-2h2v2ZM7 10H5V8h2v2Zm12 0h-2V8h2v2Z"/></symbol>
+  <symbol id="icon-undo" viewBox="0 0 24 24"><path d="M18 20h-6v-2h6v2Zm2-2h-2v-8h2v8Zm-10-4H8v-2H6v-2H4V8h2V6h2V4h2v4h8v2h-8v4Z"/></symbol>
+  <symbol id="icon-redo" viewBox="0 0 24 24"><path d="M20 8H6v2h14zM4 10h2v8H4zm2 8h6v2H6z"/> <path d="M18 6h-2v6h2zm-2-2h-2v8h2zm0 8h-2v2h2z"/></symbol>
   <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M13 11h7v2h-7v7h-2v-7H4v-2h7V4h2v7Z"/></symbol>
   <symbol id="icon-minus" viewBox="0 0 24 24"><path d="M4 11h16v2H4z"/></symbol>
   <symbol id="icon-type-text" viewBox="0 0 24 24"><path d="M12 6h10v2H12zm0 4h10v2H12zM2 14h20v2H2zm0 4h20v2H2zM2 4h8v2H2zm3 2h2v6H5z"/> <path d="M3 10h6v2H3zM2 6h2v2H2zm6 0h2v2H8z"/></symbol>

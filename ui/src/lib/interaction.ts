@@ -23,6 +23,7 @@ import type { ObjectView } from './model';
 import { GRID, SNAP_THRESHOLD, clampOrigin, elementsToObjectIds, objectIdsInPaintOrder, snapToGrid } from './canvas-edit';
 import { defaultBox, defaultProps, partAtY } from './create';
 import { createObject, deleteObject, setObjectContent, setObjectPart, setObjectProps as persistObjectProps } from './persist';
+import { runUndo, runRedo } from './history';
 import { llog, lerror } from './log';
 
 type DrawTool = Exclude<ToolKind, 'pointer'>;
@@ -677,6 +678,21 @@ export class CanvasInteraction {
       e.preventDefault();
       this.#selectAllObjects();
       return;
+    }
+
+    // Undo / redo. Cmd/Ctrl+Z = undo; Cmd/Ctrl+Shift+Z or Ctrl+Y = redo.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey) {
+      const k = e.key.toLowerCase();
+      const isUndo = k === 'z' && !e.shiftKey;
+      const isRedo = (k === 'z' && e.shiftKey) || k === 'y';
+      if (isUndo || isRedo) {
+        if (inEditable) return; // let native text-field undo win — return BEFORE preventDefault
+        if (this.#gesturing || this.#drawing || this.#deleting || this.#placing) return; // never pop mid-gesture / mid-draw / mid-async
+        e.preventDefault();
+        if (isRedo) runRedo(this.#doc, this.#layoutId);
+        else runUndo(this.#doc, this.#layoutId);
+        return;
+      }
     }
 
     if (e.key !== 'Delete' && e.key !== 'Backspace') return;

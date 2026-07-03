@@ -190,3 +190,41 @@ export function setObjectReadOnly(
 ): Promise<ObjectView> {
   return postJson(`/design/${layoutId}/object/${id}/read-only`, { readOnly, rec });
 }
+
+/** An object row being restored at its ORIGINAL id (#84). Field-for-field the
+ *  store's ObjectDoc plus the record index to project the returned view against. */
+export interface RestoreObjectRequest {
+  id: number;
+  partId: number;
+  kind: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  z: number;
+  readOnly: boolean;
+  binding: string;
+  content: string;
+  props: string;
+}
+
+/** Restore one or more deleted objects at their EXACT original ids, atomically
+ *  (undo-of-delete / redo-of-create). Returns each restored object's server view. */
+export function restoreObjects(
+  layoutId: string,
+  objects: RestoreObjectRequest[],
+  rec: number,
+): Promise<ObjectView[]> {
+  return postJson(`/design/${layoutId}/object/restore`, { objects, rec });
+}
+
+/** Write an object's binding dot-path VERBATIM (history replay of a binding diff).
+ *  Distinct from setObjectBinding, which is keyed by fieldId for live field-picking. */
+export function setObjectBindingPath(
+  layoutId: string,
+  id: number,
+  binding: string,
+  rec: number,
+): Promise<ObjectView> {
+  return postJson(`/design/${layoutId}/object/${id}/binding-path`, { binding, rec });
+}

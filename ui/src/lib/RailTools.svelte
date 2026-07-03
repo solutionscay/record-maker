@@ -8,6 +8,7 @@
   // parity-checked canvas DOM.
   import type { EditorDoc, ToolKind } from './doc.svelte';
   import { createPart } from './persist';
+  import { runUndo, runRedo } from './history';
   import { llog, lerror } from './log';
   import Icon from './Icon.svelte';
   import FieldSelect from './FieldSelect.svelte';
@@ -172,6 +173,16 @@
 </section>
 
 <section class="le-zone">
+  <span class="side-label">History</span>
+  <div class="le-history">
+    <button type="button" class="le-icon-btn" title="Undo" aria-label="Undo"
+            onclick={() => runUndo(doc, layoutId)} disabled={!doc.canUndo}><Icon name="undo" /></button>
+    <button type="button" class="le-icon-btn" title="Redo" aria-label="Redo"
+            onclick={() => runRedo(doc, layoutId)} disabled={!doc.canRedo}><Icon name="redo" /></button>
+  </div>
+</section>
+
+<section class="le-zone">
   <span class="side-label">Zoom</span>
   <div class="le-zoom">
     <button type="button" class="le-icon-btn" title="Zoom out" aria-label="Zoom out" onclick={() => zoomBy(-0.1)}><Icon name="minus" /></button>
@@ -287,6 +298,11 @@
     height: 14px;
     margin: 0;
     accent-color: var(--rm-accent);
+  }
+  .le-history {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
   .le-zoom {
     display: grid;

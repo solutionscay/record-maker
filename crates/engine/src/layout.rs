@@ -216,6 +216,40 @@ pub struct NewObject {
     pub props: Option<String>,
 }
 
+/// An object restored to its ORIGINAL id (identity-preserving undo of a delete /
+/// redo of a create, #84). Unlike [`NewObject`] it carries `id`, `z`, and
+/// `read_only` so identity and stacking survive the round-trip.
+#[derive(Debug, Clone)]
+pub struct RestoreObject {
+    pub id: i64,
+    pub part_id: i64,
+    pub kind: ObjectKind,
+    pub x: i64,
+    pub y: i64,
+    pub w: i64,
+    pub h: i64,
+    pub z: i64,
+    pub read_only: bool,
+    pub binding: Option<String>,
+    pub content: Option<String>,
+    pub props: Option<String>,
+}
+
+/// Outcome of a [`Solution::restore_objects`] batch (#84). The batch either fully
+/// restores or is rejected for a single reason — the transaction rolls back, so
+/// nothing partial ever lands (a field+label pair never half-restores). The two
+/// reject reasons are distinguished so the API layer maps 404 vs 409. Mirrors the
+/// `Ok(None)` "part not in layout" convention of [`Solution::create_object`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum RestoreResult {
+    /// All objects re-inserted at their original ids.
+    Restored,
+    /// A referenced part isn't in the layout; nothing was written.
+    PartNotFound,
+    /// An id is already in use (reused by an intervening create); nothing written.
+    IdInUse,
+}
+
 impl Solution {
     /// All layouts, ordered by name.
     pub fn layouts(&self) -> Result<Vec<LayoutMeta>> {
@@ -490,6 +524,62 @@ impl Solution {
         let field_id = tx.last_insert_rowid();
         tx.commit()?;
         Ok(Some((label_id, field_id)))
+    }
+
+    /// Re-insert previously deleted objects at their EXACT original ids, atomically
+    /// (#84 — identity-preserving undo of a delete / redo of a create). Layout-
+    /// scoped like [`Solution::create_object`]. A plain explicit-id INSERT (never
+    /// `OR REPLACE`): an id already in use — reused by an intervening create under
+    /// the plain-rowid schema (`0001_init_meta.sql`, `INTEGER PRIMARY KEY` without
+    /// `AUTOINCREMENT`) — is reported as [`RestoreResult::IdInUse`] rather than
+    /// silently clobbering a live row. A foreign/unknown part is
+    /// [`RestoreResult::PartNotFound`]. Either rejection rolls the whole batch back
+    /// (the dropped transaction rolls back automatically on early return), so a
+    /// field+label pair never half-restores.
+    pub fn restore_objects(
+        &mut self,
+        layout_id: i64,
+        objs: &[RestoreObject],
+    ) -> Result<RestoreResult> {
+        let tx = self.app.transaction()?;
+        for o in objs {
+            let part_ok: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta_part WHERE id = ?1 AND layout_id = ?2)",
+                params![o.part_id, layout_id],
+                |r| r.get(0),
+            )?;
+            if !part_ok {
+                return Ok(RestoreResult::PartNotFound);
+            }
+            let id_taken: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta_object WHERE id = ?1)",
+                params![o.id],
+                |r| r.get(0),
+            )?;
+            if id_taken {
+                return Ok(RestoreResult::IdInUse);
+            }
+            tx.execute(
+                "INSERT INTO meta_object(id, part_id, kind, x, y, w, h, z, read_only, binding, content, props) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    o.id,
+                    o.part_id,
+                    o.kind.as_str(),
+                    o.x,
+                    o.y,
+                    o.w,
+                    o.h,
+                    o.z,
+                    o.read_only as i64,
+                    o.binding,
+                    o.content,
+                    o.props
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(RestoreResult::Restored)
     }
 
     /// Create a band under the FileMaker-style part rules: a layout has one body

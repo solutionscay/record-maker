@@ -180,17 +180,37 @@
     contextMenu = { ...point, title, items };
   }
 
+  function objectMenuItems(): ContextMenuItem[] {
+    const items: ContextMenuItem[] = [
+      { label: 'Cut', hint: 'Ctrl+X', action: () => interaction?.cut() },
+      { label: 'Copy', hint: 'Ctrl+C', action: () => interaction?.copy() },
+      { label: 'Paste', hint: 'Ctrl+V', disabled: !interaction?.canPaste(), action: () => interaction?.paste() },
+      { label: 'Duplicate', hint: 'Ctrl+D', action: () => interaction?.duplicate() },
+    ];
+    if (interaction?.canUngroup()) {
+      items.push({ label: 'Ungroup', action: () => interaction?.ungroup() });
+    } else if (interaction?.canGroup()) {
+      items.push({ label: 'Group', action: () => interaction?.group() });
+    }
+    items.push({ label: 'Delete', danger: true, action: () => interaction?.deleteSelected() });
+    return items;
+  }
+
   function openObjectContextMenu(event: MouseEvent, objectId: number | null = null): void {
     event.preventDefault();
     event.stopPropagation();
     if (objectId !== null && !doc.isSelected(objectId)) doc.selectOnly([objectId]);
     const count = doc.selection.size || 1;
-    openContextMenu(event, count === 1 ? 'Object' : `${count} Objects`, [
-      { label: 'Cut', hint: 'Ctrl+X', action: () => interaction?.cut() },
-      { label: 'Copy', hint: 'Ctrl+C', action: () => interaction?.copy() },
-      { label: 'Paste', hint: 'Ctrl+V', disabled: !interaction?.canPaste(), action: () => interaction?.paste() },
-      { label: 'Duplicate', hint: 'Ctrl+D', action: () => interaction?.duplicate() },
-      { label: 'Delete', danger: true, action: () => interaction?.deleteSelected() },
+    openContextMenu(event, count === 1 ? 'Object' : `${count} Objects`, objectMenuItems());
+  }
+
+  function openBandContextMenu(event: MouseEvent, partId: number): void {
+    event.preventDefault();
+    event.stopPropagation();
+    doc.selectPart(partId);
+    const part = doc.getPart(partId);
+    openContextMenu(event, part ? `${partLabel(part.kind)} Band` : 'Band', [
+      { label: 'Paste Objects', hint: 'Ctrl+V', disabled: !interaction?.canPaste(), action: () => interaction?.paste() },
     ]);
   }
 
@@ -209,14 +229,7 @@
 
     const partId = partIdFromTarget(event.target);
     if (partId !== null) {
-      event.preventDefault();
-      event.stopPropagation();
-      doc.selectPart(partId);
-      const part = doc.getPart(partId);
-      openContextMenu(event, part ? `${partLabel(part.kind)} Band` : 'Band', [
-        { label: 'Select Band', action: () => doc.selectPart(partId) },
-        { label: 'Paste Objects', hint: 'Ctrl+V', disabled: !interaction?.canPaste(), action: () => interaction?.paste() },
-      ]);
+      openBandContextMenu(event, partId);
       return;
     }
 
@@ -228,7 +241,9 @@
     ]);
   }
 
-  function runContextMenuItem(item: ContextMenuItem): void {
+  function runContextMenuItem(item: ContextMenuItem, event: MouseEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
     if (item.disabled) return;
     contextMenu = null;
     item.action();
@@ -300,6 +315,7 @@
               style={`top: ${band.top}px; height: ${band.part.height}px;`}
               title={`Select ${partLabel(band.part.kind)} band`}
               onclick={(e) => selectPart(band.part.id, e)}
+              oncontextmenu={(e) => openBandContextMenu(e, band.part.id)}
             >
               {#each partLabelChars(band.part.kind) as char}
                 <span>{char}</span>
@@ -313,36 +329,37 @@
               style={`top: ${band.top + band.part.height - 4}px;`}
               title={`Resize ${partLabel(band.part.kind)} band`}
               onpointerdown={(e) => startPartResize(band.part.id, band.top, e)}
+              oncontextmenu={(e) => openBandContextMenu(e, band.part.id)}
             ></button>
           {/each}
         </div>
       </div>
     </div>
-    {#if contextMenu}
-      <div
-        class="le-context-menu"
-        bind:this={contextMenuEl}
-        style={`left: ${contextMenu.x}px; top: ${contextMenu.y}px;`}
-        role="menu"
-        aria-label={contextMenu.title}
-      >
-        <div class="le-context-title">{contextMenu.title}</div>
-        {#each contextMenu.items as item}
-          <button
-            type="button"
-            class="le-context-item"
-            class:danger={item.danger}
-            disabled={item.disabled}
-            role="menuitem"
-            onclick={() => runContextMenuItem(item)}
-          >
-            <span>{item.label}</span>
-            {#if item.hint}<kbd>{item.hint}</kbd>{/if}
-          </button>
-        {/each}
-      </div>
-    {/if}
   </div>
+  {#if contextMenu}
+    <div
+      class="le-context-menu"
+      bind:this={contextMenuEl}
+      style={`left: ${contextMenu.x}px; top: ${contextMenu.y}px;`}
+      role="menu"
+      aria-label={contextMenu.title}
+    >
+      <div class="le-context-title">{contextMenu.title}</div>
+      {#each contextMenu.items as item}
+        <button
+          type="button"
+          class="le-context-item"
+          class:danger={item.danger}
+          disabled={item.disabled}
+          role="menuitem"
+          onclick={(e) => runContextMenuItem(item, e)}
+        >
+          <span>{item.label}</span>
+          {#if item.hint}<kbd>{item.hint}</kbd>{/if}
+        </button>
+      {/each}
+    </div>
+  {/if}
 {:else}
   <p class="layout-editor-msg">Loading…</p>
 {/if}

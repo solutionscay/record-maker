@@ -510,6 +510,7 @@ impl Solution {
         &mut self,
         layout_id: i64,
         object_ids: &[i64],
+        group_id: Option<i64>,
     ) -> Result<Option<ObjectGroup>> {
         let mut ids = Vec::new();
         for &id in object_ids {
@@ -552,11 +553,22 @@ impl Solution {
                 params![group_id, layout_id],
             )?;
         }
-        tx.execute(
-            "INSERT INTO meta_object_group(layout_id) VALUES (?1)",
-            params![layout_id],
-        )?;
-        let group_id = tx.last_insert_rowid();
+        let group_id = match group_id {
+            Some(id) => {
+                tx.execute(
+                    "INSERT INTO meta_object_group(id, layout_id) VALUES (?1, ?2)",
+                    params![id, layout_id],
+                )?;
+                id
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO meta_object_group(layout_id) VALUES (?1)",
+                    params![layout_id],
+                )?;
+                tx.last_insert_rowid()
+            }
+        };
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO meta_object_group_member(group_id, object_id, position) \

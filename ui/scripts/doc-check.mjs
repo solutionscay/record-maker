@@ -200,6 +200,24 @@ try {
     ok('selectTouched: undo selects the changed object', d.isSelected(2) && d.selection.size === 1);
   }
 
+  // 8b. Durable groups expand selection but do not enter undo history (#75).
+  {
+    const d = new EditorDoc();
+    const grouped = fresh();
+    grouped.groups = [{ id: 99, objectIds: [1, 2] }];
+    d.hydrate(grouped);
+    d.selectOnly([1]);
+    ok('groups: selecting one member selects the whole group', d.isSelected(1) && d.isSelected(2) && d.selection.size === 2);
+    ok('groups: selection resolves active group id', d.groupIdForSelection() === 99);
+    d.toggle(2);
+    ok('groups: toggling a selected member removes the whole group', !d.isSelected(1) && !d.isSelected(2) && d.selection.size === 0);
+    d.setGroup({ id: 100, objectIds: [3, 4] });
+    ok('groups: setGroup replaces selection with new group', d.groupIdForSelection() === 100 && d.selection.size === 2);
+    d.removeGroup(100);
+    ok('groups: removeGroup keeps child selection but clears active group', d.isSelected(3) && d.isSelected(4) && d.groupIdForSelection() === null);
+    ok('groups: selection/group changes record NO undo history', d.canUndo === false);
+  }
+
   // 9. Re-hydration resets history (a record refresh is not a user edit).
   {
     const d = new EditorDoc();

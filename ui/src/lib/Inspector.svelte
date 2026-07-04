@@ -8,7 +8,9 @@
   import type { EditorDoc, ObjectDoc } from './doc.svelte';
   import {
     deleteObject as persistDeleteObject,
+    deleteObjectGroup as persistDeleteObjectGroup,
     deletePart as persistDeletePart,
+    createObjectGroup as persistCreateObjectGroup,
     movePart as persistMovePart,
     setObjectBinding as persistBinding,
     setObjectContent as persistContent,
@@ -84,6 +86,9 @@
   let canDistribute = $derived(selectedIds.length >= 3);
   let resizableCount = $derived(selectedObjects.filter((o) => o.kind !== 'line').length);
   let canResizeMatch = $derived(resizableCount >= 2);
+  let activeGroupId = $derived(doc.groupIdForSelection(selectedIds));
+  let canGroup = $derived(selectedIds.length >= 2 && activeGroupId === null);
+  let canUngroup = $derived(activeGroupId !== null);
 
   // Shared style/text attributes across the whole selection, each as {mixed, value}.
   let mFill = $derived(sharedValue((p) => colorValue(p.fill, '#f7f8fa')));
@@ -523,6 +528,35 @@
     }
   }
 
+  async function groupSelectedObjects(): Promise<void> {
+    if (!canGroup || busy) return;
+    busy = true;
+    llog('persist', 'inspector: group objects', { ids: selectedIds });
+    try {
+      const group = await persistCreateObjectGroup(layoutId, selectedIds);
+      doc.setGroup(group);
+    } catch (e) {
+      reportPersistError('group objects', e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function ungroupSelectedObjects(): Promise<void> {
+    if (activeGroupId === null || busy) return;
+    const groupId = activeGroupId;
+    busy = true;
+    llog('persist', 'inspector: ungroup objects', { groupId });
+    try {
+      await persistDeleteObjectGroup(layoutId, groupId);
+      doc.removeGroup(groupId);
+    } catch (e) {
+      reportPersistError('ungroup objects', e);
+    } finally {
+      busy = false;
+    }
+  }
+
   async function setLineAngle(value: number): Promise<void> {
     if (selectedId === null || selected?.kind !== 'line') return;
     const angle = normalizeAngle(value);
@@ -735,6 +769,11 @@
   {#if hasMultipleSelection}
     <section class="insp-sec">
       <span class="side-label">Arrange</span>
+      <div class="fmt-sub">Group</div>
+      <div class="group-row">
+        <button type="button" class="grp-btn" title="Group selected objects" disabled={!canGroup || busy} onclick={groupSelectedObjects}>Group</button>
+        <button type="button" class="grp-btn" title="Ungroup selected group" disabled={!canUngroup || busy} onclick={ungroupSelectedObjects}>Ungroup</button>
+      </div>
       <div class="fmt-sub">Align</div>
       <div class="arr-grid">
         <button type="button" class="arr-btn" title="Align left edges" onclick={() => align('left')}><Icon name="obj-align-left" /></button>
@@ -1751,6 +1790,30 @@
     background: #f0f0f2;
   }
   .arr-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .group-row {
+    display: flex;
+    gap: 8px;
+  }
+  .grp-btn {
+    height: 28px;
+    padding: 0 10px;
+    border: 0.5px solid var(--rm-border);
+    border-radius: 7px;
+    background: var(--rm-control-bg);
+    color: var(--rm-text);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 650;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  }
+  .grp-btn:hover:not(:disabled) {
+    background: #f0f0f2;
+  }
+  .grp-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }

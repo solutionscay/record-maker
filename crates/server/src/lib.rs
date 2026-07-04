@@ -16,15 +16,15 @@ use std::sync::{Arc, Mutex};
 
 use askama::Template;
 use axum::{
+    Json, Router,
     extract::{Form, Path, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect},
     routing::{get, post},
-    Json, Router,
 };
 use record_maker_engine::{
-    FieldKind, FieldMeta, LayoutMeta, NewField, NewObject, ObjectKind, ObjectMeta, PartKind,
-    PartMeta, RestoreObject, RestoreResult, Solution, TableMeta,
+    FieldKind, FieldMeta, LayoutMeta, NewField, NewObject, ObjectGroup, ObjectKind, ObjectMeta,
+    PartKind, PartMeta, RestoreObject, RestoreResult, Solution, TableMeta,
 };
 
 mod format;
@@ -916,7 +916,8 @@ fn layout_field_formats(
             let Some(&fid) = by_name.get(&seg) else {
                 continue;
             };
-            if let Some(fmt) = parse_props(o.props.as_deref()).and_then(|v| v.get("format").cloned())
+            if let Some(fmt) =
+                parse_props(o.props.as_deref()).and_then(|v| v.get("format").cloned())
             {
                 map.insert(fid, fmt);
             }
@@ -1013,8 +1014,7 @@ async fn browse(
                                 // commits the raw `value` (see _band controller).
                                 let (display, style) = match formats.get(&f.id) {
                                     Some(spec) => {
-                                        let fmt =
-                                            format::format_value(&value, Some(spec), f.kind);
+                                        let fmt = format::format_value(&value, Some(spec), f.kind);
                                         let style = fmt
                                             .color
                                             .map(|c| format!("color:{c};"))
@@ -1082,6 +1082,23 @@ struct DesignModel {
     /// (#48/#62). Geometry-independent, so the same list rides every record.
     fields: Vec<FieldChoice>,
     parts: Vec<PartView>,
+    /// Durable object groups (#75). Objects remain rendered under their parts;
+    /// these ids only drive Layout-mode selection/move behaviour.
+    groups: Vec<ObjectGroupView>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ObjectGroupView {
+    id: i64,
+    object_ids: Vec<i64>,
+}
+
+fn object_group_view(g: ObjectGroup) -> ObjectGroupView {
+    ObjectGroupView {
+        id: g.id,
+        object_ids: g.object_ids,
+    }
 }
 
 async fn design_model(
@@ -1131,6 +1148,12 @@ async fn design_model(
         view: lay.view.clone(),
         fields: field_choices,
         parts,
+        groups: sol
+            .object_groups(layout_id)
+            .unwrap()
+            .into_iter()
+            .map(object_group_view)
+            .collect(),
     };
     axum::Json(model).into_response()
 }
@@ -1195,7 +1218,13 @@ async fn update_object_part(
 ) -> impl IntoResponse {
     let sol = st.sol.lock().unwrap();
     let updated = sol
-        .set_object_part(layout_id, object_id, body.part_id, body.x.max(0), body.y.max(0))
+        .set_object_part(
+            layout_id,
+            object_id,
+            body.part_id,
+            body.x.max(0),
+            body.y.max(0),
+        )
         .unwrap();
     if updated == 0 {
         return StatusCode::NOT_FOUND.into_response();
@@ -1253,6 +1282,46 @@ async fn update_objects_z(
     let mut sol = st.sol.lock().unwrap();
     let updated = sol.set_objects_z(layout_id, &pairs).unwrap();
     (StatusCode::OK, updated.to_string()).into_response()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateObjectGroupBody {
+    object_ids: Vec<i64>,
+}
+
+/// Create a durable group over selected layout objects (#75). This is a metadata
+/// relationship only: no child geometry/style/z values change. Re-grouping
+/// objects already in groups replaces their old memberships.
+async fn create_object_group(
+    State(st): State<AppState>,
+    Path(layout_id): Path<i64>,
+    Json(body): Json<CreateObjectGroupBody>,
+) -> impl IntoResponse {
+    let mut sol = st.sol.lock().unwrap();
+    match sol
+        .create_object_group(layout_id, &body.object_ids)
+        .unwrap()
+    {
+        Some(group) => axum::Json(object_group_view(group)).into_response(),
+        None => (
+            StatusCode::BAD_REQUEST,
+            "group needs at least two objects in the layout",
+        )
+            .into_response(),
+    }
+}
+
+/// Ungroup without touching member geometry/styles (#75).
+async fn delete_object_group(
+    State(st): State<AppState>,
+    Path((layout_id, group_id)): Path<(i64, i64)>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    match sol.delete_object_group(layout_id, group_id).unwrap() {
+        0 => StatusCode::NOT_FOUND.into_response(),
+        _ => StatusCode::OK.into_response(),
+    }
 }
 
 /// Clamp a client-sent record number into the found set (1-based, `0` when
@@ -2060,11 +2129,7 @@ pub fn seed(sol: &mut Solution) -> anyhow::Result<()> {
     if sol.tables()?.is_empty() {
         sol.create_table("Customers", &customer_fields)?;
     } else if let Some(table) = sol.table_by_name("Customers")? {
-        let existing: HashSet<String> = sol
-            .fields(table.id)?
-            .into_iter()
-            .map(|f| f.name)
-            .collect();
+        let existing: HashSet<String> = sol.fields(table.id)?.into_iter().map(|f| f.name).collect();
         for f in customer_fields {
             if !existing.contains(&f.name) {
                 sol.add_field(table.id, &f)?;
@@ -2184,6 +2249,11 @@ pub fn app(state: AppState) -> Router {
         .route("/design/:layout/object/:id/part", post(update_object_part))
         .route("/design/:layout/geometry", post(update_objects_geometry))
         .route("/design/:layout/z", post(update_objects_z))
+        .route("/design/:layout/group", post(create_object_group))
+        .route(
+            "/design/:layout/group/:id/delete",
+            post(delete_object_group),
+        )
         .route("/ui/*path", get(ui_asset))
         .with_state(state)
 }
@@ -2891,6 +2961,64 @@ mod tests {
         assert_eq!(after.iter().find(|o| o.id == b).unwrap().z, 7);
     }
 
+    /// #75 durable groups: the group relationship persists in the design model,
+    /// and Ungroup removes only the relationship, not child geometry/styles.
+    #[tokio::test]
+    async fn design_object_group_persists_and_ungroups() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        sol.create_table(
+            "Customers",
+            &[
+                NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                },
+                NewField {
+                    name: "Email".into(),
+                    kind: FieldKind::Text,
+                },
+            ],
+        )
+        .unwrap();
+        let layout_id = sol.layouts().unwrap()[0].id;
+        let part = body_part(&sol, layout_id);
+        let objs = sol.objects(part.id).unwrap();
+        let (a, b) = (objs[0].id, objs[1].id);
+        let state = state_for(sol);
+
+        let (status, body) = post_json_body(
+            state.clone(),
+            &format!("/design/{layout_id}/group"),
+            &format!(r#"{{"objectIds":[{a},{b}]}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(&format!(r#""objectIds":[{a},{b}]"#)),
+            "{body}"
+        );
+
+        let (_, model) = get_body(state.clone(), &format!("/design/{layout_id}/model")).await;
+        assert!(
+            model.contains(&format!(r#""groups":[{{"id":1,"objectIds":[{a},{b}]}}]"#)),
+            "model includes durable group\n{model}"
+        );
+
+        let status = post_json(
+            state.clone(),
+            &format!("/design/{layout_id}/group/1/delete"),
+            "{}",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, model) = get_body(state, &format!("/design/{layout_id}/model")).await;
+        assert!(model.contains(r#""groups":[]"#), "group removed\n{model}");
+        assert!(
+            model.contains(&format!(r#""id":{a}"#)) && model.contains(&format!(r#""id":{b}"#)),
+            "ungroup leaves child objects in place\n{model}"
+        );
+    }
+
     /// #62 two-mount rail: the design page renders the `#layout-tools` mount node
     /// in the sidebar (where the Svelte Create/Style/Zoom zones mount, sharing the
     /// canvas store); Browse mode does not.
@@ -2966,9 +3094,10 @@ mod tests {
         let sol = state.sol.lock().unwrap();
         let objs = sol.objects(part_id).unwrap();
         assert_eq!(objs.len(), before + 1, "one row inserted");
-        assert!(objs
-            .iter()
-            .any(|o| o.kind == ObjectKind::Rect && (o.x, o.y) == (20, 12)));
+        assert!(
+            objs.iter()
+                .any(|o| o.kind == ObjectKind::Rect && (o.x, o.y) == (20, 12))
+        );
     }
 
     /// #48/#60 create: the Field tool POSTs `{kind:"field",fieldId,…}` and gets
@@ -3311,7 +3440,10 @@ mod tests {
         assert!(resp.contains(r#""kind":"subsummary""#) && resp.contains(r#""height":40"#));
         // The response carries the post-insert ordering so the client resyncs
         // positions instead of guessing bottom-most.
-        assert!(resp.contains(r#""positions""#), "create echoes positions\n{resp}");
+        assert!(
+            resp.contains(r#""positions""#),
+            "create echoes positions\n{resp}"
+        );
         let parts = state.sol.lock().unwrap().parts(layout_id).unwrap();
         assert_eq!(parts.len(), before + 1);
         // The new summary must sit ABOVE the footer — never below it.
@@ -3543,7 +3675,9 @@ mod tests {
             .unwrap()
             .id;
         // header, body, sub, grand, footer.
-        let sub = sol.create_part(layout_id, PartKind::SubSummary, 40).unwrap();
+        let sub = sol
+            .create_part(layout_id, PartKind::SubSummary, 40)
+            .unwrap();
         let grand = sol
             .create_part(layout_id, PartKind::GrandSummary, 40)
             .unwrap();
@@ -3641,14 +3775,16 @@ mod tests {
             .await,
             StatusCode::OK
         );
-        assert!(!state
-            .sol
-            .lock()
-            .unwrap()
-            .objects(part_id)
-            .unwrap()
-            .iter()
-            .any(|o| o.id == rect_id));
+        assert!(
+            !state
+                .sol
+                .lock()
+                .unwrap()
+                .objects(part_id)
+                .unwrap()
+                .iter()
+                .any(|o| o.id == rect_id)
+        );
     }
 
     /// #84 restore: helper that creates a rect and returns (state, layout_id,
@@ -3779,7 +3915,10 @@ mod tests {
             .await,
             StatusCode::NOT_FOUND
         );
-        assert!(!object_ids(&state, part_id).contains(&rect_id), "nothing written");
+        assert!(
+            !object_ids(&state, part_id).contains(&rect_id),
+            "nothing written"
+        );
     }
 
     /// #84 restore is atomic: a valid object followed by one referencing a bad part
@@ -3808,7 +3947,10 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         let ids = object_ids(&state, part_id);
-        assert!(!ids.contains(&rect_id), "first object rolled back with the batch");
+        assert!(
+            !ids.contains(&rect_id),
+            "first object rolled back with the batch"
+        );
         assert!(!ids.contains(&free_id));
     }
 
@@ -3950,7 +4092,10 @@ mod tests {
         let fields = sol.fields(tid).unwrap();
         sol.insert_record(
             &table,
-            &[(&fields[0], "1234.5".into()), (&fields[1], "12/25/2003".into())],
+            &[
+                (&fields[0], "1234.5".into()),
+                (&fields[1], "12/25/2003".into()),
+            ],
         )
         .unwrap();
         // Set formats on every layout's field objects.
@@ -3967,7 +4112,12 @@ mod tests {
             )
             .unwrap();
         let layouts = sol.layouts().unwrap();
-        let by_view = |v: &str| layouts.iter().find(|l| canonical_view(&l.view) == v).map(|l| l.id);
+        let by_view = |v: &str| {
+            layouts
+                .iter()
+                .find(|l| canonical_view(&l.view) == v)
+                .map(|l| l.id)
+        };
         let (form, list, table_l) = (
             by_view("form").unwrap(),
             by_view("list").unwrap(),
@@ -3978,8 +4128,14 @@ mod tests {
         for (label, lid) in [("form", form), ("list", list), ("table", table_l)] {
             let (status, html) = get_body(state.clone(), &format!("/browse/{lid}")).await;
             assert_eq!(status, StatusCode::OK, "{label} renders");
-            assert!(html.contains("1,234.50"), "{label} shows the formatted value");
-            assert!(html.contains("2003-12-25"), "{label} shows the formatted date");
+            assert!(
+                html.contains("1,234.50"),
+                "{label} shows the formatted value"
+            );
+            assert!(
+                html.contains("2003-12-25"),
+                "{label} shows the formatted date"
+            );
             // The raw value must ride data-raw (so the editable input commits raw),
             // not be the visible/committed default.
             assert!(

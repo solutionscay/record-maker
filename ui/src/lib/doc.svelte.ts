@@ -28,7 +28,7 @@
 // drag bind onto it without reshaping the store.
 
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
-import type { DesignModel, FieldChoice, ObjectView, PartView } from './model';
+import type { DesignModel, FieldChoice, ObjectGroupView, ObjectView, PartView } from './model';
 import { llog } from './log';
 
 // ── document types ──────────────────────────────────────────────────────────
@@ -197,6 +197,8 @@ export class EditorDoc {
   readonly #objects = new SvelteMap<number, ObjectDoc>();
   /** Parts in `position` order. Replaced immutably on edit so reads stay reactive. */
   #parts = $state<PartDoc[]>([]);
+  /** Durable object groups (#75), keyed by group id. */
+  readonly #groups = new SvelteMap<number, number[]>();
 
   // ── document scope: undo history ──
   /** Sealed undo steps, oldest→newest. Pop to undo. */
@@ -255,6 +257,7 @@ export class EditorDoc {
 
     this.#objects.clear();
     this.#resolved.clear();
+    this.#groups.clear();
     const parts: PartDoc[] = [];
     model.parts.forEach((p, position) => {
       // `position` is the part's top→bottom order; the wire model carries it as
@@ -294,6 +297,10 @@ export class EditorDoc {
         });
       }
     });
+    for (const g of model.groups ?? []) {
+      const ids = g.objectIds.filter((id) => this.#objects.has(id));
+      if (ids.length >= 2) this.#groups.set(g.id, ids);
+    }
     this.#parts = parts;
 
     // Hydration is not undoable: drop any history, open group, and session UI.
@@ -377,6 +384,9 @@ export class EditorDoc {
       view: this.#view,
       fields: this.#fields,
       parts,
+      groups: [...this.#groups.entries()]
+        .sort(([a], [b]) => a - b)
+        .map(([id, objectIds]) => ({ id, objectIds: objectIds.slice() })),
     };
   }
 
@@ -604,6 +614,51 @@ export class EditorDoc {
     });
   }
 
+  // ── document/session bridge: durable groups (#75) ────────────────────────
+
+  get groups(): readonly ObjectGroupView[] {
+    return [...this.#groups.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([id, objectIds]) => ({ id, objectIds: objectIds.slice() }));
+  }
+
+  groupForObject(id: number): Readonly<ObjectGroupView> | null {
+    for (const [groupId, objectIds] of this.#groups) {
+      if (objectIds.includes(id)) return { id: groupId, objectIds: objectIds.slice() };
+    }
+    return null;
+  }
+
+  groupIdForSelection(ids: Iterable<number> = this.#selection): number | null {
+    const selected = [...ids];
+    if (selected.length < 2) return null;
+    const selectedSet = new Set(selected);
+    for (const [groupId, objectIds] of this.#groups) {
+      if (objectIds.length !== selectedSet.size) continue;
+      if (objectIds.every((id) => selectedSet.has(id))) return groupId;
+    }
+    return null;
+  }
+
+  setGroup(group: ObjectGroupView): void {
+    const ids = this.#uniqueKnownIds(group.objectIds);
+    if (ids.length < 2) return;
+    for (const [id, objectIds] of [...this.#groups.entries()]) {
+      if (id === group.id) continue;
+      if (objectIds.some((objectId) => ids.includes(objectId))) this.#groups.delete(id);
+    }
+    this.#groups.set(group.id, ids);
+    this.selectOnly(ids);
+    llog('select', 'setGroup', { id: group.id, objectIds: ids });
+  }
+
+  removeGroup(id: number): void {
+    const ids = this.#groups.get(id)?.slice() ?? [];
+    this.#groups.delete(id);
+    if (ids.length > 0) this.selectOnly(ids);
+    llog('select', 'removeGroup', { id, objectIds: ids });
+  }
+
   // ── undo history: marks, undo, redo ──────────────────────────────────────
 
   /**
@@ -666,14 +721,14 @@ export class EditorDoc {
   select(id: number, additive = false): void {
     this.#selectedPartId = null;
     if (!additive) this.#selection.clear();
-    this.#selection.add(id);
+    for (const objectId of this.#expandGroupIds([id])) this.#selection.add(objectId);
   }
 
   /** Replace the selection with exactly `ids`. */
   selectOnly(ids: Iterable<number>): void {
     this.#selectedPartId = null;
     this.#selection.clear();
-    for (const id of ids) this.#selection.add(id);
+    for (const id of this.#expandGroupIds(ids)) this.#selection.add(id);
     llog('select', 'selectOnly', { ids: [...this.#selection] });
   }
 
@@ -690,8 +745,12 @@ export class EditorDoc {
   /** Toggle one object's membership in the selection. */
   toggle(id: number): void {
     this.#selectedPartId = null;
-    if (this.#selection.has(id)) this.#selection.delete(id);
-    else this.#selection.add(id);
+    const ids = this.#expandGroupIds([id]);
+    const allSelected = ids.every((objectId) => this.#selection.has(objectId));
+    for (const objectId of ids) {
+      if (allSelected) this.#selection.delete(objectId);
+      else this.#selection.add(objectId);
+    }
   }
 
   clearSelection(): void {
@@ -863,6 +922,7 @@ export class EditorDoc {
       this.#objects.delete(id);
       this.#resolved.delete(id);
       this.#selection.delete(id);
+      this.#pruneGroupsForObject(id);
     } else {
       this.#objects.set(id, { ...snap.doc });
       this.#resolved.set(id, { ...snap.resolved });
@@ -912,6 +972,35 @@ export class EditorDoc {
       } else if (d.target === 'part' && this.#parts.some((p) => p.id === d.id)) {
         this.#selectedPartId = d.id;
       }
+    }
+  }
+
+  #expandGroupIds(ids: Iterable<number>): number[] {
+    const expanded: number[] = [];
+    for (const id of ids) {
+      const group = this.groupForObject(id);
+      const objectIds = group?.objectIds ?? [id];
+      for (const objectId of objectIds) {
+        if (this.#objects.has(objectId) && !expanded.includes(objectId)) expanded.push(objectId);
+      }
+    }
+    return expanded;
+  }
+
+  #uniqueKnownIds(ids: Iterable<number>): number[] {
+    const unique: number[] = [];
+    for (const id of ids) {
+      if (this.#objects.has(id) && !unique.includes(id)) unique.push(id);
+    }
+    return unique;
+  }
+
+  #pruneGroupsForObject(id: number): void {
+    for (const [groupId, objectIds] of [...this.#groups.entries()]) {
+      if (!objectIds.includes(id)) continue;
+      const next = objectIds.filter((objectId) => objectId !== id && this.#objects.has(objectId));
+      if (next.length >= 2) this.#groups.set(groupId, next);
+      else this.#groups.delete(groupId);
     }
   }
 }

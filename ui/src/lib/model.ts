@@ -83,6 +83,14 @@ export interface PartView {
   objects: ObjectView[];
 }
 
+/** A durable group over existing layout object ids (#75). The grouped objects
+ * still render as normal children of their parts; this relationship drives
+ * Layout-mode selection and group move behaviour. */
+export interface ObjectGroupView {
+  id: number;
+  objectIds: number[];
+}
+
 /** The full design read model for one layout/record. */
 export interface DesignModel {
   /** Layout id. */
@@ -99,4 +107,6 @@ export interface DesignModel {
   fields: FieldChoice[];
   /** Layout parts, rendered top→bottom in array order. */
   parts: PartView[];
+  /** Durable object groups. */
+  groups: ObjectGroupView[];
 }

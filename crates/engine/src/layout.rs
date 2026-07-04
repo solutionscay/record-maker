@@ -49,8 +49,8 @@
 //! - `props` — JSON bag reserved for appearance/style and misc (#49). The
 //!   structural contract does not define its shape; it round-trips opaquely.
 
-use anyhow::{bail, Result};
-use rusqlite::{params, Connection, Transaction};
+use anyhow::{Result, bail};
+use rusqlite::{Connection, Transaction, params};
 
 use crate::Solution;
 
@@ -198,6 +198,16 @@ pub struct ObjectMeta {
     pub props: Option<String>,
 }
 
+/// A durable selection/move group over existing layout objects (#75). Groups are
+/// not renderable objects; every child keeps its own geometry, z, styles, and
+/// owning part. Membership is one-level only: an object can belong to at most one
+/// group, so regrouping selected members replaces their old groups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectGroup {
+    pub id: i64,
+    pub object_ids: Vec<i64>,
+}
+
 /// A new object to insert on a part (#48, the Create-zone palette). Carries the
 /// structural payload the caller supplies; the engine fills the interim defaults
 /// (`z = 0`, `read_only = false`). `binding`/`content`/`props` follow the per-kind
@@ -334,6 +344,37 @@ impl Solution {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Durable groups for a layout, ordered by group id and member position (#75).
+    /// Groups with fewer than two live members are ignored; cleanup happens on
+    /// mutation, and this read path remains lenient for older data.
+    pub fn object_groups(&self, layout_id: i64) -> Result<Vec<ObjectGroup>> {
+        let mut stmt = self.app.prepare(
+            "SELECT g.id, m.object_id \
+             FROM meta_object_group g \
+             JOIN meta_object_group_member m ON m.group_id = g.id \
+             JOIN meta_object o ON o.id = m.object_id \
+             JOIN meta_part p ON p.id = o.part_id \
+             WHERE g.layout_id=?1 AND p.layout_id=?1 \
+             ORDER BY g.id, m.position, m.object_id",
+        )?;
+        let rows = stmt.query_map(params![layout_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut groups: Vec<ObjectGroup> = Vec::new();
+        for row in rows {
+            let (group_id, object_id) = row?;
+            match groups.last_mut() {
+                Some(g) if g.id == group_id => g.object_ids.push(object_id),
+                _ => groups.push(ObjectGroup {
+                    id: group_id,
+                    object_ids: vec![object_id],
+                }),
+            }
+        }
+        groups.retain(|g| g.object_ids.len() >= 2);
+        Ok(groups)
+    }
+
     /// Read one object by id, **scoped** to `layout_id` (the part must belong to
     /// the layout). Returns `None` for an unknown/foreign id. Used after a props
     /// edit to re-derive that object's shape style server-side (#49).
@@ -458,6 +499,98 @@ impl Solution {
         }
         tx.commit()?;
         Ok(updated)
+    }
+
+    /// Create a durable group over existing objects in `layout_id` (#75). Returns
+    /// `None` when fewer than two unique ids are supplied, or any id is unknown /
+    /// foreign to the layout. Objects can belong to only one group; if any member
+    /// was already grouped, those previous groups are removed before the new
+    /// membership is inserted. That is the v1 "no nested groups" rule.
+    pub fn create_object_group(
+        &mut self,
+        layout_id: i64,
+        object_ids: &[i64],
+    ) -> Result<Option<ObjectGroup>> {
+        let mut ids = Vec::new();
+        for &id in object_ids {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        if ids.len() < 2 {
+            return Ok(None);
+        }
+        for &id in &ids {
+            if self.object_by_id(layout_id, id)?.is_none() {
+                return Ok(None);
+            }
+        }
+
+        let mut old_group_ids = Vec::new();
+        {
+            let mut stmt = self.app.prepare(
+                "SELECT DISTINCT m.group_id \
+                 FROM meta_object_group_member m \
+                 JOIN meta_object_group g ON g.id = m.group_id \
+                 WHERE g.layout_id=?1 AND m.object_id=?2",
+            )?;
+            for &id in &ids {
+                let rows = stmt.query_map(params![layout_id, id], |r| r.get::<_, i64>(0))?;
+                for row in rows {
+                    let group_id = row?;
+                    if !old_group_ids.contains(&group_id) {
+                        old_group_ids.push(group_id);
+                    }
+                }
+            }
+        }
+
+        let tx = self.app.transaction()?;
+        for group_id in old_group_ids {
+            tx.execute(
+                "DELETE FROM meta_object_group WHERE id=?1 AND layout_id=?2",
+                params![group_id, layout_id],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO meta_object_group(layout_id) VALUES (?1)",
+            params![layout_id],
+        )?;
+        let group_id = tx.last_insert_rowid();
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO meta_object_group_member(group_id, object_id, position) \
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for (position, id) in ids.iter().enumerate() {
+                stmt.execute(params![group_id, id, position as i64])?;
+            }
+        }
+        tx.commit()?;
+        Ok(Some(ObjectGroup {
+            id: group_id,
+            object_ids: ids,
+        }))
+    }
+
+    /// Remove a group from a layout. Child objects are untouched (#75 Ungroup).
+    pub fn delete_object_group(&self, layout_id: i64, group_id: i64) -> Result<usize> {
+        let n = self.app.execute(
+            "DELETE FROM meta_object_group WHERE id=?1 AND layout_id=?2",
+            params![group_id, layout_id],
+        )?;
+        Ok(n)
+    }
+
+    fn delete_degenerate_object_groups(&self, layout_id: i64) -> Result<usize> {
+        let n = self.app.execute(
+            "DELETE FROM meta_object_group \
+             WHERE layout_id=?1 \
+               AND (SELECT count(*) FROM meta_object_group_member \
+                    WHERE group_id = meta_object_group.id) < 2",
+            params![layout_id],
+        )?;
+        Ok(n)
     }
 
     /// Insert one object on a part of `layout_id` (#48). **Layout-scoped**: the
@@ -885,6 +1018,9 @@ impl Solution {
              WHERE id=?1 AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?2)",
             params![object_id, layout_id],
         )?;
+        if n > 0 {
+            self.delete_degenerate_object_groups(layout_id)?;
+        }
         Ok(n)
     }
 
@@ -1054,7 +1190,13 @@ pub(crate) fn clone_layout(
         )?;
         let rows = stmt
             .query_map(params![src_layout_id], |r| {
-                Ok((r.get(0)?, r.get::<_, String>(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                Ok((
+                    r.get(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
@@ -1077,8 +1219,8 @@ pub(crate) fn clone_layout(
 
 #[cfg(test)]
 mod tests {
-    use crate::layout::{NewObject, ObjectKind, PartKind};
     use crate::PartMeta;
+    use crate::layout::{NewObject, ObjectKind, PartKind};
     use crate::{FieldKind, NewField, Solution};
 
     fn body_part(s: &Solution, layout_id: i64) -> PartMeta {
@@ -1388,8 +1530,22 @@ mod tests {
             .unwrap();
         assert_eq!(n, 2, "only the two real objects update");
         // `objects()` sorts by (z, id), so read back by id rather than position.
-        let za = |s: &Solution| s.objects(part.id).unwrap().into_iter().find(|o| o.id == a).unwrap().z;
-        let zb = |s: &Solution| s.objects(part.id).unwrap().into_iter().find(|o| o.id == b).unwrap().z;
+        let za = |s: &Solution| {
+            s.objects(part.id)
+                .unwrap()
+                .into_iter()
+                .find(|o| o.id == a)
+                .unwrap()
+                .z
+        };
+        let zb = |s: &Solution| {
+            s.objects(part.id)
+                .unwrap()
+                .into_iter()
+                .find(|o| o.id == b)
+                .unwrap()
+                .z
+        };
         assert_eq!(za(&s), 3);
         assert_eq!(zb(&s), 7);
 
@@ -1594,10 +1750,11 @@ mod tests {
         assert_eq!((field.x, field.y), (120, 40));
 
         // Foreign part ⇒ no-op, nothing inserted.
-        assert!(s
-            .create_field_object(lay.id, 999_999, "Customers.Name", "Name", 0, 0, 1, 1)
-            .unwrap()
-            .is_none());
+        assert!(
+            s.create_field_object(lay.id, 999_999, "Customers.Name", "Name", 0, 0, 1, 1)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1633,7 +1790,10 @@ mod tests {
         let made = parts.iter().find(|p| p.id == pid).unwrap();
         assert_eq!(made.kind, PartKind::SubSummary);
         assert_eq!(made.height, 48);
-        assert!(made.position < footer_pos + 1, "inserted before shifted footer");
+        assert!(
+            made.position < footer_pos + 1,
+            "inserted before shifted footer"
+        );
         assert_eq!(
             parts.last().unwrap().kind,
             PartKind::Footer,
@@ -1670,7 +1830,8 @@ mod tests {
         assert_eq!(s.part_by_id(lay.id, part.id).unwrap().unwrap().height, 180);
 
         assert_eq!(
-            s.set_part_kind(lay.id, part.id, PartKind::GrandSummary).unwrap(),
+            s.set_part_kind(lay.id, part.id, PartKind::GrandSummary)
+                .unwrap(),
             1
         );
         assert_eq!(
@@ -1692,7 +1853,10 @@ mod tests {
         );
 
         assert_eq!(s.delete_part(lay.id + 999, part.id).unwrap(), 0);
-        assert!(s.delete_part(lay.id, body.id).is_err(), "body cannot be deleted");
+        assert!(
+            s.delete_part(lay.id, body.id).is_err(),
+            "body cannot be deleted"
+        );
         assert_eq!(s.delete_part(lay.id, part.id).unwrap(), 1);
         assert!(s.part_by_id(lay.id, part.id).unwrap().is_none());
         assert!(
@@ -1935,20 +2099,23 @@ mod tests {
             .into_iter()
             .find(|p| p.kind == PartKind::Footer)
             .unwrap();
-        assert!(s
-            .set_part_kind(form.id, form_footer.id, PartKind::SubSummary)
-            .is_err());
-        assert!(s
-            .set_part_kind(form.id, form_footer.id, PartKind::GrandSummary)
-            .is_err());
+        assert!(
+            s.set_part_kind(form.id, form_footer.id, PartKind::SubSummary)
+                .is_err()
+        );
+        assert!(
+            s.set_part_kind(form.id, form_footer.id, PartKind::GrandSummary)
+                .is_err()
+        );
 
         // A list allows creating summary bands of both kinds...
         assert!(s.create_part(list.id, PartKind::SubSummary, 40).is_ok());
         let list_grand = s.create_part(list.id, PartKind::GrandSummary, 40).unwrap();
         // ...and converting one summary kind into the other.
-        assert!(s
-            .set_part_kind(list.id, list_grand, PartKind::SubSummary)
-            .is_ok());
+        assert!(
+            s.set_part_kind(list.id, list_grand, PartKind::SubSummary)
+                .is_ok()
+        );
         // But the footer stays structural even on a list — it can't become a
         // summary (that would strand a summary below the footer).
         let list_footer = s
@@ -1957,9 +2124,10 @@ mod tests {
             .into_iter()
             .find(|p| p.kind == PartKind::Footer)
             .unwrap();
-        assert!(s
-            .set_part_kind(list.id, list_footer.id, PartKind::SubSummary)
-            .is_err());
+        assert!(
+            s.set_part_kind(list.id, list_footer.id, PartKind::SubSummary)
+                .is_err()
+        );
     }
 
     #[test]

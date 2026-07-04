@@ -1,6 +1,6 @@
 //! #9 — defining user tables/fields and creating their physical tables in data.db.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::params;
 
 use crate::Solution;
@@ -80,6 +80,31 @@ pub struct FieldMeta {
     pub position: i64,
 }
 
+/// Metadata for a named foreign-key relationship between two user tables.
+#[derive(Debug, Clone)]
+pub struct RelationshipMeta {
+    pub id: i64,
+    pub name: String,
+    /// Child/source table: the table that owns the FK field.
+    pub from_table: i64,
+    /// Parent/target table: the table whose key field is referenced.
+    pub to_table: i64,
+    /// FK field on [`RelationshipMeta::from_table`].
+    pub from_field: i64,
+    /// Key field on [`RelationshipMeta::to_table`].
+    pub to_field: i64,
+}
+
+/// A relationship to create or replace.
+#[derive(Debug, Clone)]
+pub struct NewRelationship {
+    pub name: String,
+    pub from_table: i64,
+    pub to_table: i64,
+    pub from_field: i64,
+    pub to_field: i64,
+}
+
 impl Solution {
     /// Define a new user table + fields (metadata in app.db) and create its
     /// physical table in data.db. Returns the new table id.
@@ -123,14 +148,17 @@ impl Solution {
         // field object per field), cloned into independent List and Table layouts
         // — all in the same transaction, so table + layouts are created atomically.
         // The three start identical but are then designed independently.
-        let form_layout_id = crate::layout::generate_default_form(&tx, table_id, name, &field_meta)?;
+        let form_layout_id =
+            crate::layout::generate_default_form(&tx, table_id, name, &field_meta)?;
         crate::layout::clone_layout(&tx, form_layout_id, name, table_id, "list")?;
         crate::layout::clone_layout(&tx, form_layout_id, name, table_id, "table")?;
         tx.commit()?;
 
         // Physical table lives in data.db (a separate connection → a separate step).
         let ddl = format!("CREATE TABLE {table_phys} ({})", col_defs.join(", "));
-        self.data.execute(&ddl, []).context("create physical table")?;
+        self.data
+            .execute(&ddl, [])
+            .context("create physical table")?;
         Ok(table_id)
     }
 
@@ -159,7 +187,11 @@ impl Solution {
         )?;
         tx.commit()?;
 
-        let ddl = format!("ALTER TABLE {} ADD COLUMN {fphys} {}", table.phys, f.kind.sql_type());
+        let ddl = format!(
+            "ALTER TABLE {} ADD COLUMN {fphys} {}",
+            table.phys,
+            f.kind.sql_type()
+        );
         self.data.execute(&ddl, []).context("add physical column")?;
         Ok(FieldMeta {
             id: fid,
@@ -168,6 +200,177 @@ impl Solution {
             kind: f.kind,
             position,
         })
+    }
+
+    /// Rename a user table in metadata. Physical table names stay id-derived and
+    /// stable; direct layout bindings rooted at the old logical table name are
+    /// rewritten so existing field objects continue to resolve.
+    pub fn rename_table(&mut self, table_id: i64, name: &str) -> Result<Option<TableMeta>> {
+        let Some(table) = self.table_by_id(table_id)? else {
+            return Ok(None);
+        };
+        let old_name = table.name;
+        let tx = self.app.transaction()?;
+        tx.execute(
+            "UPDATE meta_table SET name=?1 WHERE id=?2",
+            params![name, table_id],
+        )?;
+        tx.execute(
+            "UPDATE meta_layout SET name=?1 WHERE table_id=?2",
+            params![name, table_id],
+        )?;
+        let prefix_len = old_name.len() as i64 + 1;
+        let old_prefix = format!("{old_name}.");
+        tx.execute(
+            "UPDATE meta_object SET binding=?1 || substr(binding, ?2) \
+             WHERE binding=?3 OR substr(binding, 1, ?2)=?4",
+            params![name, prefix_len, old_name, old_prefix],
+        )?;
+        tx.commit()?;
+        self.table_by_id(table_id)
+    }
+
+    /// Delete a user table and its metadata. The data table is dropped first, then
+    /// metadata cascades remove fields, layouts, and relationships.
+    pub fn delete_table(&mut self, table_id: i64) -> Result<usize> {
+        let Some(table) = self.table_by_id(table_id)? else {
+            return Ok(0);
+        };
+        self.data
+            .execute(&format!("DROP TABLE IF EXISTS {}", table.phys), [])
+            .context("drop physical table")?;
+        let n = self
+            .app
+            .execute("DELETE FROM meta_table WHERE id=?1", params![table_id])?;
+        Ok(n)
+    }
+
+    /// Rename a field and rewrite direct `<Table>.<Field>` bindings.
+    pub fn rename_field(
+        &mut self,
+        table_id: i64,
+        field_id: i64,
+        name: &str,
+    ) -> Result<Option<FieldMeta>> {
+        let Some(table) = self.table_by_id(table_id)? else {
+            return Ok(None);
+        };
+        let Some(field) = self.field_by_id(table_id, field_id)? else {
+            return Ok(None);
+        };
+        let old_binding = format!("{}.{}", table.name, field.name);
+        let new_binding = format!("{}.{}", table.name, name);
+        let tx = self.app.transaction()?;
+        tx.execute(
+            "UPDATE meta_field SET name=?1 WHERE id=?2 AND table_id=?3",
+            params![name, field_id, table_id],
+        )?;
+        tx.execute(
+            "UPDATE meta_object SET binding=?1 WHERE binding=?2",
+            params![new_binding, old_binding],
+        )?;
+        tx.commit()?;
+        self.field_by_id(table_id, field_id)
+    }
+
+    /// Retype a field. SQLite cannot alter a column type in place, so the dynamic
+    /// table is rebuilt with the same physical columns and the new affinity.
+    pub fn retype_field(
+        &mut self,
+        table_id: i64,
+        field_id: i64,
+        kind: FieldKind,
+    ) -> Result<Option<FieldMeta>> {
+        let Some(table) = self.table_by_id(table_id)? else {
+            return Ok(None);
+        };
+        let Some(field) = self.field_by_id(table_id, field_id)? else {
+            return Ok(None);
+        };
+        if field.kind != kind {
+            let mut fields = self.fields(table_id)?;
+            for f in &mut fields {
+                if f.id == field_id {
+                    f.kind = kind;
+                }
+            }
+            self.rebuild_physical_table(&table, &fields)
+                .context("rebuild physical table for field retype")?;
+        }
+        self.app.execute(
+            "UPDATE meta_field SET kind=?1 WHERE id=?2 AND table_id=?3",
+            params![kind.as_str(), field_id, table_id],
+        )?;
+        self.field_by_id(table_id, field_id)
+    }
+
+    /// Reorder every field in a table. `field_ids` must contain exactly the
+    /// table's current fields, once each.
+    pub fn reorder_fields(&mut self, table_id: i64, field_ids: &[i64]) -> Result<Vec<FieldMeta>> {
+        let current = self.fields(table_id)?;
+        if current.len() != field_ids.len() {
+            bail!("field order must include every field exactly once");
+        }
+        for f in &current {
+            if !field_ids.contains(&f.id) {
+                bail!("field order must include every field exactly once");
+            }
+        }
+        for id in field_ids {
+            if field_ids.iter().filter(|other| *other == id).count() != 1 {
+                bail!("field order must not contain duplicates");
+            }
+        }
+        let tx = self.app.transaction()?;
+        for (position, field_id) in field_ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE meta_field SET position=?1 WHERE id=?2 AND table_id=?3",
+                params![position as i64, field_id, table_id],
+            )?;
+        }
+        tx.commit()?;
+        self.fields(table_id)
+    }
+
+    /// Delete a field from metadata and from the physical data table.
+    pub fn delete_field(&mut self, table_id: i64, field_id: i64) -> Result<usize> {
+        let Some(table) = self.table_by_id(table_id)? else {
+            return Ok(0);
+        };
+        let Some(field) = self.field_by_id(table_id, field_id)? else {
+            return Ok(0);
+        };
+        self.data
+            .execute(
+                &format!("ALTER TABLE {} DROP COLUMN {}", table.phys, field.phys),
+                [],
+            )
+            .context("drop physical column")?;
+        let binding = format!("{}.{}", table.name, field.name);
+        let tx = self.app.transaction()?;
+        tx.execute(
+            "DELETE FROM meta_relationship WHERE from_field=?1 OR to_field=?1",
+            params![field_id],
+        )?;
+        tx.execute(
+            "UPDATE meta_object SET binding=NULL WHERE binding=?1",
+            params![binding],
+        )?;
+        let n = tx.execute(
+            "DELETE FROM meta_field WHERE id=?1 AND table_id=?2",
+            params![field_id, table_id],
+        )?;
+        tx.execute(
+            "UPDATE meta_field SET position = ( \
+                 SELECT count(*) FROM meta_field f2 \
+                 WHERE f2.table_id=meta_field.table_id \
+                   AND (f2.position < meta_field.position \
+                        OR (f2.position = meta_field.position AND f2.id <= meta_field.id)) \
+             ) - 1 WHERE table_id=?1",
+            params![table_id],
+        )?;
+        tx.commit()?;
+        Ok(n)
     }
 
     /// All defined tables, by name.
@@ -221,6 +424,28 @@ impl Solution {
         }
     }
 
+    /// Look up a field by id, scoped to its table.
+    pub fn field_by_id(&self, table_id: i64, field_id: i64) -> Result<Option<FieldMeta>> {
+        let mut stmt = self.app.prepare(
+            "SELECT id, name, phys_name, kind, position FROM meta_field \
+             WHERE table_id=?1 AND id=?2",
+        )?;
+        let mut rows = stmt.query_map(params![table_id, field_id], |r| {
+            let kind_s: String = r.get(3)?;
+            Ok(FieldMeta {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                phys: r.get(2)?,
+                kind: FieldKind::parse(&kind_s).unwrap_or(FieldKind::Text),
+                position: r.get(4)?,
+            })
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
     /// Fields of a table, in display order.
     pub fn fields(&self, table_id: i64) -> Result<Vec<FieldMeta>> {
         let mut stmt = self.app.prepare(
@@ -239,11 +464,145 @@ impl Solution {
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+
+    /// All declared relationships, ordered by source table then name.
+    pub fn relationships(&self) -> Result<Vec<RelationshipMeta>> {
+        let mut stmt = self.app.prepare(
+            "SELECT id, name, from_table, to_table, from_field, to_field \
+             FROM meta_relationship ORDER BY from_table, name, id",
+        )?;
+        let rows = stmt.query_map([], relationship_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Declared relationships whose FK/source side is `from_table`.
+    pub fn relationships_from_table(&self, from_table: i64) -> Result<Vec<RelationshipMeta>> {
+        let mut stmt = self.app.prepare(
+            "SELECT id, name, from_table, to_table, from_field, to_field \
+             FROM meta_relationship WHERE from_table=?1 ORDER BY from_table, name, id",
+        )?;
+        let rows = stmt.query_map(params![from_table], relationship_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Look up one relationship by id.
+    pub fn relationship_by_id(&self, id: i64) -> Result<Option<RelationshipMeta>> {
+        let mut stmt = self.app.prepare(
+            "SELECT id, name, from_table, to_table, from_field, to_field \
+             FROM meta_relationship WHERE id=?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], relationship_from_row)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Declare a named FK relationship. Returns `None` when any referenced table
+    /// or field does not exist, or when a field is not on the declared table.
+    pub fn create_relationship(
+        &mut self,
+        rel: &NewRelationship,
+    ) -> Result<Option<RelationshipMeta>> {
+        if !self.relationship_refs_are_valid(rel)? {
+            return Ok(None);
+        }
+        self.app.execute(
+            "INSERT INTO meta_relationship(name, from_table, to_table, from_field, to_field) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                rel.name,
+                rel.from_table,
+                rel.to_table,
+                rel.from_field,
+                rel.to_field
+            ],
+        )?;
+        self.relationship_by_id(self.app.last_insert_rowid())
+    }
+
+    /// Replace a relationship declaration.
+    pub fn update_relationship(
+        &mut self,
+        id: i64,
+        rel: &NewRelationship,
+    ) -> Result<Option<RelationshipMeta>> {
+        if self.relationship_by_id(id)?.is_none() || !self.relationship_refs_are_valid(rel)? {
+            return Ok(None);
+        }
+        self.app.execute(
+            "UPDATE meta_relationship \
+             SET name=?1, from_table=?2, to_table=?3, from_field=?4, to_field=?5 \
+             WHERE id=?6",
+            params![
+                rel.name,
+                rel.from_table,
+                rel.to_table,
+                rel.from_field,
+                rel.to_field,
+                id
+            ],
+        )?;
+        self.relationship_by_id(id)
+    }
+
+    /// Delete a declared relationship by id.
+    pub fn delete_relationship(&self, id: i64) -> Result<usize> {
+        Ok(self
+            .app
+            .execute("DELETE FROM meta_relationship WHERE id=?1", params![id])?)
+    }
+
+    fn relationship_refs_are_valid(&self, rel: &NewRelationship) -> Result<bool> {
+        Ok(self.table_by_id(rel.from_table)?.is_some()
+            && self.table_by_id(rel.to_table)?.is_some()
+            && self.field_by_id(rel.from_table, rel.from_field)?.is_some()
+            && self.field_by_id(rel.to_table, rel.to_field)?.is_some())
+    }
+
+    fn rebuild_physical_table(&mut self, table: &TableMeta, fields: &[FieldMeta]) -> Result<()> {
+        let tmp = format!("{}_rm_rebuild", table.phys);
+        let mut columns = vec!["id INTEGER PRIMARY KEY".to_string()];
+        for field in fields {
+            columns.push(format!("{} {}", field.phys, field.kind.sql_type()));
+        }
+        let names: Vec<&str> = fields.iter().map(|f| f.phys.as_str()).collect();
+        let copy_columns = if names.is_empty() {
+            "id".to_string()
+        } else {
+            format!("id, {}", names.join(", "))
+        };
+        let tx = self.data.transaction()?;
+        tx.execute(&format!("DROP TABLE IF EXISTS {tmp}"), [])?;
+        tx.execute(&format!("CREATE TABLE {tmp} ({})", columns.join(", ")), [])?;
+        tx.execute(
+            &format!(
+                "INSERT INTO {tmp} ({copy_columns}) SELECT {copy_columns} FROM {}",
+                table.phys
+            ),
+            [],
+        )?;
+        tx.execute(&format!("DROP TABLE {}", table.phys), [])?;
+        tx.execute(&format!("ALTER TABLE {tmp} RENAME TO {}", table.phys), [])?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+fn relationship_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RelationshipMeta> {
+    Ok(RelationshipMeta {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        from_table: row.get(2)?,
+        to_table: row.get(3)?,
+        from_field: row.get(4)?,
+        to_field: row.get(5)?,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{FieldKind, NewField, Solution};
+    use crate::{FieldKind, NewField, NewRelationship, Solution};
 
     #[test]
     fn field_kind_str_parse_and_sql_type_round_trip() {
@@ -273,8 +632,14 @@ mod tests {
             .create_table(
                 "Invoices",
                 &[
-                    NewField { name: "Number".into(), kind: FieldKind::Text },
-                    NewField { name: "Total".into(), kind: FieldKind::Number },
+                    NewField {
+                        name: "Number".into(),
+                        kind: FieldKind::Text,
+                    },
+                    NewField {
+                        name: "Total".into(),
+                        kind: FieldKind::Number,
+                    },
                 ],
             )
             .unwrap();
@@ -286,7 +651,9 @@ mod tests {
         let mut views: Vec<&str> = layouts.iter().map(|l| l.view.as_str()).collect();
         views.sort_unstable();
         assert_eq!(views, ["form", "list", "table"]);
-        assert!(layouts.iter().all(|l| l.name == "Invoices" && l.table_id == tid));
+        assert!(layouts
+            .iter()
+            .all(|l| l.name == "Invoices" && l.table_id == tid));
         let lay = layouts.iter().find(|l| l.view == "form").unwrap();
 
         let body_parts: i64 = s
@@ -309,7 +676,14 @@ mod tests {
             .unwrap();
         let rows: Vec<(String, i64, i64, i64, Option<String>, Option<String>)> = stmt
             .query_map([lay.id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
             })
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -321,11 +695,26 @@ mod tests {
         for row in &rows {
             assert!(row.2 > 0 && row.3 > 0, "non-zero w/h");
         }
-        assert_eq!((rows[0].0.as_str(), rows[0].5.as_deref()), ("text", Some("Number")));
-        assert_eq!((rows[1].0.as_str(), rows[1].4.as_deref()), ("field", Some("Invoices.Number")));
-        assert_eq!((rows[2].0.as_str(), rows[2].5.as_deref()), ("text", Some("Total")));
-        assert_eq!((rows[3].0.as_str(), rows[3].4.as_deref()), ("field", Some("Invoices.Total")));
-        assert!(rows[0].1 == rows[1].1 && rows[2].1 == rows[3].1, "label shares its value's row");
+        assert_eq!(
+            (rows[0].0.as_str(), rows[0].5.as_deref()),
+            ("text", Some("Number"))
+        );
+        assert_eq!(
+            (rows[1].0.as_str(), rows[1].4.as_deref()),
+            ("field", Some("Invoices.Number"))
+        );
+        assert_eq!(
+            (rows[2].0.as_str(), rows[2].5.as_deref()),
+            ("text", Some("Total"))
+        );
+        assert_eq!(
+            (rows[3].0.as_str(), rows[3].4.as_deref()),
+            ("field", Some("Invoices.Total"))
+        );
+        assert!(
+            rows[0].1 == rows[1].1 && rows[2].1 == rows[3].1,
+            "label shares its value's row"
+        );
         assert!(rows[1].1 < rows[3].1, "rows increase down the form");
     }
 
@@ -383,5 +772,175 @@ mod tests {
             )
             .unwrap();
         assert_eq!(objs, 0);
+    }
+
+    #[test]
+    fn rename_table_and_field_keep_direct_bindings_resolvable() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s
+            .create_table(
+                "Customers",
+                &[NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                }],
+            )
+            .unwrap();
+        let fid = s.fields(tid).unwrap()[0].id;
+
+        s.rename_table(tid, "People").unwrap().unwrap();
+        s.rename_field(tid, fid, "Full Name").unwrap().unwrap();
+
+        let bindings: Vec<String> = {
+            let mut stmt = s
+                .app
+                .prepare("SELECT binding FROM meta_object WHERE binding IS NOT NULL")
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert!(bindings.iter().all(|b| b == "People.Full Name"));
+    }
+
+    #[test]
+    fn field_retype_reorder_and_delete_update_metadata_and_data_table() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s
+            .create_table(
+                "Things",
+                &[
+                    NewField {
+                        name: "Name".into(),
+                        kind: FieldKind::Text,
+                    },
+                    NewField {
+                        name: "Score".into(),
+                        kind: FieldKind::Number,
+                    },
+                ],
+            )
+            .unwrap();
+        let table = s.table_by_id(tid).unwrap().unwrap();
+        let fields = s.fields(tid).unwrap();
+        s.insert_record(
+            &table,
+            &[(&fields[0], "A".into()), (&fields[1], "7".into())],
+        )
+        .unwrap();
+
+        s.retype_field(tid, fields[1].id, FieldKind::Text)
+            .unwrap()
+            .unwrap();
+        let columns: Vec<(String, String)> = {
+            let mut stmt = s
+                .data
+                .prepare(&format!("PRAGMA table_info({})", table.phys))
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(
+            columns
+                .iter()
+                .find(|(name, _)| name == &fields[1].phys)
+                .unwrap()
+                .1,
+            "TEXT"
+        );
+        let cells = &s.list_records(&table, &s.fields(tid).unwrap()).unwrap()[0].cells;
+        assert_eq!(cells[0], "A");
+        assert_eq!(cells[1].parse::<f64>().unwrap(), 7.0);
+
+        let reordered = s
+            .reorder_fields(tid, &[fields[1].id, fields[0].id])
+            .unwrap();
+        assert_eq!(
+            reordered
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Score", "Name"]
+        );
+
+        assert_eq!(s.delete_field(tid, fields[0].id).unwrap(), 1);
+        let after = s.fields(tid).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].name, "Score");
+        assert_eq!(
+            s.list_records(&table, &after).unwrap()[0].cells[0]
+                .parse::<f64>()
+                .unwrap(),
+            7.0
+        );
+    }
+
+    #[test]
+    fn relationship_crud_validates_table_field_ownership() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let customers = s
+            .create_table(
+                "Customers",
+                &[NewField {
+                    name: "Id".into(),
+                    kind: FieldKind::Number,
+                }],
+            )
+            .unwrap();
+        let invoices = s
+            .create_table(
+                "Invoices",
+                &[NewField {
+                    name: "Customer Id".into(),
+                    kind: FieldKind::Number,
+                }],
+            )
+            .unwrap();
+        let customer_id = s.fields(customers).unwrap()[0].id;
+        let invoice_customer_id = s.fields(invoices).unwrap()[0].id;
+
+        let rel = s
+            .create_relationship(&NewRelationship {
+                name: "customer".into(),
+                from_table: invoices,
+                to_table: customers,
+                from_field: invoice_customer_id,
+                to_field: customer_id,
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(rel.name, "customer");
+        assert_eq!(s.relationships_from_table(invoices).unwrap().len(), 1);
+
+        assert!(s
+            .create_relationship(&NewRelationship {
+                name: "bad".into(),
+                from_table: invoices,
+                to_table: customers,
+                from_field: customer_id,
+                to_field: invoice_customer_id,
+            })
+            .unwrap()
+            .is_none());
+
+        let renamed = s
+            .update_relationship(
+                rel.id,
+                &NewRelationship {
+                    name: "bill_to".into(),
+                    from_table: invoices,
+                    to_table: customers,
+                    from_field: invoice_customer_id,
+                    to_field: customer_id,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.name, "bill_to");
+        assert_eq!(s.delete_relationship(rel.id).unwrap(), 1);
+        assert!(s.relationships().unwrap().is_empty());
     }
 }

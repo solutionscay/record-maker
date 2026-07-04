@@ -16,15 +16,16 @@ use std::sync::{Arc, Mutex};
 
 use askama::Template;
 use axum::{
-    Json, Router,
     extract::{Form, Path, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect},
     routing::{get, post},
+    Json, Router,
 };
 use record_maker_engine::{
-    FieldKind, FieldMeta, LayoutMeta, NewField, NewObject, ObjectGroup, ObjectKind, ObjectMeta,
-    PartKind, PartMeta, RestoreObject, RestoreResult, Solution, TableMeta,
+    FieldKind, FieldMeta, LayoutMeta, NewField, NewObject, NewRelationship, ObjectGroup,
+    ObjectKind, ObjectMeta, PartKind, PartMeta, RelationshipMeta, RestoreObject, RestoreResult,
+    Solution, TableMeta,
 };
 
 mod format;
@@ -1098,6 +1099,322 @@ fn object_group_view(g: ObjectGroup) -> ObjectGroupView {
     ObjectGroupView {
         id: g.id,
         object_ids: g.object_ids,
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TableSchemaView {
+    id: i64,
+    name: String,
+    phys: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FieldSchemaView {
+    id: i64,
+    name: String,
+    phys: String,
+    kind: String,
+    position: i64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelationshipSchemaView {
+    id: i64,
+    name: String,
+    from_table: i64,
+    to_table: i64,
+    from_field: i64,
+    to_field: i64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateTableBody {
+    name: String,
+    fields: Option<Vec<FieldBody>>,
+}
+
+#[derive(serde::Deserialize)]
+struct RenameBody {
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct FieldBody {
+    name: String,
+    kind: String,
+}
+
+#[derive(serde::Deserialize)]
+struct FieldKindBody {
+    kind: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FieldOrderBody {
+    field_ids: Vec<i64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelationshipBody {
+    name: String,
+    from_table: i64,
+    to_table: i64,
+    from_field: i64,
+    to_field: i64,
+}
+
+fn table_schema_view(t: TableMeta) -> TableSchemaView {
+    TableSchemaView {
+        id: t.id,
+        name: t.name,
+        phys: t.phys,
+    }
+}
+
+fn field_schema_view(f: FieldMeta) -> FieldSchemaView {
+    FieldSchemaView {
+        id: f.id,
+        name: f.name,
+        phys: f.phys,
+        kind: f.kind.as_str().to_string(),
+        position: f.position,
+    }
+}
+
+fn relationship_schema_view(r: RelationshipMeta) -> RelationshipSchemaView {
+    RelationshipSchemaView {
+        id: r.id,
+        name: r.name,
+        from_table: r.from_table,
+        to_table: r.to_table,
+        from_field: r.from_field,
+        to_field: r.to_field,
+    }
+}
+
+fn parse_new_field(f: FieldBody) -> Result<NewField, &'static str> {
+    let Some(kind) = FieldKind::parse(&f.kind) else {
+        return Err("bad field kind");
+    };
+    Ok(NewField { name: f.name, kind })
+}
+
+fn relationship_body(body: RelationshipBody) -> NewRelationship {
+    NewRelationship {
+        name: body.name,
+        from_table: body.from_table,
+        to_table: body.to_table,
+        from_field: body.from_field,
+        to_field: body.to_field,
+    }
+}
+
+async fn schema_tables(State(st): State<AppState>) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let views: Vec<TableSchemaView> = sol
+        .tables()
+        .unwrap()
+        .into_iter()
+        .map(table_schema_view)
+        .collect();
+    Json(views)
+}
+
+async fn create_schema_table(
+    State(st): State<AppState>,
+    Json(body): Json<CreateTableBody>,
+) -> impl IntoResponse {
+    let fields = match body
+        .fields
+        .unwrap_or_default()
+        .into_iter()
+        .map(parse_new_field)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(fields) => fields,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    let mut sol = st.sol.lock().unwrap();
+    let table_id = match sol.create_table(&body.name, &fields) {
+        Ok(id) => id,
+        Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
+    };
+    let table = sol.table_by_id(table_id).unwrap().unwrap();
+    Json(table_schema_view(table)).into_response()
+}
+
+async fn rename_schema_table(
+    State(st): State<AppState>,
+    Path(table_id): Path<i64>,
+    Json(body): Json<RenameBody>,
+) -> impl IntoResponse {
+    let mut sol = st.sol.lock().unwrap();
+    match sol.rename_table(table_id, &body.name) {
+        Ok(Some(table)) => Json(table_schema_view(table)).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn delete_schema_table(
+    State(st): State<AppState>,
+    Path(table_id): Path<i64>,
+) -> impl IntoResponse {
+    let mut sol = st.sol.lock().unwrap();
+    match sol.delete_table(table_id) {
+        Ok(0) => StatusCode::NOT_FOUND.into_response(),
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn schema_fields(State(st): State<AppState>, Path(table_id): Path<i64>) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    if sol.table_by_id(table_id).unwrap().is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let views: Vec<FieldSchemaView> = sol
+        .fields(table_id)
+        .unwrap()
+        .into_iter()
+        .map(field_schema_view)
+        .collect();
+    Json(views).into_response()
+}
+
+async fn create_schema_field(
+    State(st): State<AppState>,
+    Path(table_id): Path<i64>,
+    Json(body): Json<FieldBody>,
+) -> impl IntoResponse {
+    let field = match parse_new_field(body) {
+        Ok(field) => field,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    let mut sol = st.sol.lock().unwrap();
+    match sol.add_field(table_id, &field) {
+        Ok(field) => Json(field_schema_view(field)).into_response(),
+        Err(e) if e.to_string().contains("no table") => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn rename_schema_field(
+    State(st): State<AppState>,
+    Path((table_id, field_id)): Path<(i64, i64)>,
+    Json(body): Json<RenameBody>,
+) -> impl IntoResponse {
+    let mut sol = st.sol.lock().unwrap();
+    match sol.rename_field(table_id, field_id, &body.name) {
+        Ok(Some(field)) => Json(field_schema_view(field)).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn retype_schema_field(
+    State(st): State<AppState>,
+    Path((table_id, field_id)): Path<(i64, i64)>,
+    Json(body): Json<FieldKindBody>,
+) -> impl IntoResponse {
+    let Some(kind) = FieldKind::parse(&body.kind) else {
+        return (StatusCode::BAD_REQUEST, "bad field kind").into_response();
+    };
+    let mut sol = st.sol.lock().unwrap();
+    match sol.retype_field(table_id, field_id, kind) {
+        Ok(Some(field)) => Json(field_schema_view(field)).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn reorder_schema_fields(
+    State(st): State<AppState>,
+    Path(table_id): Path<i64>,
+    Json(body): Json<FieldOrderBody>,
+) -> impl IntoResponse {
+    let mut sol = st.sol.lock().unwrap();
+    if sol.table_by_id(table_id).unwrap().is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match sol.reorder_fields(table_id, &body.field_ids) {
+        Ok(fields) => Json(
+            fields
+                .into_iter()
+                .map(field_schema_view)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn delete_schema_field(
+    State(st): State<AppState>,
+    Path((table_id, field_id)): Path<(i64, i64)>,
+) -> impl IntoResponse {
+    let mut sol = st.sol.lock().unwrap();
+    match sol.delete_field(table_id, field_id) {
+        Ok(0) => StatusCode::NOT_FOUND.into_response(),
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn schema_relationships(State(st): State<AppState>) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let views: Vec<RelationshipSchemaView> = sol
+        .relationships()
+        .unwrap()
+        .into_iter()
+        .map(relationship_schema_view)
+        .collect();
+    Json(views)
+}
+
+async fn create_schema_relationship(
+    State(st): State<AppState>,
+    Json(body): Json<RelationshipBody>,
+) -> impl IntoResponse {
+    let rel = relationship_body(body);
+    let mut sol = st.sol.lock().unwrap();
+    match sol.create_relationship(&rel) {
+        Ok(Some(rel)) => Json(relationship_schema_view(rel)).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn update_schema_relationship(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<RelationshipBody>,
+) -> impl IntoResponse {
+    let rel = relationship_body(body);
+    let mut sol = st.sol.lock().unwrap();
+    match sol.update_relationship(id, &rel) {
+        Ok(Some(rel)) => Json(relationship_schema_view(rel)).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn delete_schema_relationship(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    match sol.delete_relationship(id) {
+        Ok(0) => StatusCode::NOT_FOUND.into_response(),
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
     }
 }
 
@@ -2206,6 +2523,44 @@ pub fn app(state: AppState) -> Router {
         .route("/browse/:layout/:id/open", post(open_record))
         .route("/browse/:layout/:id/revert", post(revert_record))
         .route("/browse/:layout/:id/delete", post(delete_record))
+        .route(
+            "/schema/tables",
+            get(schema_tables).post(create_schema_table),
+        )
+        .route("/schema/tables/:table_id/rename", post(rename_schema_table))
+        .route("/schema/tables/:table_id/delete", post(delete_schema_table))
+        .route(
+            "/schema/tables/:table_id/fields",
+            get(schema_fields).post(create_schema_field),
+        )
+        .route(
+            "/schema/tables/:table_id/fields/order",
+            post(reorder_schema_fields),
+        )
+        .route(
+            "/schema/tables/:table_id/fields/:field_id/rename",
+            post(rename_schema_field),
+        )
+        .route(
+            "/schema/tables/:table_id/fields/:field_id/retype",
+            post(retype_schema_field),
+        )
+        .route(
+            "/schema/tables/:table_id/fields/:field_id/delete",
+            post(delete_schema_field),
+        )
+        .route(
+            "/schema/relationships",
+            get(schema_relationships).post(create_schema_relationship),
+        )
+        .route(
+            "/schema/relationships/:id",
+            post(update_schema_relationship),
+        )
+        .route(
+            "/schema/relationships/:id/delete",
+            post(delete_schema_relationship),
+        )
         .route("/design/:layout", get(design))
         .route("/design/:layout/model", get(design_model))
         .route("/design/:layout/object", post(create_design_object))
@@ -2703,6 +3058,169 @@ mod tests {
         (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
+    #[tokio::test]
+    async fn schema_table_and_field_routes_manage_metadata_and_physical_table() {
+        let state = state_for(Solution::open_in_memory().unwrap());
+        let body = serde_json::json!({
+            "name": "Invoices",
+            "fields": [
+                {"name": "Number", "kind": "text"},
+                {"name": "Total", "kind": "number"}
+            ]
+        });
+        let (status, resp) =
+            post_json_body(state.clone(), "/schema/tables", &body.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        let table: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        let table_id = table["id"].as_i64().unwrap();
+        let table_phys = table["phys"].as_str().unwrap().to_string();
+
+        let (status, fields_body) =
+            get_body(state.clone(), &format!("/schema/tables/{table_id}/fields")).await;
+        assert_eq!(status, StatusCode::OK, "{fields_body}");
+        let fields: serde_json::Value = serde_json::from_str(&fields_body).unwrap();
+        let number_id = fields[0]["id"].as_i64().unwrap();
+        let total_id = fields[1]["id"].as_i64().unwrap();
+
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/schema/tables/{table_id}/rename"),
+            r#"{"name":"Bills"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        assert!(resp.contains(r#""name":"Bills""#));
+
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/schema/tables/{table_id}/fields/{number_id}/rename"),
+            r#"{"name":"Invoice Number"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/schema/tables/{table_id}/fields/{total_id}/retype"),
+            r#"{"kind":"text"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        assert!(resp.contains(r#""kind":"text""#));
+
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/schema/tables/{table_id}/fields/order"),
+            &serde_json::json!({"fieldIds": [total_id, number_id]}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        let ordered: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(ordered[0]["id"].as_i64(), Some(total_id));
+
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/schema/tables/{table_id}/fields/{number_id}/delete"),
+            "{}",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+
+        let sol = state.sol.lock().unwrap();
+        let fields = sol.fields(table_id).unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].id, total_id);
+        let columns: Vec<String> = {
+            let mut stmt = sol
+                .data
+                .prepare(&format!("PRAGMA table_info({table_phys})"))
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(columns, vec!["id".to_string(), fields[0].phys.clone()]);
+    }
+
+    #[tokio::test]
+    async fn schema_relationship_routes_crud_and_validate_field_ownership() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        let customers = sol
+            .create_table(
+                "Customers",
+                &[NewField {
+                    name: "Id".into(),
+                    kind: FieldKind::Number,
+                }],
+            )
+            .unwrap();
+        let invoices = sol
+            .create_table(
+                "Invoices",
+                &[NewField {
+                    name: "Customer Id".into(),
+                    kind: FieldKind::Number,
+                }],
+            )
+            .unwrap();
+        let customer_id = sol.fields(customers).unwrap()[0].id;
+        let invoice_customer_id = sol.fields(invoices).unwrap()[0].id;
+        let state = state_for(sol);
+
+        let bad = serde_json::json!({
+            "name": "bad",
+            "fromTable": invoices,
+            "toTable": customers,
+            "fromField": customer_id,
+            "toField": invoice_customer_id
+        });
+        let (status, _) =
+            post_json_body(state.clone(), "/schema/relationships", &bad.to_string()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let create = serde_json::json!({
+            "name": "customer",
+            "fromTable": invoices,
+            "toTable": customers,
+            "fromField": invoice_customer_id,
+            "toField": customer_id
+        });
+        let (status, resp) =
+            post_json_body(state.clone(), "/schema/relationships", &create.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        let rel: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        let rel_id = rel["id"].as_i64().unwrap();
+
+        let update = serde_json::json!({
+            "name": "bill_to",
+            "fromTable": invoices,
+            "toTable": customers,
+            "fromField": invoice_customer_id,
+            "toField": customer_id
+        });
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/schema/relationships/{rel_id}"),
+            &update.to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        assert!(resp.contains(r#""name":"bill_to""#));
+
+        let (status, resp) = get_body(state.clone(), "/schema/relationships").await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        assert!(resp.contains(r#""fromTable":"#));
+
+        let (status, resp) = post_json_body(
+            state,
+            &format!("/schema/relationships/{rel_id}/delete"),
+            "{}",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+    }
+
     /// #57: a table carries independent per-view layouts. The Browse view toggle
     /// links to sibling layout ids (not one layout re-rendered via `?view=`), and
     /// each layout renders in its own view.
@@ -3112,10 +3630,9 @@ mod tests {
         let sol = state.sol.lock().unwrap();
         let objs = sol.objects(part_id).unwrap();
         assert_eq!(objs.len(), before + 1, "one row inserted");
-        assert!(
-            objs.iter()
-                .any(|o| o.kind == ObjectKind::Rect && (o.x, o.y) == (20, 12))
-        );
+        assert!(objs
+            .iter()
+            .any(|o| o.kind == ObjectKind::Rect && (o.x, o.y) == (20, 12)));
     }
 
     /// #48/#60 create: the Field tool POSTs `{kind:"field",fieldId,…}` and gets
@@ -3793,16 +4310,14 @@ mod tests {
             .await,
             StatusCode::OK
         );
-        assert!(
-            !state
-                .sol
-                .lock()
-                .unwrap()
-                .objects(part_id)
-                .unwrap()
-                .iter()
-                .any(|o| o.id == rect_id)
-        );
+        assert!(!state
+            .sol
+            .lock()
+            .unwrap()
+            .objects(part_id)
+            .unwrap()
+            .iter()
+            .any(|o| o.id == rect_id));
     }
 
     /// #84 restore: helper that creates a rect and returns (state, layout_id,

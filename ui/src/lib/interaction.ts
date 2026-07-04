@@ -30,6 +30,7 @@ import {
   setObjectProps as persistObjectProps,
   setObjectReadOnly,
   setObjectsZ,
+  setObjectsGeometry,
 } from './persist';
 import type { NewObjectRequest } from './persist';
 import { clipboard } from './clipboard.svelte';
@@ -88,8 +89,6 @@ export class CanvasInteraction {
   /** Canvas zoom factor (#62) — the stage is CSS-scaled by this, so client→model
    * pointer coordinates divide by it when placing a new object. */
   #zoom = 1;
-  /** True for the active Control-drag marquee, which selects only fully enclosed objects. */
-  #containmentMarquee = false;
   /** True while a placement POST is in flight, so a second click can't double-place. */
   #placing = false;
   /** True while selected object deletion is in flight, so repeat keys do not fan out. */
@@ -97,9 +96,9 @@ export class CanvasInteraction {
   /** One-shot: swallow the native `click` the browser fires right after Selecto
    * commits selection. Without it, `#onClick` can run its empty-canvas deselect
    * path and wipe the marquee or modifier-click selection that just landed. A
-   * bare empty-canvas click does NOT set this, so it still deselects as before. */
-  #suppressNextClick = false;
-  #suppressNextClickUntil = 0;
+   * bare empty-canvas click does NOT set this, so it still deselects as before.
+   * 0 = disarmed; otherwise a `performance.now()` deadline the click must beat. */
+  #suppressClickUntil = 0;
   /** Active draw-to-create gesture while a non-pointer tool is armed. */
   #drawing: DrawPlacement | null = null;
   #drawPreview: HTMLElement | null = null;
@@ -213,8 +212,9 @@ export class CanvasInteraction {
     // stream, so a press on any selected object drags the whole group.
     this.#selecto.on('selectEnd', (e) => {
       const selectedIds = this.#elementsToIds(e.selected);
-      const containmentMarquee = this.#containmentMarquee;
-      this.#containmentMarquee = false;
+      // `hitRate === 100` is set by dragStart only for a Control-drag marquee (the
+      // single source of that mode); reset it now that the gesture has ended.
+      const containmentMarquee = this.#selecto.hitRate === 100;
       this.#selecto.hitRate = 0;
       if (containmentMarquee && e.isClick) {
         const target = (e.inputEvent?.target ?? null) as Element | null;
@@ -245,7 +245,6 @@ export class CanvasInteraction {
     this.#selecto.on('dragStart', (e) => {
       const input = e.inputEvent;
       const containmentMarquee = input.ctrlKey && !input.metaKey && !input.shiftKey;
-      this.#containmentMarquee = containmentMarquee;
       this.#selecto.hitRate = containmentMarquee ? 100 : 0;
       // A non-pointer tool is armed → this press PLACES an object, not selects.
       if (this.#doc.activeTool !== 'pointer') {
@@ -254,7 +253,6 @@ export class CanvasInteraction {
           clientX: input.clientX,
           clientY: input.clientY,
         });
-        this.#containmentMarquee = false;
         this.#selecto.hitRate = 0;
         e.stop();
         if (!this.#pointInCanvas(input.clientX, input.clientY)) {
@@ -280,7 +278,9 @@ export class CanvasInteraction {
       }
       // Modifier toggles must run before the moveable-control-box guard because
       // group-selection presses can arrive through Moveable's transparent overlay.
-      if (objEl && id !== undefined && (input.shiftKey || input.metaKey || (input.ctrlKey && !containmentMarquee))) {
+      // Control-drag is the containment marquee (handled below / on selectEnd), so
+      // only Shift and Meta toggle membership at press time.
+      if (objEl && id !== undefined && (input.shiftKey || input.metaKey)) {
         llog('select', 'toggle membership', { id });
         this.#doc.toggle(id);
         e.stop();
@@ -318,9 +318,11 @@ export class CanvasInteraction {
       // without showing resize handles on mere hover.
       llog('drag', 'press on un-targeted object → select + start drag', { id });
       this.#doc.selectOnly([id]);
-      this.#targetKey = String(id);
-      this.#targetIds = new Set([id]);
-      const guidelines = identity.painted.filter((el) => el !== objEl);
+      const ids = [...this.#doc.selection];
+      this.#targetKey = ids.slice().sort((a, b) => a - b).join(',');
+      this.#targetIds = new Set(ids);
+      const targets = ids.map((objectId) => this.#elementForId(objectId)).filter((el): el is HTMLElement => !!el);
+      const guidelines = identity.painted.filter((el) => !targets.includes(el));
       // Set the target, then start the drag SYNCHRONOUSLY on this same pointerdown.
       // moveable.dragStart() flushes the just-set target (its internal `$_timer`
       // guard forceUpdates before triggering) and only fires if `objEl` matches the
@@ -328,7 +330,7 @@ export class CanvasInteraction {
       // old code ran dragStart inside setState's async callback, a frame late and
       // past the live pointer stream, so the first press only selected and the user
       // had to press again to drag.
-      this.#moveable.setState({ target: objEl, elementGuidelines: guidelines });
+      this.#moveable.setState({ target: targets.length > 0 ? targets : objEl, elementGuidelines: guidelines });
       this.#moveable.dragStart(input, objEl);
       e.stop();
     });
@@ -499,10 +501,7 @@ export class CanvasInteraction {
       this.#drawPreview.style.transform = `rotate(${line.angle}deg)`;
       return;
     }
-    this.#drawPreview.style.left = `${drawing.box.x}px`;
-    this.#drawPreview.style.top = `${drawing.partTop + drawing.box.y}px`;
-    this.#drawPreview.style.width = `${drawing.box.w}px`;
-    this.#drawPreview.style.height = `${drawing.box.h}px`;
+    this.#placeOverlay(this.#drawPreview, drawing.box, drawing.partTop);
     this.#drawPreview.style.transform = '';
   }
 
@@ -557,7 +556,7 @@ export class CanvasInteraction {
       }
     } catch (e) {
       lerror('place', 'create failed', e);
-      this.#doc.setError(e instanceof Error ? e.message : String(e));
+      this.#reportError(e);
     } finally {
       this.#placing = false;
       if (this.#doc.activeTool !== 'pointer') this.#doc.setTool('pointer');
@@ -654,10 +653,7 @@ export class CanvasInteraction {
       this.#dropPreview.className = 'le-draw-preview le-draw-field';
       this.#partOverlay()?.append(this.#dropPreview);
     }
-    this.#dropPreview.style.left = `${target.box.x}px`;
-    this.#dropPreview.style.top = `${target.partTop + target.box.y}px`;
-    this.#dropPreview.style.width = `${target.box.w}px`;
-    this.#dropPreview.style.height = `${target.box.h}px`;
+    this.#placeOverlay(this.#dropPreview, target.box, target.partTop);
   }
 
   async #placeFieldsAt(target: FieldPlacementTarget, fieldIds: number[]): Promise<void> {
@@ -671,7 +667,7 @@ export class CanvasInteraction {
       this.#commitPlacedViews(target.partId, views, views.map((v) => v.id), 'drop');
     } catch (e) {
       lerror('place', 'drop create failed', e);
-      this.#doc.setError(e instanceof Error ? e.message : String(e));
+      this.#reportError(e);
     } finally {
       this.#placing = false;
       if (this.#doc.activeTool !== 'pointer') this.#doc.setTool('pointer');
@@ -779,10 +775,7 @@ export class CanvasInteraction {
       this.#hoverOutline.className = 'le-hover-outline';
       overlay.append(this.#hoverOutline);
     }
-    this.#hoverOutline.style.left = `${o.x}px`;
-    this.#hoverOutline.style.top = `${top + o.y}px`;
-    this.#hoverOutline.style.width = `${o.w}px`;
-    this.#hoverOutline.style.height = `${o.h}px`;
+    this.#placeOverlay(this.#hoverOutline, o, top);
   }
 
   #onClick = (e: MouseEvent): void => {
@@ -806,16 +799,13 @@ export class CanvasInteraction {
   };
 
   #swallowNextClick(): void {
-    this.#suppressNextClick = true;
-    this.#suppressNextClickUntil = performance.now() + 750;
+    this.#suppressClickUntil = performance.now() + 750;
   }
 
   #consumeSuppressedClick(): boolean {
-    if (!this.#suppressNextClick) return false;
-    this.#suppressNextClick = false;
-    const shouldSuppress = performance.now() <= this.#suppressNextClickUntil;
-    this.#suppressNextClickUntil = 0;
-    return shouldSuppress;
+    const until = this.#suppressClickUntil;
+    this.#suppressClickUntil = 0;
+    return until !== 0 && performance.now() <= until;
   }
 
   #onDoubleClick = (e: MouseEvent): void => {
@@ -927,7 +917,7 @@ export class CanvasInteraction {
       this.#updateTarget();
     } catch (e) {
       lerror('persist', 'failed to delete selected object(s)', e);
-      this.#doc.setError(e instanceof Error ? e.message : String(e));
+      this.#reportError(e);
     } finally {
       this.#deleting = false;
     }
@@ -1101,7 +1091,7 @@ export class CanvasInteraction {
         await Promise.allSettled(landedIds.map((id) => deleteObject(this.#layoutId, id)));
       }
       lerror('clipboard', 'failed to paste', e);
-      this.#doc.setError(e instanceof Error ? e.message : String(e));
+      this.#reportError(e);
     } finally {
       this.#placing = false;
     }
@@ -1169,7 +1159,7 @@ export class CanvasInteraction {
       if (placed !== undefined) this.#hoverId = placed;
     } catch (e) {
       lerror('persist', 'failed to duplicate selected object(s)', e);
-      this.#doc.setError(e instanceof Error ? e.message : String(e));
+      this.#reportError(e);
     } finally {
       this.#placing = false;
     }
@@ -1357,10 +1347,7 @@ export class CanvasInteraction {
   #applyEditorTextStyle(editor: HTMLTextAreaElement, o: Readonly<ObjectDoc>): void {
     const top = this.#partTop(o.partId) ?? 0;
     editor.style.cssText = this.#objectView(o.id)?.textStyle ?? '';
-    editor.style.left = `${o.x}px`;
-    editor.style.top = `${top + o.y}px`;
-    editor.style.width = `${o.w}px`;
-    editor.style.height = `${o.h}px`;
+    this.#placeOverlay(editor, o, top);
   }
 
   /** The current render-model view of one object (carries the server-derived
@@ -1386,7 +1373,7 @@ export class CanvasInteraction {
       this.#doc.setProp(id, 'content', view.content);
     } catch (e) {
       lerror('persist', 'inline text edit failed', e);
-      this.#doc.setError(e instanceof Error ? e.message : String(e));
+      this.#reportError(e);
     }
   }
 
@@ -1615,7 +1602,7 @@ export class CanvasInteraction {
       this.#doc.setObjectStyles(id, styles);
     } catch (e) {
       lerror('persist', 'failed to persist line rotation', e);
-      this.#doc.setError(e instanceof Error ? e.message : String(e));
+      this.#reportError(e);
     }
   }
 
@@ -1687,17 +1674,7 @@ export class CanvasInteraction {
     llog('persist', 'POST geometry', { geometry: geom, reparent: moved.map((o) => ({ id: o.id, partId: o.partId })) });
     try {
       const posts: Promise<unknown>[] = [];
-      if (geom.length > 0) {
-        posts.push(
-          fetch(`/design/${this.#layoutId}/geometry`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(geom),
-          }).then((r) => {
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          }),
-        );
-      }
+      if (geom.length > 0) posts.push(setObjectsGeometry(this.#layoutId, geom));
       for (const o of moved) posts.push(setObjectPart(this.#layoutId, o.id, o.partId, o.x, o.y));
       await Promise.all(posts);
       llog('persist', 'geometry saved', { geometry: geom.length, reparented: moved.length });
@@ -1716,6 +1693,22 @@ export class CanvasInteraction {
 
   #partOverlay(): HTMLElement | null {
     return this.#stage.querySelector('.le-part-overlays');
+  }
+
+  /** Position an overlay element (draw/drop preview, hover outline, text editor)
+   * over an object's part-relative box. The overlay layer is offset by the part's
+   * top, so `y` is measured within the part. */
+  #placeOverlay(el: HTMLElement, box: { x: number; y: number; w: number; h: number }, partTop: number): void {
+    el.style.left = `${box.x}px`;
+    el.style.top = `${partTop + box.y}px`;
+    el.style.width = `${box.w}px`;
+    el.style.height = `${box.h}px`;
+  }
+
+  /** Surface a caught error to the store's error banner (the caller has already
+   * `lerror`'d it with scope-specific context). */
+  #reportError(e: unknown): void {
+    this.#doc.setError(e instanceof Error ? e.message : String(e));
   }
 
   #canvasPoint(clientX: number, clientY: number): { x: number; y: number } | null {

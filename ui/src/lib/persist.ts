@@ -4,7 +4,7 @@
 // new object ids (so the store can add the object undoably) and the server-derived
 // shape style (the single source of that derivation, [[layout-object-types]]).
 
-import type { ObjectView, PartView } from './model';
+import type { ObjectGroupView, ObjectView, PartView } from './model';
 
 export interface StyleResult {
   objectStyle: string;
@@ -152,6 +152,32 @@ export async function setObjectsZ(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(items),
   });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+}
+
+/** Batch-persist objects' geometry after a drag/resize/align settles. The store
+ * already holds the new rects; this only SYNCs them to the server (siblings that
+ * crossed a band boundary go through `setObjectPart` instead). */
+export async function setObjectsGeometry(
+  layoutId: string,
+  items: { id: number; x: number; y: number; w: number; h: number }[],
+): Promise<void> {
+  const r = await fetch(`/design/${layoutId}/geometry`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(items),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+}
+
+/** Create a durable group over existing objects (#75). */
+export function createObjectGroup(layoutId: string, objectIds: number[]): Promise<ObjectGroupView> {
+  return postJson(`/design/${layoutId}/group`, { objectIds });
+}
+
+/** Remove a durable group without changing child geometry/styles (#75). */
+export async function deleteObjectGroup(layoutId: string, id: number): Promise<void> {
+  const r = await fetch(`/design/${layoutId}/group/${id}/delete`, { method: 'POST' });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
 }
 

@@ -34,6 +34,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0006_part_props",
         include_str!("migrations/0006_part_props.sql"),
     ),
+    (
+        "0007_object_groups",
+        include_str!("migrations/0007_object_groups.sql"),
+    ),
 ];
 
 /// Schema version this build targets (the number of migrations defined).

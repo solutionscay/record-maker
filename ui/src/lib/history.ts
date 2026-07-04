@@ -13,6 +13,7 @@
 // immune to interference from a later step already applied in memory.
 
 import type { EditorDoc, Step } from './doc.svelte';
+import { playHistoryEcho } from './echo';
 import type { RestoreObjectRequest } from './persist';
 import * as persist from './persist';
 
@@ -23,12 +24,18 @@ let chain: Promise<void> = Promise.resolve();
 
 export function runUndo(doc: EditorDoc, layoutId: string): void {
   const step = doc.undo();
-  if (step) enqueue(doc, layoutId, buildPlan(doc, step));
+  if (step) {
+    playHistoryEcho(doc, step, 'undo');
+    enqueue(doc, layoutId, buildPlan(doc, step));
+  }
 }
 
 export function runRedo(doc: EditorDoc, layoutId: string): void {
   const step = doc.redo();
-  if (step) enqueue(doc, layoutId, buildPlan(doc, step));
+  if (step) {
+    playHistoryEcho(doc, step, 'redo');
+    enqueue(doc, layoutId, buildPlan(doc, step));
+  }
 }
 
 function enqueue(doc: EditorDoc, layoutId: string, plan: ReplayPlan): void {

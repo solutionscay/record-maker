@@ -12,6 +12,7 @@
   // control box stays crisp; the interaction layer is told the zoom so pointer
   // placement maps back to model coordinates.
   import type { EditorDoc } from './lib/doc.svelte';
+  import { registerEchoStage } from './lib/echo';
   import { CanvasInteraction } from './lib/interaction';
   import { setPartHeight as persistPartHeight } from './lib/persist';
   import { lerror, llog } from './lib/log';
@@ -59,8 +60,10 @@
   $effect(() => {
     if (!doc.hydrated || !stage) return;
     const ix = new CanvasInteraction(stage, doc, layoutId);
+    const unregisterEcho = registerEchoStage(doc, stage);
     interaction = ix;
     return () => {
+      unregisterEcho();
       ix.destroy();
       interaction = null;
     };
@@ -303,6 +306,22 @@
     background: #fff;
     color: #1b1b1f;
     font: 0.8rem system-ui, sans-serif;
+  }
+  .le-stage :global(.le-echo-ghost) {
+    pointer-events: none;
+    user-select: none;
+    opacity: 0;
+    filter: saturate(0.8);
+    mix-blend-mode: multiply;
+  }
+  .le-stage :global(.le-echo-undo) {
+    box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.34), 0 10px 24px rgba(31, 111, 235, 0.18);
+  }
+  .le-stage :global(.le-echo-redo) {
+    box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.34), 0 10px 24px rgba(217, 119, 6, 0.18);
+  }
+  .le-stage :global(.le-echo-active) {
+    will-change: transform;
   }
   /* Design mode: make each part band's bounds visible. Browse keeps the bands
      subtle (the faint shell.html divider), but on the canvas the designer needs

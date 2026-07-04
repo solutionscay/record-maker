@@ -293,7 +293,36 @@ try {
     eq('elementsToIds: drops unknown elements', elementsToObjectIds([{ n: 'x' }], painted, ids), []);
   }
 
-  // 12. Shared object props and line geometry helpers (#92).
+  // 12. Echo planning for grouped history geometry (#88).
+  {
+    const { buildHistoryEchoSpecs } = await vite.ssrLoadModule('/src/lib/echo.ts');
+    const d = new EditorDoc();
+    d.hydrate(fresh());
+    const before = obj(d.renderModel, 1);
+    d.moveObject(1, 8, 0);
+    d.moveObject(1, 8, 0);
+    d.mark();
+    const undoStep = d.undo();
+    const undoSpec = buildHistoryEchoSpecs(d, undoStep, 'undo')[0];
+    eq('echo: undo starts at grouped final x and lands at prior x', {
+      from: undoSpec.from.x,
+      to: undoSpec.to.x,
+    }, {
+      from: before.x + 16,
+      to: before.x,
+    });
+    const redoStep = d.redo();
+    const redoSpec = buildHistoryEchoSpecs(d, redoStep, 'redo')[0];
+    eq('echo: redo starts at grouped prior x and lands at final x', {
+      from: redoSpec.from.x,
+      to: redoSpec.to.x,
+    }, {
+      from: before.x,
+      to: before.x + 16,
+    });
+  }
+
+  // 13. Shared object props and line geometry helpers (#92).
   {
     const { parseProps, normalizeAngle, lineLength, lineGeometryForAngle, lineAngle } =
       await vite.ssrLoadModule('/src/lib/object-props.ts');

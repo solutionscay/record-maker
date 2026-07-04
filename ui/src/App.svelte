@@ -16,13 +16,30 @@
   import { CanvasInteraction } from './lib/interaction';
   import { setPartHeight as persistPartHeight } from './lib/persist';
   import { lerror, llog } from './lib/log';
+  import { objectIdsInPaintOrder } from './lib/canvas-edit';
   import LayoutPreview from './lib/LayoutPreview.svelte';
 
   let { doc, layoutId = '' }: { doc: EditorDoc; layoutId?: string } = $props();
 
   let stage = $state<HTMLElement>();
+  let contextMenuEl = $state<HTMLElement>();
   let resizingPartId = $state<number | null>(null);
   const DESIGN_PAGE_WIDTH = 760;
+
+  type ContextMenuItem = {
+    label: string;
+    hint?: string;
+    disabled?: boolean;
+    danger?: boolean;
+    action: () => void;
+  };
+  type ContextMenuState = {
+    x: number;
+    y: number;
+    title: string;
+    items: ContextMenuItem[];
+  };
+  let contextMenu = $state<ContextMenuState | null>(null);
 
   const partBands = $derived.by(() => {
     let top = 0;
@@ -89,6 +106,134 @@
     interaction?.setZoom(doc.zoom);
   });
 
+  $effect(() => {
+    if (!contextMenu) return;
+    const close = () => {
+      contextMenu = null;
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null;
+      if (target && contextMenuEl?.contains(target)) return;
+      close();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close();
+    };
+    window.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  });
+
+  function clampMenuPoint(clientX: number, clientY: number, rows: number): { x: number; y: number } {
+    const width = 210;
+    const height = 38 + rows * 31;
+    return {
+      x: Math.max(8, Math.min(clientX, window.innerWidth - width - 8)),
+      y: Math.max(8, Math.min(clientY, window.innerHeight - height - 8)),
+    };
+  }
+
+  function editableTarget(target: EventTarget | null): boolean {
+    const el = target instanceof Element ? target : null;
+    return !!el?.closest('input, textarea, select, [contenteditable="true"], .le-inline-text-editor');
+  }
+
+  function objectIdForElement(el: HTMLElement): number | null {
+    if (!stage) return null;
+    const objects = [...stage.querySelectorAll<HTMLElement>('.fm-canvas .fm-obj')];
+    const index = objects.indexOf(el);
+    if (index < 0) return null;
+    return objectIdsInPaintOrder(doc.renderModel)[index] ?? null;
+  }
+
+  function objectIdFromPoint(event: MouseEvent): number | null {
+    const target = event.target instanceof Element ? event.target : null;
+    const direct = target?.closest('.fm-obj') as HTMLElement | null;
+    if (direct) return objectIdForElement(direct);
+    for (const el of document.elementsFromPoint(event.clientX, event.clientY)) {
+      const obj = el.closest?.('.fm-obj') as HTMLElement | null;
+      if (!obj) continue;
+      const id = objectIdForElement(obj);
+      if (id !== null) return id;
+    }
+    return null;
+  }
+
+  function partIdFromTarget(target: EventTarget | null): number | null {
+    if (!stage) return null;
+    const el = target instanceof Element ? target.closest('.fm-part') : null;
+    if (!el) return null;
+    const parts = [...stage.querySelectorAll<HTMLElement>('.fm-canvas .fm-part')];
+    const index = parts.indexOf(el as HTMLElement);
+    return index >= 0 ? (doc.renderModel.parts[index]?.id ?? null) : null;
+  }
+
+  function openContextMenu(event: MouseEvent, title: string, items: ContextMenuItem[]): void {
+    const point = clampMenuPoint(event.clientX, event.clientY, items.length);
+    contextMenu = { ...point, title, items };
+  }
+
+  function openObjectContextMenu(event: MouseEvent, objectId: number | null = null): void {
+    event.preventDefault();
+    event.stopPropagation();
+    if (objectId !== null && !doc.isSelected(objectId)) doc.selectOnly([objectId]);
+    const count = doc.selection.size || 1;
+    openContextMenu(event, count === 1 ? 'Object' : `${count} Objects`, [
+      { label: 'Cut', hint: 'Ctrl+X', action: () => interaction?.cut() },
+      { label: 'Copy', hint: 'Ctrl+C', action: () => interaction?.copy() },
+      { label: 'Paste', hint: 'Ctrl+V', disabled: !interaction?.canPaste(), action: () => interaction?.paste() },
+      { label: 'Duplicate', hint: 'Ctrl+D', action: () => interaction?.duplicate() },
+      { label: 'Delete', danger: true, action: () => interaction?.deleteSelected() },
+    ]);
+  }
+
+  function onContextMenu(event: MouseEvent): void {
+    if (editableTarget(event.target)) return;
+    const objectId = objectIdFromPoint(event);
+    if (objectId !== null) {
+      openObjectContextMenu(event, objectId);
+      return;
+    }
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest('.moveable-control-box') && doc.selection.size > 0) {
+      openObjectContextMenu(event);
+      return;
+    }
+
+    const partId = partIdFromTarget(event.target);
+    if (partId !== null) {
+      event.preventDefault();
+      event.stopPropagation();
+      doc.selectPart(partId);
+      const part = doc.getPart(partId);
+      openContextMenu(event, part ? `${partLabel(part.kind)} Band` : 'Band', [
+        { label: 'Select Band', action: () => doc.selectPart(partId) },
+        { label: 'Paste Objects', hint: 'Ctrl+V', disabled: !interaction?.canPaste(), action: () => interaction?.paste() },
+      ]);
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    doc.clearSelection();
+    openContextMenu(event, 'Layout', [
+      { label: 'Paste Objects', hint: 'Ctrl+V', disabled: !interaction?.canPaste(), action: () => interaction?.paste() },
+    ]);
+  }
+
+  function runContextMenuItem(item: ContextMenuItem): void {
+    if (item.disabled) return;
+    contextMenu = null;
+    item.action();
+  }
+
   function selectPart(id: number, event: MouseEvent): void {
     if (doc.activeTool !== 'pointer') return;
     event.stopPropagation();
@@ -139,6 +284,9 @@
     class:placing={doc.activeTool !== 'pointer'}
     class:no-object-selection={doc.selection.size === 0}
     bind:this={stage}
+    role="application"
+    aria-label="Layout canvas"
+    oncontextmenu={onContextMenu}
   >
     <div class="le-workspace" style={`transform: scale(${doc.zoom}); transform-origin: top left;`}>
       <div class="le-canvas-wrap">
@@ -170,6 +318,30 @@
         </div>
       </div>
     </div>
+    {#if contextMenu}
+      <div
+        class="le-context-menu"
+        bind:this={contextMenuEl}
+        style={`left: ${contextMenu.x}px; top: ${contextMenu.y}px;`}
+        role="menu"
+        aria-label={contextMenu.title}
+      >
+        <div class="le-context-title">{contextMenu.title}</div>
+        {#each contextMenu.items as item}
+          <button
+            type="button"
+            class="le-context-item"
+            class:danger={item.danger}
+            disabled={item.disabled}
+            role="menuitem"
+            onclick={() => runContextMenuItem(item)}
+          >
+            <span>{item.label}</span>
+            {#if item.hint}<kbd>{item.hint}</kbd>{/if}
+          </button>
+        {/each}
+      </div>
+    {/if}
   </div>
 {:else}
   <p class="layout-editor-msg">Loading…</p>
@@ -330,6 +502,66 @@
   .le-stage :global(.le-echo-active-redo) {
     outline: 2px solid rgba(217, 119, 6, 0.38);
     outline-offset: 2px;
+  }
+  .le-context-menu {
+    position: fixed;
+    z-index: 10000;
+    min-width: 190px;
+    padding: 5px;
+    border: 0.5px solid var(--rm-border-strong, rgba(0, 0, 0, 0.16));
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.98);
+    color: var(--rm-text, #1c1c1e);
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.1);
+    font: 13px/1.2 -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  }
+  .le-context-title {
+    padding: 5px 8px 6px;
+    color: var(--rm-text-dim, #8a8a8e);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .le-context-item {
+    width: 100%;
+    min-height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 5px 8px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: inherit;
+    box-shadow: none;
+    font: inherit;
+    text-align: left;
+  }
+  .le-context-item:hover:not(:disabled),
+  .le-context-item:focus-visible:not(:disabled) {
+    outline: none;
+    background: var(--rm-accent, #0a84ff);
+    color: #fff;
+  }
+  .le-context-item.danger {
+    color: var(--rm-danger, #ff453a);
+  }
+  .le-context-item.danger:hover:not(:disabled),
+  .le-context-item.danger:focus-visible:not(:disabled) {
+    color: #fff;
+    background: var(--rm-danger, #ff453a);
+  }
+  .le-context-item:disabled {
+    color: #b8b8bd;
+    cursor: default;
+  }
+  .le-context-item kbd {
+    color: currentColor;
+    opacity: 0.62;
+    font: inherit;
+    font-size: 11px;
   }
   /* Design mode: make each part band's bounds visible. Browse keeps the bands
      subtle (the faint shell.html divider), but on the canvas the designer needs

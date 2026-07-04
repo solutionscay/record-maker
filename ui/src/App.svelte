@@ -355,6 +355,20 @@
     cursor: move;
     user-select: none;
   }
+  .le-stage :global(.fm-obj:has(.fm-line)) {
+    overflow: visible;
+    pointer-events: auto;
+  }
+  .le-stage :global(.fm-obj:has(.fm-line)::before) {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 12px;
+    transform: translateY(-50%);
+    pointer-events: auto;
+  }
   .le-stage.no-object-selection :global(.moveable-control-box) {
     display: none !important;
   }

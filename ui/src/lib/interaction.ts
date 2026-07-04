@@ -88,6 +88,8 @@ export class CanvasInteraction {
   /** Canvas zoom factor (#62) — the stage is CSS-scaled by this, so client→model
    * pointer coordinates divide by it when placing a new object. */
   #zoom = 1;
+  /** True for the active Control-drag marquee, which selects only fully enclosed objects. */
+  #containmentMarquee = false;
   /** True while a placement POST is in flight, so a second click can't double-place. */
   #placing = false;
   /** True while selected object deletion is in flight, so repeat keys do not fan out. */
@@ -195,7 +197,8 @@ export class CanvasInteraction {
       rootContainer: stage,
       selectableTargets: ['.fm-obj'],
       selectByClick: true,
-      selectFromInside: false,
+      clickBySelectEnd: true,
+      selectFromInside: true,
       hitRate: 0,
       toggleContinueSelect: 'shift',
     });
@@ -210,6 +213,23 @@ export class CanvasInteraction {
     // stream, so a press on any selected object drags the whole group.
     this.#selecto.on('selectEnd', (e) => {
       const selectedIds = this.#elementsToIds(e.selected);
+      const containmentMarquee = this.#containmentMarquee;
+      this.#containmentMarquee = false;
+      this.#selecto.hitRate = 0;
+      if (containmentMarquee && e.isClick) {
+        const target = (e.inputEvent?.target ?? null) as Element | null;
+        const objEl =
+          (target?.closest('.fm-obj') as HTMLElement | null) ??
+          (e.inputEvent ? this.#objectElementAt(e.inputEvent.clientX, e.inputEvent.clientY) : null);
+        const id = objEl ? this.#idForElement(objEl) : undefined;
+        if (id !== undefined) {
+          llog('select', 'control-click toggle membership', { id });
+          this.#doc.toggle(id);
+          this.#updateTarget();
+          this.#swallowNextClick();
+          return;
+        }
+      }
       this.#doc.selectOnly(selectedIds);
       this.#updateTarget();
       // Selecto's pointer sequence is followed by a native `click` on the
@@ -224,6 +244,9 @@ export class CanvasInteraction {
     // Decide, at press time, who owns the gesture:
     this.#selecto.on('dragStart', (e) => {
       const input = e.inputEvent;
+      const containmentMarquee = input.ctrlKey && !input.metaKey && !input.shiftKey;
+      this.#containmentMarquee = containmentMarquee;
+      this.#selecto.hitRate = containmentMarquee ? 100 : 0;
       // A non-pointer tool is armed → this press PLACES an object, not selects.
       if (this.#doc.activeTool !== 'pointer') {
         llog('place', 'press while tool armed', {
@@ -231,6 +254,8 @@ export class CanvasInteraction {
           clientX: input.clientX,
           clientY: input.clientY,
         });
+        this.#containmentMarquee = false;
+        this.#selecto.hitRate = 0;
         e.stop();
         if (!this.#pointInCanvas(input.clientX, input.clientY)) {
           llog('place', 'armed click outside canvas ignored', {
@@ -255,7 +280,7 @@ export class CanvasInteraction {
       }
       // Modifier toggles must run before the moveable-control-box guard because
       // group-selection presses can arrive through Moveable's transparent overlay.
-      if (objEl && id !== undefined && (input.shiftKey || input.ctrlKey || input.metaKey)) {
+      if (objEl && id !== undefined && (input.shiftKey || input.metaKey || (input.ctrlKey && !containmentMarquee))) {
         llog('select', 'toggle membership', { id });
         this.#doc.toggle(id);
         e.stop();
@@ -263,6 +288,10 @@ export class CanvasInteraction {
         // `#updateTarget()` may detach the pressed overlay before the browser's
         // trailing native click fires, so swallow exactly that next click.
         this.#swallowNextClick();
+        return;
+      }
+      if (containmentMarquee) {
+        llog('select', 'control-drag containment marquee');
         return;
       }
       // moveable's own control box (a resize handle / the drag area) → its gesture.
@@ -321,11 +350,11 @@ export class CanvasInteraction {
   /** Reconcile moveable's target with the store selection (called reactively when
    * selection or geometry changes — e.g. after an undo). No-op during a gesture. */
   refresh(): void {
-    this.#updateTarget();
-    // #updateTarget early-returns when the selection set is unchanged, so a
-    // geometry-only change (align/distribute/resize-match, undo of same) would
-    // leave moveable's control box on the old rect. Whenever a target is live,
-    // re-measure it from the (now updated) DOM so the box follows the objects.
+    this.#updateTarget(true);
+    // Geometry-only changes (align/distribute/resize-match, undo/redo of same)
+    // keep the same selected ids but move the DOM boxes underneath moveable.
+    // Whenever a target is live, re-measure from the updated DOM so the controls
+    // follow the objects.
     if (!this.#gesturing && this.#targetIds.size > 0) this.#scheduleRectUpdate();
   }
 
@@ -1191,7 +1220,7 @@ export class CanvasInteraction {
 
   /** Choose moveable's target from the real selection only. Hover uses a separate
    * lightweight outline, so resize handles never appear on unselected objects. */
-  #updateTarget(): void {
+  #updateTarget(force = false): void {
     if (this.#gesturing) return;
     this.#gestureIdentity = null;
     // A placement tool is armed → the canvas is a drawing surface, not a select/
@@ -1207,7 +1236,7 @@ export class CanvasInteraction {
     const sel = [...this.#doc.selection];
     const ids = sel.length > 0 ? sel : [];
     const key = ids.slice().sort((a, b) => a - b).join(',');
-    if (key === this.#targetKey) return;
+    if (key === this.#targetKey && (!force || ids.length === 0)) return;
     this.#targetKey = key;
     this.#targetIds = new Set(ids);
     if (ids.length === 0) {

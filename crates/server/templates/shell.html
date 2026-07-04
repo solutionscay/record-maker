@@ -199,7 +199,7 @@
        thin geometry box, so the object opts out of the default clip below. */
     .fm-line { position: absolute; left: 0; right: 0; top: 50%; height: 2px;
                transform: translateY(-50%); background: #888; border: 0; }
-    .fm-obj:has(.fm-line) { overflow: visible; }
+    .fm-obj:has(.fm-line) { overflow: visible; pointer-events: none; }
     /* Editable field input (Form view, open/commit editing #40). */
     .fm-edit { margin: 0; }
     /* Always transparent so the object's fill (set on the .fm-field box) shows

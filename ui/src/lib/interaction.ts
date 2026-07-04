@@ -1029,7 +1029,7 @@ export class CanvasInteraction {
       const { dx, dy } = offset.get(partId) ?? { dx: 0, dy: 0 };
       const x = clampOrigin(snapToGrid(c.x + dx));
       const y = clampOrigin(snapToGrid(c.y + dy));
-      const isField = c.kind === 'field' && c.fieldId != null;
+      const isField = c.kind === 'field';
       const req: NewObjectRequest = {
         partId,
         kind: c.kind,
@@ -1039,6 +1039,10 @@ export class CanvasInteraction {
         h: c.h,
         rec: this.#doc.rec,
         fieldId: isField ? c.fieldId : null,
+        // The binding is what actually recreates the value object: send it so a
+        // field whose fieldId is null (unresolved binding / empty table) still
+        // pastes instead of 400ing, and so the copy keeps its exact binding.
+        binding: isField ? c.binding : null,
         createLabel: isField ? false : undefined, // NEVER auto-spawn a caption
         content: c.kind === 'text' ? c.content : null,
         props: c.props ? parseProps(c.props) : null, // string → object for the wire
@@ -1142,6 +1146,10 @@ export class CanvasInteraction {
             h: view.h,
             rec: this.#doc.rec,
             fieldId: view.fieldId,
+            // Carry the source binding so a field whose fieldId is null (empty
+            // table, or an unresolved relationship path) still duplicates — the
+            // server recreates the value from the binding when fieldId is absent.
+            binding: view.kind === 'field' ? view.binding : null,
             createLabel: false,
             content: view.kind === 'text' ? view.content : null,
             props: view.props ? parseProps(view.props) : null,

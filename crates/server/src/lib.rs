@@ -1283,6 +1283,13 @@ struct CreateObjectBody {
     create_label: Option<bool>,
     content: Option<String>,
     props: Option<serde_json::Value>,
+    /// The source object's binding, carried verbatim by a value-only field copy
+    /// (duplicate/paste, #48/#85). Lets the copy round-trip even when the binding
+    /// doesn't resolve to a live `field_id` — an empty table or an unresolved
+    /// relationship path renders the object with `field_id: null`, and re-deriving
+    /// the binding from `field_id` would 400. Ignored when `create_label` is true
+    /// (Field-tool placement resolves the binding from `field_id` instead).
+    binding: Option<String>,
 }
 
 /// Create an object on a layout part from the Create zone (#48). Resolves the
@@ -1319,15 +1326,17 @@ async fn create_design_object(
     };
 
     let created_ids: Vec<i64> = if kind == ObjectKind::Field {
-        let Some(fid) = body.field_id else {
-            return (StatusCode::BAD_REQUEST, "field tool needs a fieldId").into_response();
-        };
-        let Some(f) = fields.iter().find(|f| f.id == fid) else {
-            return (StatusCode::BAD_REQUEST, "no such field").into_response();
-        };
-        let binding = format!("{}.{}", table.name, f.name);
-        let label = f.name.clone();
         if body.create_label.unwrap_or(true) {
+            // Field-tool placement: resolve the chosen field to build its binding
+            // and spawn the caption label atomically (#60).
+            let Some(fid) = body.field_id else {
+                return (StatusCode::BAD_REQUEST, "field tool needs a fieldId").into_response();
+            };
+            let Some(f) = fields.iter().find(|f| f.id == fid) else {
+                return (StatusCode::BAD_REQUEST, "no such field").into_response();
+            };
+            let binding = format!("{}.{}", table.name, f.name);
+            let label = f.name.clone();
             match sol
                 .create_field_object(
                     layout_id,
@@ -1345,6 +1354,25 @@ async fn create_design_object(
                 None => return StatusCode::NOT_FOUND.into_response(),
             }
         } else {
+            // Value-only field copy (duplicate/paste, #48/#85). Prefer the source
+            // object's `binding` verbatim so the copy round-trips even when the
+            // binding doesn't resolve to a live field_id (empty table, or an
+            // unresolved relationship path) — those render with `field_id: null`,
+            // and re-deriving the binding from `field_id` would 400. Fall back to
+            // the field_id→binding derivation only when no binding is supplied.
+            let binding = match body.binding.clone() {
+                Some(b) => b,
+                None => {
+                    let Some(fid) = body.field_id else {
+                        return (StatusCode::BAD_REQUEST, "field tool needs a fieldId")
+                            .into_response();
+                    };
+                    let Some(f) = fields.iter().find(|f| f.id == fid) else {
+                        return (StatusCode::BAD_REQUEST, "no such field").into_response();
+                    };
+                    format!("{}.{}", table.name, f.name)
+                }
+            };
             let new = NewObject {
                 part_id: body.part_id,
                 kind,
@@ -3044,6 +3072,55 @@ mod tests {
         assert!(
             model.contains(r#""objectStyle":"background:#ffeecc;box-shadow:0 0 0 3px #335577;""#),
             "pasted field props persist in the model\n{model}"
+        );
+    }
+
+    /// #48 duplicate: a value-only field copy (createLabel:false) carries the
+    /// source object's `binding` verbatim, so Ctrl/Cmd+D round-trips even when the
+    /// binding doesn't resolve to a live field_id — an empty table (no records)
+    /// renders every field object with `field_id: null`, exactly the state that
+    /// used to 400 "field tool needs a fieldId".
+    #[tokio::test]
+    async fn design_duplicate_field_by_binding_without_field_id() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        sol.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
+        // No records inserted: with an empty table the read model resolves no
+        // value, so a field object's field_id is null — the crashing scenario.
+        let layout_id = sol.layouts().unwrap()[0].id;
+        let part_id = body_part(&sol, layout_id).id;
+        let before = sol.objects(part_id).unwrap().len();
+        let state = state_for(sol);
+
+        // Exactly what the canvas POSTs on Ctrl/Cmd+D of a field whose field_id is
+        // null: no fieldId, but the binding fully determines the copy.
+        let body = format!(
+            r#"{{"partId":{part_id},"kind":"field","x":40,"y":40,"w":120,"h":24,"fieldId":null,"createLabel":false,"binding":"Customers.Name"}}"#
+        );
+        let (status, resp) =
+            post_json_body(state.clone(), &format!("/design/{layout_id}/object"), &body).await;
+        assert_eq!(status, StatusCode::OK, "duplicate by binding\n{resp}");
+        assert!(resp.contains(r#""kind":"field""#), "field created\n{resp}");
+        assert!(
+            !resp.contains(r#""kind":"text""#),
+            "no caption spawned for a value-only copy\n{resp}"
+        );
+
+        let sol = state.sol.lock().unwrap();
+        let objs = sol.objects(part_id).unwrap();
+        assert_eq!(objs.len(), before + 1, "one value-only row inserted");
+        let created = objs.iter().find(|o| (o.x, o.y) == (40, 40)).unwrap();
+        assert_eq!(created.kind, ObjectKind::Field);
+        assert_eq!(
+            created.binding.as_deref(),
+            Some("Customers.Name"),
+            "source binding preserved verbatim"
         );
     }
 

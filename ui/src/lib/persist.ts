@@ -28,6 +28,11 @@ export interface NewObjectRequest {
   createLabel?: boolean;
   content?: string | null;
   props?: Record<string, unknown> | null;
+  /** The source object's binding, sent by a value-only field copy (duplicate/
+   * paste) so the server can recreate it even when `fieldId` is null — a field
+   * whose binding doesn't resolve (empty table, unresolved relationship path)
+   * renders with `fieldId: null`, and the binding is what actually defines it. */
+  binding?: string | null;
 }
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {

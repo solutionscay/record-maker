@@ -18,7 +18,7 @@ export interface ClipboardObject {
   h: number;
   z: number;               // stacking within part; relative order preserved on paste
   readOnly: boolean;
-  binding: string;         // dot-path; informational (server rebuilds from fieldId)
+  binding: string;         // dot-path; recreates the value object on paste (server prefers it over fieldId)
   content: string;         // text slot; caption string for a label, '' otherwise
   props: string;           // opaque appearance JSON string ('' when unset)
   fieldId: number | null;  // field identity (#60); null for text/shapes

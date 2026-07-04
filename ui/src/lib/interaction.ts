@@ -287,9 +287,9 @@ export class CanvasInteraction {
         llog('target', 'press on object but id UNRESOLVED', { painted: this.#paintedElements().length });
         return;
       }
-      // Shift toggles selection membership without starting a drag.
-      if (input.shiftKey) {
-        llog('select', 'shift-toggle membership', { id });
+      // Shift or Ctrl/Cmd toggles selection membership without starting a drag.
+      if (input.shiftKey || input.ctrlKey || input.metaKey) {
+        llog('select', 'toggle membership', { id });
         this.#doc.toggle(id);
         e.stop();
         this.#updateTarget();

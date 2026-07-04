@@ -1260,6 +1260,12 @@ export class CanvasInteraction {
   canPaste(): boolean {
     return clipboard.hasContent;
   }
+  duplicate(): void {
+    void this.#duplicateSelectedObjects();
+  }
+  deleteSelected(): void {
+    void this.#deleteSelectedObjects();
+  }
 
   /** Choose moveable's target from the real selection only. Hover uses a separate
    * lightweight outline, so resize handles never appear on unselected objects. */

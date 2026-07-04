@@ -238,6 +238,22 @@
     .dialog-ok:hover { background: #1a5fd0; }
     .dialog.danger .dialog-ok { background: #b00020; border-color: #b00020; }
     .dialog.danger .dialog-ok:hover { background: #970019; }
+    .rm-context-menu { position: fixed; z-index: 10000; min-width: 190px; padding: 5px;
+      border: .5px solid var(--rm-border-strong); border-radius: 8px; background: rgba(255,255,255,.98);
+      color: var(--rm-text); box-shadow: 0 10px 32px rgba(0,0,0,.18), 0 2px 8px rgba(0,0,0,.1);
+      font: 13px/1.2 -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif; }
+    .rm-context-title { padding: 5px 8px 6px; color: var(--rm-text-dim); font-size: 11px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: .04em; }
+    .rm-context-item { width: 100%; min-height: 28px; display: flex; align-items: center; justify-content: space-between;
+      gap: 18px; padding: 5px 8px; border: 0; border-radius: 5px; background: transparent; color: inherit;
+      box-shadow: none; font: inherit; text-align: left; }
+    .rm-context-item:hover:not(:disabled), .rm-context-item:focus-visible:not(:disabled) {
+      outline: none; background: var(--rm-accent); color: #fff; }
+    .rm-context-item.danger { color: var(--rm-danger); }
+    .rm-context-item.danger:hover:not(:disabled), .rm-context-item.danger:focus-visible:not(:disabled) {
+      color: #fff; background: var(--rm-danger); }
+    .rm-context-item:disabled { color: #b8b8bd; cursor: default; }
+    .rm-context-item kbd { color: currentColor; opacity: .62; font: inherit; font-size: 11px; }
   </style>
   {% block head_extra %}{% endblock %}
 </head>
@@ -449,6 +465,105 @@
         if (ok) form.submit();
       });
     });
+  })();
+  </script>
+  {# Browse-mode context menu. Real edit controls keep the native system menu so
+     cut/copy/paste text behaviour is untouched; the rest of Browse gets app
+     commands instead of the browser page menu. Layout mode owns its menu inside
+     the Svelte canvas island. #}
+  <script>
+  (function () {
+    var MODE = "{{ chrome.mode }}";
+    if (MODE !== "browse") return;
+    var LID = null;
+    {% match chrome.current_layout %}
+    {% when Some with (lid) %}
+    LID = "{{ lid }}";
+    {% when None %}
+    {% endmatch %}
+    var menu = null;
+
+    function inEditable(target) {
+      var el = target && target.nodeType === 1 ? target : target && target.parentElement;
+      return !!(el && el.closest && el.closest('input, textarea, select, [contenteditable="true"], .le-inline-text-editor'));
+    }
+    function closeMenu() {
+      if (menu) menu.remove();
+      menu = null;
+    }
+    function submitForm(id) {
+      var form = document.getElementById(id);
+      if (!form) return;
+      if (form.requestSubmit) form.requestSubmit();
+      else form.submit();
+    }
+    function addItem(parent, label, hint, disabled, danger, action) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'rm-context-item' + (danger ? ' danger' : '');
+      btn.disabled = !!disabled;
+      var text = document.createElement('span');
+      text.textContent = label;
+      btn.appendChild(text);
+      if (hint) {
+        var kbd = document.createElement('kbd');
+        kbd.textContent = hint;
+        btn.appendChild(kbd);
+      }
+      btn.addEventListener('click', function () {
+        if (btn.disabled) return;
+        closeMenu();
+        action();
+      });
+      parent.appendChild(btn);
+    }
+    function openMenu(e) {
+      closeMenu();
+      menu = document.createElement('div');
+      menu.className = 'rm-context-menu';
+      menu.setAttribute('role', 'menu');
+      menu.setAttribute('aria-label', 'Browse');
+      var title = document.createElement('div');
+      title.className = 'rm-context-title';
+      title.textContent = 'Browse';
+      menu.appendChild(title);
+      addItem(menu, 'New Record', 'Ctrl+N', !document.getElementById('rm-new-record'), false, function () {
+        submitForm('rm-new-record');
+      });
+      addItem(menu, 'Delete Record', 'Ctrl+E', !document.getElementById('rm-delete-record'), true, function () {
+        submitForm('rm-delete-record');
+      });
+      addItem(menu, 'Find', '', true, false, function () {});
+      addItem(menu, 'Go to Layout Mode', 'Ctrl+L', LID === null, false, function () {
+        window.location.href = '/design/' + LID;
+      });
+      addItem(menu, 'Reload', '', false, false, function () {
+        window.location.reload();
+      });
+      document.body.appendChild(menu);
+      var width = 210, height = 38 + 5 * 31;
+      var x = Math.max(8, Math.min(e.clientX, window.innerWidth - width - 8));
+      var y = Math.max(8, Math.min(e.clientY, window.innerHeight - height - 8));
+      menu.style.left = x + 'px';
+      menu.style.top = y + 'px';
+    }
+
+    document.addEventListener('contextmenu', function (e) {
+      if (inEditable(e.target)) {
+        closeMenu();
+        return;
+      }
+      e.preventDefault();
+      openMenu(e);
+    });
+    document.addEventListener('pointerdown', function (e) {
+      if (menu && !menu.contains(e.target)) closeMenu();
+    }, true);
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeMenu();
+    });
+    window.addEventListener('scroll', closeMenu, true);
+    window.addEventListener('resize', closeMenu);
   })();
   </script>
   {# Text selection is currently useful only while editing a real text control.

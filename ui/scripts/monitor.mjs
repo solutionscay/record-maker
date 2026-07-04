@@ -20,50 +20,12 @@
 // (or its error) under obs[name]; `page` is a Playwright Page. Read rmlogs.json to
 // see what the app logged during each step.
 
-import { chromium } from 'playwright-core';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { createHarness } from './harness.mjs';
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const OUT = process.env.MONITOR_OUT || resolve(root, '.monitor');
-const BASE = process.env.BASE || 'http://127.0.0.1:4317';
-const DESIGN = process.env.DESIGN_PATH || '/design/1';
-const CHROME = process.env.CHROME || '/usr/bin/google-chrome-stable';
-mkdirSync(OUT, { recursive: true });
-
-const obs = {};
-const step = async (name, fn) => {
-  try {
-    obs[name] = await fn();
-  } catch (e) {
-    obs[name] = { ERROR: String(e) };
-  }
-};
-
-const browser = await chromium.launch({
-  executablePath: CHROME,
-  headless: true,
-  args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
-});
-const page = await browser.newPage({ viewport: { width: 1500, height: 950 } });
-const consoleMsgs = [];
-page.on('console', (m) => consoleMsgs.push({ type: m.type(), text: m.text() }));
-page.on('pageerror', (e) => consoleMsgs.push({ type: 'pageerror', text: e.message }));
+const { OUT, browser, page, obs, step, consoleMsgs, waitForCanvas, writeJson } = await createHarness();
 
 // readiness: retry until the design page + canvas are up
-let up = false;
-for (let i = 0; i < 20 && !up; i++) {
-  try {
-    await page.goto(`${BASE}${DESIGN}`, { waitUntil: 'load', timeout: 5000 });
-    await page.waitForSelector('.fm-canvas', { timeout: 2000 });
-    up = true;
-  } catch {
-    await page.waitForTimeout(500);
-  }
-}
-obs.serverUp = up;
-await page.waitForTimeout(400);
+await waitForCanvas();
 
 // ─────────────────────────────── REPRO ───────────────────────────────────────
 // Initial state.
@@ -237,9 +199,9 @@ await page.screenshot({ path: `${OUT}/07-after-zoom-transform.png` });
 
 // ─────────────────────────────── DUMP ────────────────────────────────────────
 const rmLogs = await page.evaluate(() => window.__rmLogs || []);
-writeFileSync(`${OUT}/rmlogs.json`, JSON.stringify(rmLogs, null, 2));
-writeFileSync(`${OUT}/console.json`, JSON.stringify(consoleMsgs, null, 2));
-writeFileSync(`${OUT}/obs.json`, JSON.stringify(obs, null, 2));
+writeJson('rmlogs.json', rmLogs);
+writeJson('console.json', consoleMsgs);
+writeJson('obs.json', obs);
 
 await browser.close();
 console.log(`monitor done · serverUp:${obs.serverUp} · logs:${rmLogs.length} · out:${OUT}`);

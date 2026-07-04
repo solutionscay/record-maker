@@ -37,40 +37,15 @@ import type { ClipboardObject } from './clipboard.svelte';
 import { runUndo, runRedo } from './history';
 import { FIELD_DRAG_MIME } from './dnd';
 import { llog, lerror } from './log';
+import { lineAngle, lineGeometryForAngle, lineLength, lineShapeStyle, normalizeAngle, numberProp, parseProps } from './object-props';
 
 type DrawTool = Exclude<ToolKind, 'pointer'>;
-
-function numberProp(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
-}
-
-function parseProps(props: string): Record<string, unknown> {
-  if (!props) return {};
-  try {
-    const parsed = JSON.parse(props) as unknown;
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
-}
-
-function normalizeAngle(angle: number): number {
-  if (!Number.isFinite(angle)) return 0;
-  const normalized = ((angle % 360) + 360) % 360;
-  return Math.round(normalized * 100) / 100;
-}
-
-function lineAngle(x1: number, y1: number, x2: number, y2: number): number {
-  return normalizeAngle((Math.atan2(y2 - y1, x2 - x1) * 180) / Math.PI);
-}
-
-function lineShapeStyle(props: Record<string, unknown>): string {
-  const stroke = typeof props.stroke === 'string' ? props.stroke : '#888';
-  const strokeWidth = Math.max(1, Math.round(numberProp(props.strokeWidth, 2)));
-  const length = Math.max(1, numberProp(props.length, 1));
-  const angle = numberProp(props.angle, 0);
-  return `background:${stroke};height:${strokeWidth}px;width:${length}px;left:50%;right:auto;transform:translate(-50%,-50%) rotate(${angle}deg);transform-origin:center center;`;
-}
+type IdentitySnapshot = { painted: HTMLElement[]; ids: number[] };
+type FieldPlacementTarget = {
+  partId: number;
+  partHeight: number;
+  box: { x: number; y: number; w: number; h: number };
+};
 
 interface DrawPlacement {
   tool: DrawTool;
@@ -145,6 +120,7 @@ export class CanvasInteraction {
   #rotatingLineId: number | null = null;
   #rotateStartLength = 0;
   #dirtyLineProps = new Set<number>();
+  #gestureIdentity: IdentitySnapshot | null = null;
 
   constructor(stage: HTMLElement, doc: EditorDoc, layoutId: string) {
     this.#stage = stage;
@@ -206,7 +182,7 @@ export class CanvasInteraction {
       const props = this.#propsForObject(o);
       const angle = numberProp(props.angle, 0);
       this.#rotatingLineId = id;
-      this.#rotateStartLength = this.#lineLength(o, props);
+      this.#rotateStartLength = lineLength(o, props);
       e.set(angle);
       llog('rotate', 'rotateStart', { id, angle, length: this.#rotateStartLength });
     });
@@ -242,7 +218,7 @@ export class CanvasInteraction {
       // tiny `.fm-obj` box, so that trailing click may look like empty canvas even
       // though Selecto correctly selected the line.
       if (!e.isClick || selectedIds.length > 0) {
-        this.#suppressTrailingClick();
+        this.#swallowNextClick();
       }
     });
     // Decide, at press time, who owns the gesture:
@@ -268,41 +244,26 @@ export class CanvasInteraction {
         return;
       }
       const target = input.target as Element | null;
-      // Resolve the real `.fm-obj` under the press point. When 2+ objects are
-      // selected, Moveable renders a transparent "moveable-area" drag-proxy OVER
-      // EVERY member of the group (so dragging any one member drags the whole
-      // group) — that proxy is what `input.target` actually is in that case, not
-      // the object element, so `target.closest('.fm-obj')` misses it. Fall back to
-      // a point hit-test through the full elementsFromPoint stack to find the real
-      // object underneath.
-      const objEl = ((target?.closest('.fm-obj') as HTMLElement | null) ?? this.#objectElementAt(input.clientX, input.clientY)) as
-        | HTMLElement
-        | null;
-      // Shift or Ctrl/Cmd toggles selection membership without starting a drag.
-      // This must be checked BEFORE the moveable-control-box bail-out below:
-      // otherwise a Ctrl/Cmd-click that lands on the group's `moveable-area`
-      // proxy (any click within/around an already-multi-selected group) gets
-      // swallowed as "moveable owns this gesture" and the toggle never runs —
-      // the actual bug a live click-test caught (a static review had missed it).
-      if (objEl && (input.shiftKey || input.ctrlKey || input.metaKey)) {
-        const id = this.#idForElement(objEl);
-        if (id !== undefined) {
-          llog('select', 'toggle membership', { id });
-          this.#doc.toggle(id);
-          e.stop();
-          this.#updateTarget();
-          // `#updateTarget()` can synchronously destroy/replace moveable's group
-          // `.moveable-area` overlay (e.g. shrinking a 2-object group back to a
-          // single target). When the press originally landed on THAT overlay
-          // element and it gets detached from the DOM before the browser fires
-          // the trailing native `click`, the click retargets to the nearest
-          // surviving ancestor — `.le-stage` itself — which slips past #onClick's
-          // `.fm-obj`/moveable guards and reaches `clearSelection()`, wiping out
-          // the toggle we just made. Swallow that one trailing click, exactly
-          // like the marquee `selectEnd` path already does below.
-          this.#suppressTrailingClick();
-          return;
-        }
+      const identity = this.#identitySnapshot();
+      // Moveable's group overlay can be the event target instead of the real object.
+      const objEl =
+        (target?.closest('.fm-obj') as HTMLElement | null) ??
+        (this.#targetIds.size > 1 ? this.#objectElementAt(input.clientX, input.clientY) : null);
+      const id = objEl ? this.#idForElement(objEl, identity) : undefined;
+      if (objEl && id === undefined) {
+        llog('target', 'press on object but id UNRESOLVED', { painted: identity.painted.length });
+      }
+      // Modifier toggles must run before the moveable-control-box guard because
+      // group-selection presses can arrive through Moveable's transparent overlay.
+      if (objEl && id !== undefined && (input.shiftKey || input.ctrlKey || input.metaKey)) {
+        llog('select', 'toggle membership', { id });
+        this.#doc.toggle(id);
+        e.stop();
+        this.#updateTarget();
+        // `#updateTarget()` may detach the pressed overlay before the browser's
+        // trailing native click fires, so swallow exactly that next click.
+        this.#swallowNextClick();
+        return;
       }
       // moveable's own control box (a resize handle / the drag area) → its gesture.
       if (target && this.#moveable.isMoveableElement(target)) {
@@ -314,9 +275,7 @@ export class CanvasInteraction {
         llog('select', 'press on empty canvas → marquee');
         return; // empty canvas → selecto runs its marquee
       }
-      const id = this.#idForElement(objEl);
       if (id === undefined) {
-        llog('target', 'press on object but id UNRESOLVED', { painted: this.#paintedElements().length });
         return;
       }
       // Already selected/targeted: let Moveable handle this same pointer stream.
@@ -332,7 +291,7 @@ export class CanvasInteraction {
       this.#doc.selectOnly([id]);
       this.#targetKey = String(id);
       this.#targetIds = new Set([id]);
-      const guidelines = this.#paintedElements().filter((el) => el !== objEl);
+      const guidelines = identity.painted.filter((el) => el !== objEl);
       // Set the target, then start the drag SYNCHRONOUSLY on this same pointerdown.
       // moveable.dragStart() flushes the just-set target (its internal `$_timer`
       // guard forceUpdates before triggering) and only fires if `objEl` matches the
@@ -544,24 +503,7 @@ export class CanvasInteraction {
           llog('place', 'field draw finished but no field chosen — nothing to create');
           return;
         }
-        const rowStep = Math.max(32, finalBox.h + GRID);
-        const batches = await Promise.all(
-          fieldIds.map((fieldId, i) => {
-            const y = Math.min(drawing.partHeight - 1, finalBox.y + i * rowStep);
-            return createObject(this.#layoutId, {
-              partId,
-              kind: 'field',
-              x: finalBox.x,
-              y,
-              w: finalBox.w,
-              h: Math.min(finalBox.h, Math.max(1, drawing.partHeight - y)),
-              fieldId,
-              createLabel: this.#doc.toolCreateLabel,
-              rec: this.#doc.rec,
-            });
-          }),
-        );
-        views = batches.flat();
+        views = await this.#createFieldObjectsAt({ partId, partHeight: drawing.partHeight, box: finalBox }, fieldIds);
       } else {
         views = await createObject(this.#layoutId, {
           partId,
@@ -578,25 +520,11 @@ export class CanvasInteraction {
       llog('create', 'server created object(s)', {
         objects: views.map((v) => ({ id: v.id, kind: v.kind, x: v.x, y: v.y, w: v.w, h: v.h })),
       });
-      for (const v of views) this.#doc.addObject(v, partId);
-      this.#doc.mark();
-      // Return to pointer mode before selecting so the reactive target refresh
-      // attaches moveable to the newly-created objects instead of clearing it.
-      this.#doc.setTool('pointer');
       const placed = views.at(-1); // the field VALUE (its label sorts before it)
       const selectedIds = tool === 'field' ? views.map((v) => v.id) : placed ? [placed.id] : [];
-      if (placed) {
-        this.#doc.selectOnly(selectedIds);
-        // The cursor now sits over the freshly-placed object, so make it the hover
-        // too: otherwise `#updateTarget` prefers a stale hover from before create.
-        this.#hoverId = placed.id;
-        llog('place', 'added to store + selected + hover pinned to placed', {
-          selectedIds,
-          hoverId: placed.id,
-        });
-        if (tool === 'text') {
-          this.#startTextEdit(placed.id);
-        }
+      const committed = this.#commitPlacedViews(partId, views, selectedIds, 'draw');
+      if (committed && tool === 'text') {
+        this.#startTextEdit(committed.id);
       }
     } catch (e) {
       lerror('place', 'create failed', e);
@@ -633,7 +561,7 @@ export class CanvasInteraction {
    * over a part (no canvas under the cursor, or past the last part's row —
    * partAtY still returns the last part then, so this is really just "no
    * `.fm-canvas` under the cursor at all"). */
-  #dropTargetFor(clientX: number, clientY: number): { partId: number; partTop: number; partHeight: number; box: { x: number; y: number; w: number; h: number } } | null {
+  #dropTargetFor(clientX: number, clientY: number): (FieldPlacementTarget & { partTop: number }) | null {
     const point = this.#canvasPoint(clientX, clientY);
     if (!point) return null;
     const where = partAtY(this.#doc.renderModel, point.y);
@@ -686,9 +614,7 @@ export class CanvasInteraction {
     void this.#placeFieldsAt(target, parsed);
   };
 
-  #paintDropPreview(
-    target: { partTop: number; box: { x: number; y: number; w: number; h: number } } | null,
-  ): void {
+  #paintDropPreview(target: { partTop: number; box: { x: number; y: number; w: number; h: number } } | null): void {
     if (!target) {
       this.#dropPreview?.remove();
       this.#dropPreview = null;
@@ -705,46 +631,15 @@ export class CanvasInteraction {
     this.#dropPreview.style.height = `${target.box.h}px`;
   }
 
-  /** Persist the dropped field(s) as one undoable create step, mirroring the
-   * field branch of #finishDraw (same box-per-field stacking, same "select the
-   * placed objects and drop back to the pointer tool" tail). */
-  async #placeFieldsAt(
-    target: { partId: number; partHeight: number; box: { x: number; y: number; w: number; h: number } },
-    fieldIds: number[],
-  ): Promise<void> {
+  async #placeFieldsAt(target: FieldPlacementTarget, fieldIds: number[]): Promise<void> {
     if (this.#placing) return;
     this.#placing = true;
     try {
-      const { partId, partHeight, box } = target;
-      const rowStep = Math.max(32, box.h + GRID);
-      const batches = await Promise.all(
-        fieldIds.map((fieldId, i) => {
-          const y = Math.min(partHeight - 1, box.y + i * rowStep);
-          return createObject(this.#layoutId, {
-            partId,
-            kind: 'field',
-            x: box.x,
-            y,
-            w: box.w,
-            h: Math.min(box.h, Math.max(1, partHeight - y)),
-            fieldId,
-            createLabel: this.#doc.toolCreateLabel,
-            rec: this.#doc.rec,
-          });
-        }),
-      );
-      const views = batches.flat();
+      const views = await this.#createFieldObjectsAt(target, fieldIds);
       llog('create', 'server created object(s) via drop', {
         objects: views.map((v) => ({ id: v.id, kind: v.kind, x: v.x, y: v.y, w: v.w, h: v.h })),
       });
-      for (const v of views) this.#doc.addObject(v, partId);
-      this.#doc.mark();
-      this.#doc.setTool('pointer');
-      const placed = views.at(-1);
-      if (placed) {
-        this.#doc.selectOnly(views.map((v) => v.id));
-        this.#hoverId = placed.id;
-      }
+      this.#commitPlacedViews(target.partId, views, views.map((v) => v.id), 'drop');
     } catch (e) {
       lerror('place', 'drop create failed', e);
       this.#doc.setError(e instanceof Error ? e.message : String(e));
@@ -752,6 +647,44 @@ export class CanvasInteraction {
       this.#placing = false;
       if (this.#doc.activeTool !== 'pointer') this.#doc.setTool('pointer');
     }
+  }
+
+  async #createFieldObjectsAt(target: FieldPlacementTarget, fieldIds: number[]): Promise<ObjectView[]> {
+    const { partId, partHeight, box } = target;
+    const rowStep = Math.max(32, box.h + GRID);
+    const batches = await Promise.all(
+      fieldIds.map((fieldId, i) => {
+        const y = Math.min(partHeight - 1, box.y + i * rowStep);
+        return createObject(this.#layoutId, {
+          partId,
+          kind: 'field',
+          x: box.x,
+          y,
+          w: box.w,
+          h: Math.min(box.h, Math.max(1, partHeight - y)),
+          fieldId,
+          createLabel: this.#doc.toolCreateLabel,
+          rec: this.#doc.rec,
+        });
+      }),
+    );
+    return batches.flat();
+  }
+
+  #commitPlacedViews(partId: number, views: ObjectView[], selectedIds: number[], source: string): ObjectView | undefined {
+    for (const v of views) this.#doc.addObject(v, partId);
+    this.#doc.mark();
+    this.#doc.setTool('pointer');
+    const placed = views.at(-1);
+    if (!placed) return undefined;
+    this.#doc.selectOnly(selectedIds);
+    this.#hoverId = placed.id;
+    llog('place', 'added to store + selected + hover pinned to placed', {
+      source,
+      selectedIds,
+      hoverId: placed.id,
+    });
+    return placed;
   }
 
   destroy(): void {
@@ -843,7 +776,7 @@ export class CanvasInteraction {
     this.#updateTarget();
   };
 
-  #suppressTrailingClick(): void {
+  #swallowNextClick(): void {
     this.#suppressNextClick = true;
     this.#suppressNextClickUntil = performance.now() + 750;
   }
@@ -1260,6 +1193,7 @@ export class CanvasInteraction {
    * lightweight outline, so resize handles never appear on unselected objects. */
   #updateTarget(): void {
     if (this.#gesturing) return;
+    this.#gestureIdentity = null;
     // A placement tool is armed → the canvas is a drawing surface, not a select/
     // drag surface: drop moveable's target so a press places instead of grabs.
     if (this.#doc.activeTool !== 'pointer') {
@@ -1433,6 +1367,7 @@ export class CanvasInteraction {
     this.#gesturing = true;
     this.#moved = false;
     this.#resizeStarts.clear();
+    this.#gestureIdentity = this.#identitySnapshot();
   }
 
   /** End a gesture: if it actually changed geometry, seal one undo step and
@@ -1451,6 +1386,7 @@ export class CanvasInteraction {
     }
     this.#targetKey = ''; // force a re-sync after the gesture
     this.#resizeStarts.clear();
+    this.#gestureIdentity = null;
     this.#scheduleRectUpdate();
     this.#updateTarget();
     // A reparent moves the object to a DIFFERENT band's keyed-each, so Svelte
@@ -1473,10 +1409,11 @@ export class CanvasInteraction {
   }
 
   #applyMove(target: HTMLElement | SVGElement, left: number, top: number): void {
-    const id = this.#idForElement(target);
+    const identity = this.#currentIdentity();
+    const id = this.#idForElement(target, identity);
     if (id === undefined) {
       llog('target', 'drag: target element has NO mapped id — move is a no-op', {
-        painted: this.#paintedElements().length,
+        painted: identity.painted.length,
       });
       return;
     }
@@ -1522,7 +1459,8 @@ export class CanvasInteraction {
   }
 
   #captureResizeStart(target: HTMLElement | SVGElement, direction: number[], inputEvent: Event | undefined): void {
-    const id = this.#idForElement(target);
+    const identity = this.#currentIdentity();
+    const id = this.#idForElement(target, identity);
     const o = id === undefined ? undefined : this.#doc.getObject(id);
     const pointer = inputEvent as PointerEvent | MouseEvent | undefined;
     if (id === undefined || !o || !pointer) return;
@@ -1545,11 +1483,12 @@ export class CanvasInteraction {
     top: number,
     inputEvent?: Event,
   ): void {
-    const id = this.#idForElement(target);
+    const identity = this.#currentIdentity();
+    const id = this.#idForElement(target, identity);
     if (id === undefined) {
       llog('target', 'resize: target element has NO mapped id — resize is a no-op', {
-        painted: this.#paintedElements().length,
-        paintOrderIds: objectIdsInPaintOrder(this.#doc.renderModel),
+        painted: identity.painted.length,
+        paintOrderIds: identity.ids,
       });
       return;
     }
@@ -1609,18 +1548,12 @@ export class CanvasInteraction {
     const o = id === null ? undefined : this.#doc.getObject(id);
     if (id === null || !o || o.kind !== 'line') return;
     const nextAngle = normalizeAngle(angle);
-    const length = this.#rotateStartLength || this.#lineLength(o, this.#propsForObject(o));
-    const radians = (nextAngle * Math.PI) / 180;
-    const w = Math.max(1, Math.round(Math.abs(Math.cos(radians)) * length));
-    const h = Math.max(1, Math.round(Math.abs(Math.sin(radians)) * length));
-    const cx = o.x + o.w / 2;
-    const cy = o.y + o.h / 2;
-    const x = clampOrigin(Math.round(cx - w / 2));
-    const y = clampOrigin(Math.round(cy - h / 2));
+    const length = this.#rotateStartLength || lineLength(o, this.#propsForObject(o));
+    const geom = lineGeometryForAngle(o, nextAngle, length);
     const props = { ...this.#propsForObject(o), angle: nextAngle, length };
     const propsJson = JSON.stringify(props);
     this.#moved = true;
-    this.#doc.setObjectGeometry(id, { x, y, w, h });
+    this.#doc.setObjectGeometry(id, { x: clampOrigin(geom.x), y: clampOrigin(geom.y), w: geom.w, h: geom.h });
     this.#doc.setObjectProps(id, propsJson);
     this.#setLineShapeStyle(id, props);
     this.#dirtyLineProps.add(id);
@@ -1633,6 +1566,7 @@ export class CanvasInteraction {
     this.#gesturing = false;
     this.#rotatingLineId = null;
     this.#rotateStartLength = 0;
+    this.#gestureIdentity = null;
     if (id !== null && moved) {
       this.#doc.mark();
       void this.#persistSelection();
@@ -1676,10 +1610,6 @@ export class CanvasInteraction {
 
   #propsForObject(o: Readonly<ObjectDoc>): Record<string, unknown> {
     return parseProps(o.props);
-  }
-
-  #lineLength(o: Readonly<ObjectDoc>, props: Record<string, unknown>): number {
-    return Math.max(1, numberProp(props.length, Math.hypot(o.w, o.h) || o.w || 1));
   }
 
   #setLineShapeStyle(id: number, props: Record<string, unknown>): void {
@@ -1782,6 +1712,17 @@ export class CanvasInteraction {
     return canvas ? Array.from(canvas.querySelectorAll<HTMLElement>('.fm-obj')) : [];
   }
 
+  #identitySnapshot(): IdentitySnapshot {
+    return {
+      painted: this.#paintedElements(),
+      ids: objectIdsInPaintOrder(this.#doc.renderModel),
+    };
+  }
+
+  #currentIdentity(): IdentitySnapshot {
+    return this.#gestureIdentity ?? this.#identitySnapshot();
+  }
+
   /** Hit-test a client point through the FULL element stack (not just the
    * topmost element), so a `.fm-obj` underneath one of moveable's own overlay
    * proxies (e.g. the group `moveable-area` drag-proxy) can still be found. */
@@ -1794,19 +1735,20 @@ export class CanvasInteraction {
   }
 
   #elementsToIds(elements: Array<HTMLElement | SVGElement>): number[] {
-    return elementsToObjectIds(elements, this.#paintedElements(), objectIdsInPaintOrder(this.#doc.renderModel));
+    const identity = this.#currentIdentity();
+    return elementsToObjectIds(elements, identity.painted, identity.ids);
   }
 
   #elementForId(id: number): HTMLElement | undefined {
-    const ids = objectIdsInPaintOrder(this.#doc.renderModel);
-    const i = ids.indexOf(id);
-    return i >= 0 ? this.#paintedElements()[i] : undefined;
+    const identity = this.#currentIdentity();
+    const i = identity.ids.indexOf(id);
+    return i >= 0 ? identity.painted[i] : undefined;
   }
 
-  #idForElement(el: Element): number | undefined {
-    const i = this.#paintedElements().indexOf(el as HTMLElement);
+  #idForElement(el: Element, identity: IdentitySnapshot = this.#currentIdentity()): number | undefined {
+    const i = identity.painted.indexOf(el as HTMLElement);
     if (i < 0) return undefined;
-    return objectIdsInPaintOrder(this.#doc.renderModel)[i];
+    return identity.ids[i];
   }
 
   #scheduleRectUpdate(): void {

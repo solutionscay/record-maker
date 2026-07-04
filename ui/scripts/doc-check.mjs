@@ -292,6 +292,31 @@ try {
     eq('elementsToIds: maps selected elements by index', elementsToObjectIds([painted[2], painted[0]], painted, ids), [3, 1]);
     eq('elementsToIds: drops unknown elements', elementsToObjectIds([{ n: 'x' }], painted, ids), []);
   }
+
+  // 12. Shared object props and line geometry helpers (#92).
+  {
+    const { parseProps, normalizeAngle, lineLength, lineGeometryForAngle, lineAngle } =
+      await vite.ssrLoadModule('/src/lib/object-props.ts');
+
+    eq('parseProps: valid object parses', parseProps('{"fill":"#fff","strokeWidth":2}'), {
+      fill: '#fff',
+      strokeWidth: 2,
+    });
+    eq('parseProps: invalid JSON/arrays/non-objects become empty bags', [
+      parseProps('{'),
+      parseProps('[1,2]'),
+      parseProps('"x"'),
+    ], [{}, {}, {}]);
+    ok('angle: normalization wraps and rounds', normalizeAngle(-45) === 315 && normalizeAngle(720.126) === 0.13);
+    ok('line: angle from endpoints normalizes', lineAngle(0, 0, 0, -10) === 270);
+    ok('line: explicit length prop wins', lineLength({ w: 3, h: 4 }, { length: 12 }) === 12);
+    eq('line: geometry rotates around center', lineGeometryForAngle({ x: 10, y: 20, w: 30, h: 10 }, 90, 40), {
+      x: 25,
+      y: 5,
+      w: 1,
+      h: 40,
+    });
+  }
 } finally {
   await vite.close();
 }

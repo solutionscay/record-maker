@@ -24,6 +24,12 @@
   import { formatValue } from './format';
   import Icon from './Icon.svelte';
   import FieldSelect from './FieldSelect.svelte';
+  import {
+    lineGeometryForAngle as resolvedLineGeometryForAngle,
+    lineLength as resolvedLineLength,
+    normalizeAngle,
+    parseProps,
+  } from './object-props';
 
   let { doc, layoutId = '' }: { doc: EditorDoc; layoutId?: string } = $props();
 
@@ -218,15 +224,6 @@
     return { mixed, value: vals[0] };
   }
 
-  function parseProps(raw: string): Record<string, unknown> {
-    if (!raw) return {};
-    try {
-      const p: unknown = JSON.parse(raw);
-      return p && typeof p === 'object' ? (p as Record<string, unknown>) : {};
-    } catch {
-      return {};
-    }
-  }
   function colorValue(v: unknown, fallback: string): string {
     return typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v) ? v : fallback;
   }
@@ -271,29 +268,27 @@
   function alignValue(v: unknown): string {
     return typeof v === 'string' && ['left', 'center', 'right'].includes(v) ? v : 'left';
   }
-  function normalizeAngle(value: number): number {
-    if (!Number.isFinite(value)) return 0;
-    const normalized = ((value % 360) + 360) % 360;
-    return Math.round(normalized * 100) / 100;
-  }
   function lineLength(): number {
     if (!selected || selected.kind !== 'line') return 1;
-    return Math.max(1, numberValue(selectedProps.length, Math.hypot(selected.w, selected.h) || selected.w || 1));
+    return resolvedLineLength(selected, selectedProps);
   }
   function lineGeometryForAngle(angle: number): { x: number; y: number; w: number; h: number } | null {
     if (!selected || selected.kind !== 'line') return null;
-    const length = lineLength();
-    const radians = (angle * Math.PI) / 180;
-    const w = Math.max(1, Math.round(Math.abs(Math.cos(radians)) * length));
-    const h = Math.max(1, Math.round(Math.abs(Math.sin(radians)) * length));
-    const cx = selected.x + selected.w / 2;
-    const cy = selected.y + selected.h / 2;
-    return {
-      x: Math.max(0, Math.round(cx - w / 2)),
-      y: Math.max(0, Math.round(cy - h / 2)),
-      w,
-      h,
-    };
+    return resolvedLineGeometryForAngle(selected, angle, lineLength());
+  }
+
+  function reportPersistError(label: string, e: unknown): void {
+    lerror('persist', `${label} failed`, e);
+    doc.setError(e instanceof Error ? e.message : String(e));
+  }
+
+  async function persistObjectPropsAndRefresh(id: number, props: Record<string, unknown>, label: string): Promise<void> {
+    try {
+      const styles = await persistProps(layoutId, id, props);
+      doc.setObjectStyles(id, styles);
+    } catch (e) {
+      reportPersistError(label, e);
+    }
   }
 
   function isSingletonPartKind(kind: string): boolean {
@@ -335,13 +330,7 @@
     // from the server's single-source derivation.
     doc.setObjectProps(selectedId, JSON.stringify(next));
     doc.mark();
-    try {
-      const styles = await persistProps(layoutId, selectedId, next);
-      doc.setObjectStyles(selectedId, styles);
-    } catch (e) {
-      lerror('persist', 'set style failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
-    }
+    await persistObjectPropsAndRefresh(selectedId, next, 'set style');
   }
 
   /** Multi-select generalization of `setStyle` (#82): write one style/text key to
@@ -372,8 +361,7 @@
         }),
       );
     } catch (e) {
-      lerror('persist', 'set style (many) failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
+      reportPersistError('set style (many)', e);
     }
   }
 
@@ -396,8 +384,7 @@
     try {
       await Promise.all([...geoms].map(([id, g]) => persistGeometry(layoutId, id, g)));
     } catch (e) {
-      lerror('persist', 'arrange geometry failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
+      reportPersistError('arrange geometry', e);
     }
   }
 
@@ -532,8 +519,7 @@
     try {
       await persistObjectsZ(layoutId, changed.map(([id, z]) => ({ id, z })));
     } catch (e) {
-      lerror('persist', 'z-order failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
+      reportPersistError('z-order', e);
     }
   }
 
@@ -550,11 +536,9 @@
     doc.mark();
     try {
       await persistGeometry(layoutId, selectedId, geom);
-      const styles = await persistProps(layoutId, selectedId, next);
-      doc.setObjectStyles(selectedId, styles);
+      await persistObjectPropsAndRefresh(selectedId, next, 'set line angle');
     } catch (e) {
-      lerror('persist', 'set line angle failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
+      reportPersistError('set line angle', e);
     }
   }
 
@@ -567,8 +551,7 @@
       doc.refreshResolved(view);
       doc.mark();
     } catch (e) {
-      lerror('persist', 'set field binding failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
+      reportPersistError('set field binding', e);
     }
   }
 
@@ -581,8 +564,7 @@
       const view = await persistContent(layoutId, selectedId, content);
       doc.setProp(selectedId, 'content', view.content);
     } catch (e) {
-      lerror('persist', 'set text content failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
+      reportPersistError('set text content', e);
     }
   }
 
@@ -596,8 +578,7 @@
       doc.setProp(selectedId, 'readOnly', view.readOnly);
       doc.refreshResolved(view);
     } catch (e) {
-      lerror('persist', 'set read-only failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
+      reportPersistError('set read-only', e);
     }
   }
 
@@ -611,8 +592,7 @@
       for (const id of ids) doc.removeObject(id);
       doc.mark();
     } catch (e) {
-      lerror('persist', 'delete object failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
+      reportPersistError('delete object', e);
     } finally {
       busy = false;
     }
@@ -630,13 +610,7 @@
     llog('persist', 'inspector: set value format', { id: selectedId, format: next });
     doc.setObjectProps(selectedId, JSON.stringify(merged));
     doc.mark();
-    try {
-      const styles = await persistProps(layoutId, selectedId, merged);
-      doc.setObjectStyles(selectedId, styles);
-    } catch (e) {
-      lerror('persist', 'set value format failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
-    }
+    await persistObjectPropsAndRefresh(selectedId, merged, 'set value format');
   }
   // Number/Boolean write the format bag directly.
   function patchNumber(patch: Record<string, unknown>): void {
@@ -685,8 +659,7 @@
     try {
       await persistPartKind(layoutId, id, kind);
     } catch (e) {
-      lerror('persist', 'set band kind failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
+      reportPersistError('set band kind', e);
     }
   }
 
@@ -703,8 +676,7 @@
       const view = await persistPartProps(layoutId, id, next);
       doc.setPartStyle(id, view.partStyle);
     } catch (e) {
-      lerror('persist', 'set band fill failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
+      reportPersistError('set band fill', e);
     }
   }
 
@@ -718,8 +690,7 @@
     try {
       await persistPartHeight(layoutId, id, next);
     } catch (e) {
-      lerror('persist', 'set band height failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
+      reportPersistError('set band height', e);
     }
   }
 
@@ -733,8 +704,7 @@
       const positions = await persistMovePart(layoutId, id, up);
       doc.applyPartPositions(positions);
     } catch (e) {
-      lerror('persist', 'move band failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
+      reportPersistError('move band', e);
     } finally {
       busy = false;
     }
@@ -749,8 +719,7 @@
       await persistDeletePart(layoutId, id);
       doc.removePart(id);
     } catch (e) {
-      lerror('persist', 'delete band failed', e);
-      doc.setError(e instanceof Error ? e.message : String(e));
+      reportPersistError('delete band', e);
     } finally {
       busy = false;
     }

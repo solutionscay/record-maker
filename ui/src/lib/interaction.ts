@@ -212,32 +212,41 @@ export class CanvasInteraction {
     // stream, so a press on any selected object drags the whole group.
     this.#selecto.on('selectEnd', (e) => {
       const selectedIds = this.#elementsToIds(e.selected);
+      const clickedObjEl =
+        e.isClick && e.inputEvent
+          ? (((e.inputEvent.target as Element | null)?.closest('.fm-obj') as HTMLElement | null) ??
+            this.#objectElementAt(e.inputEvent.clientX, e.inputEvent.clientY))
+          : null;
+      const clickedId = clickedObjEl ? this.#idForElement(clickedObjEl) : undefined;
       // `hitRate === 100` is set by dragStart only for a Control-drag marquee (the
       // single source of that mode); reset it now that the gesture has ended.
       const containmentMarquee = this.#selecto.hitRate === 100;
       this.#selecto.hitRate = 0;
       if (containmentMarquee && e.isClick) {
-        const target = (e.inputEvent?.target ?? null) as Element | null;
-        const objEl =
-          (target?.closest('.fm-obj') as HTMLElement | null) ??
-          (e.inputEvent ? this.#objectElementAt(e.inputEvent.clientX, e.inputEvent.clientY) : null);
-        const id = objEl ? this.#idForElement(objEl) : undefined;
-        if (id !== undefined) {
-          llog('select', 'control-click toggle membership', { id });
-          this.#doc.toggle(id);
+        if (clickedId !== undefined) {
+          llog('select', 'control-click toggle membership', { id: clickedId });
+          this.#doc.toggle(clickedId);
           this.#updateTarget();
           this.#swallowNextClick();
           return;
         }
       }
-      this.#doc.selectOnly(selectedIds);
+      if (e.isClick && clickedId !== undefined && (e.inputEvent?.shiftKey || e.inputEvent?.metaKey)) {
+        this.#updateTarget();
+        this.#swallowNextClick();
+        return;
+      }
+      // A plain click can arrive with Selecto's `selected` list empty after we
+      // stopped the press to hand it to Moveable. Resolve the clicked object
+      // directly so persisted group membership still expands through the store.
+      this.#doc.selectOnly(clickedId !== undefined ? [clickedId] : selectedIds);
       this.#updateTarget();
       // Selecto's pointer sequence is followed by a native `click` on the
       // canvas/band. Swallow it after marquee drags, and also after object clicks
       // that produced a selection. Rotated lines can visually extend outside their
       // tiny `.fm-obj` box, so that trailing click may look like empty canvas even
       // though Selecto correctly selected the line.
-      if (!e.isClick || selectedIds.length > 0) {
+      if (!e.isClick || selectedIds.length > 0 || clickedId !== undefined) {
         this.#swallowNextClick();
       }
     });
@@ -319,7 +328,8 @@ export class CanvasInteraction {
       llog('drag', 'press on un-targeted object → select + start drag', { id });
       this.#doc.selectOnly([id]);
       const ids = [...this.#doc.selection];
-      this.#targetKey = ids.slice().sort((a, b) => a - b).join(',');
+      const persistedGroup = this.#persistedGroupIdFor(ids) !== null;
+      this.#targetKey = this.#targetKeyFor(ids);
       this.#targetIds = new Set(ids);
       const targets = ids.map((objectId) => this.#elementForId(objectId)).filter((el): el is HTMLElement => !!el);
       const guidelines = identity.painted.filter((el) => !targets.includes(el));
@@ -330,7 +340,11 @@ export class CanvasInteraction {
       // old code ran dragStart inside setState's async callback, a frame late and
       // past the live pointer stream, so the first press only selected and the user
       // had to press again to drag.
-      this.#moveable.setState({ target: targets.length > 0 ? targets : objEl, elementGuidelines: guidelines });
+      this.#moveable.setState({
+        target: targets.length > 0 ? targets : objEl,
+        elementGuidelines: guidelines,
+        hideChildMoveableDefaultLines: persistedGroup,
+      });
       this.#moveable.dragStart(input, objEl);
       e.stop();
     });
@@ -1219,18 +1233,24 @@ export class CanvasInteraction {
       if (this.#targetKey === '') return;
       this.#targetKey = '';
       this.#targetIds = new Set();
-      this.#moveable.setState({ target: null, elementGuidelines: [], rotatable: false }, () => this.#moveable.forceUpdate());
+      this.#moveable.setState(
+        { target: null, elementGuidelines: [], rotatable: false, hideChildMoveableDefaultLines: false },
+        () => this.#moveable.forceUpdate(),
+      );
       llog('target', 'tool armed → moveable target cleared');
       return;
     }
     const sel = [...this.#doc.selection];
     const ids = sel.length > 0 ? sel : [];
-    const key = ids.slice().sort((a, b) => a - b).join(',');
+    const key = this.#targetKeyFor(ids);
     if (key === this.#targetKey && (!force || ids.length === 0)) return;
     this.#targetKey = key;
     this.#targetIds = new Set(ids);
     if (ids.length === 0) {
-      this.#moveable.setState({ target: null, elementGuidelines: [], rotatable: false }, () => this.#moveable.forceUpdate());
+      this.#moveable.setState(
+        { target: null, elementGuidelines: [], rotatable: false, hideChildMoveableDefaultLines: false },
+        () => this.#moveable.forceUpdate(),
+      );
       llog('target', 'moveable target cleared', {
         hoverId: this.#hoverId,
         selection: sel,
@@ -1241,7 +1261,13 @@ export class CanvasInteraction {
     }
     const targets = ids.map((id) => this.#elementForId(id)).filter((el): el is HTMLElement => !!el);
     const guidelines = this.#paintedElements().filter((el) => !targets.includes(el));
-    this.#moveable.setState({ target: targets, elementGuidelines: guidelines, rotatable: this.#canRotate(ids) });
+    const persistedGroup = this.#persistedGroupIdFor(ids) !== null;
+    this.#moveable.setState({
+      target: targets,
+      elementGuidelines: guidelines,
+      rotatable: this.#canRotate(ids),
+      hideChildMoveableDefaultLines: persistedGroup,
+    });
     // THE key line for "resize does nothing": if `chosenIds` has an id but
     // `resolvedEls` is fewer, moveable has no element to attach handles to — the
     // store id didn't map to a painted `.fm-obj` (stale paint order / DOM not yet
@@ -1250,6 +1276,7 @@ export class CanvasInteraction {
       hoverId: this.#hoverId,
       selection: sel,
       chosenIds: ids,
+      persistedGroup,
       resolvedEls: targets.length,
       paintedCount: this.#paintedElements().length,
       paintOrderIds: objectIdsInPaintOrder(this.#doc.renderModel),
@@ -1622,6 +1649,14 @@ export class CanvasInteraction {
   #canRotate(ids: number[]): boolean {
     if (ids.length !== 1) return false;
     return this.#doc.getObject(ids[0])?.kind === 'line';
+  }
+
+  #persistedGroupIdFor(ids: number[]): number | null {
+    return this.#doc.groupIdForSelection(ids);
+  }
+
+  #targetKeyFor(ids: number[]): string {
+    return `${ids.slice().sort((a, b) => a - b).join(',')}|group:${this.#persistedGroupIdFor(ids) ?? ''}`;
   }
 
   #propsForObject(o: Readonly<ObjectDoc>): Record<string, unknown> {

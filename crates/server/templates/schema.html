@@ -1,0 +1,17 @@
+{% extends "shell.html" %}
+
+{% block head_extra %}
+{# Built schema-builder styles (Svelte 5 + Vite, served from ui/dist by axum).
+   Present once the frontend is built; harmlessly absent until then. #}
+<link rel="stylesheet" href="/ui/schema-builder.css">
+{% endblock %}
+
+{% block content %}
+{# Mount node for the schema-builder island (#113). The island fetches the schema
+   itself over the #107 `/schema/*` endpoints and owns the whole surface (table
+   list + field grid + detail drawer). #}
+<div id="schema-root"></div>
+<script type="module" src="/ui/schema-builder.js"></script>
+{% endblock %}
+
+{% block statusbar %}<span>Schema · tables &amp; fields</span>{% endblock %}

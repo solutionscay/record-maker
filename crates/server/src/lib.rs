@@ -72,7 +72,7 @@ impl AppState {
 
 /// Persistent shell context shared by every page (the chrome).
 struct Chrome {
-    mode: &'static str, // "browse" | "design"
+    mode: &'static str, // "browse" | "design" | "schema"
     layouts: Vec<LayoutLink>,
     current_layout: Option<i64>,
     /// Form/List/Table tabs for the Browse view toggle; empty in Layout mode.
@@ -455,6 +455,16 @@ struct DesignTemplate {
     /// Which view this layout designs (`Form`/`List`/`Table`) — shown in the
     /// status bar so the designer knows which surface they're editing (#57).
     view: &'static str,
+}
+
+/// The schema-builder surface (#113): a sibling to Layout Mode that manages
+/// tables / fields (and, later, relationships) over the #107 `/schema/*` API.
+/// App-global rather than per-layout, so it carries no current layout — the
+/// Svelte island fetches the schema itself and owns the whole surface.
+#[derive(Template)]
+#[template(path = "schema.html")]
+struct SchemaTemplate {
+    chrome: Chrome,
 }
 
 /// Home → the first table's Form Browse view (the Form layout is the canonical
@@ -1059,6 +1069,14 @@ async fn design(State(st): State<AppState>, Path(layout_id): Path<i64>) -> impl 
         view: view_label(&lay.view),
     };
     Html(tmpl.render().unwrap()).into_response()
+}
+
+/// The schema-builder page (#113). Renders the shell in `schema` mode with a
+/// single mount node; the Svelte island drives everything over `/schema/*`.
+async fn schema_page(State(st): State<AppState>) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let chrome = Chrome::build(&sol, "schema", None);
+    Html(SchemaTemplate { chrome }.render().unwrap()).into_response()
 }
 
 /// The Layout-Mode read model (#44): the layout's parts/objects with resolved
@@ -2561,6 +2579,7 @@ pub fn app(state: AppState) -> Router {
             "/schema/relationships/:id/delete",
             post(delete_schema_relationship),
         )
+        .route("/schema", get(schema_page))
         .route("/design/:layout", get(design))
         .route("/design/:layout/model", get(design_model))
         .route("/design/:layout/object", post(create_design_object))
@@ -3589,6 +3608,37 @@ mod tests {
         assert!(
             !browse.contains(r#"id="layout-tools""#),
             "browse has no tool rail"
+        );
+    }
+
+    /// #113: the schema-builder surface renders in `schema` mode with the single
+    /// island mount node and the global Schema nav marked active. It's app-global,
+    /// so it renders even with no tables/layouts.
+    #[tokio::test]
+    async fn schema_page_renders_builder_mount_node() {
+        let sol = Solution::open_in_memory().unwrap();
+        let state = state_for(sol);
+
+        let (status, html) = get_body(state.clone(), "/schema").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            html.contains(r#"id="schema-root""#),
+            "schema page mounts the builder island"
+        );
+        assert!(
+            html.contains(r#"src="/ui/schema-builder.js""#),
+            "schema page loads the schema-builder bundle"
+        );
+        assert!(
+            html.contains(r#"class="schema-link active""#),
+            "the global Schema nav is marked active on its own surface"
+        );
+
+        // The builder node never appears on other surfaces.
+        let (_, browse) = get_body(state, "/").await;
+        assert!(
+            !browse.contains(r#"id="schema-root""#),
+            "the schema island is scoped to /schema"
         );
     }
 

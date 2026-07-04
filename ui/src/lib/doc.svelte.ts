@@ -154,6 +154,14 @@ export interface ObjectSnapshot {
   resolved: ObjectResolved;
 }
 
+/** A durable group captured for undo/redo. Group rows are metadata, but they are
+ * document-scoped: undoing a group command must restore the same group id so the
+ * next redo/undo step can target it deterministically. */
+export interface GroupSnapshot {
+  id: number;
+  objectIds: number[];
+}
+
 /** One reversible change to document state. A `prop` diff carries the EXACT prior
  * and next primitive values (so a revert restores geometry/props byte-for-byte —
  * the "undo restores exact geometry" guarantee, #45). A `life` diff is a whole
@@ -163,7 +171,8 @@ export interface ObjectSnapshot {
 export type Diff =
   | { target: 'object'; id: number; prop: ObjectProp; before: Primitive; after: Primitive }
   | { target: 'part'; id: number; prop: PartProp; before: Primitive; after: Primitive }
-  | { target: 'life'; id: number; before: ObjectSnapshot | null; after: ObjectSnapshot | null };
+  | { target: 'life'; id: number; before: ObjectSnapshot | null; after: ObjectSnapshot | null }
+  | { target: 'group'; id: number; before: GroupSnapshot | null; after: GroupSnapshot | null };
 
 /** One atomic undo step: an ordered group of diffs that undo/redo together.
  * `mark()` seals the open group into a step — an atomic stopping point. */
@@ -643,20 +652,28 @@ export class EditorDoc {
   setGroup(group: ObjectGroupView): void {
     const ids = this.#uniqueKnownIds(group.objectIds);
     if (ids.length < 2) return;
+    const next: GroupSnapshot = { id: group.id, objectIds: ids };
+    const diffs: Diff[] = [];
     for (const [id, objectIds] of [...this.#groups.entries()]) {
       if (id === group.id) continue;
-      if (objectIds.some((objectId) => ids.includes(objectId))) this.#groups.delete(id);
+      if (objectIds.some((objectId) => ids.includes(objectId))) {
+        diffs.push({ target: 'group', id, before: { id, objectIds: objectIds.slice() }, after: null });
+      }
     }
-    this.#groups.set(group.id, ids);
-    this.selectOnly(ids);
+    diffs.push({ target: 'group', id: group.id, before: this.#groupSnapshot(group.id), after: next });
+    this.#commit(diffs);
+    this.mark();
+    this.#selectGroup(next);
     llog('select', 'setGroup', { id: group.id, objectIds: ids });
   }
 
   removeGroup(id: number): void {
-    const ids = this.#groups.get(id)?.slice() ?? [];
-    this.#groups.delete(id);
-    if (ids.length > 0) this.selectOnly(ids);
-    llog('select', 'removeGroup', { id, objectIds: ids });
+    const before = this.#groupSnapshot(id);
+    if (!before) return;
+    this.#commit([{ target: 'group', id, before, after: null }]);
+    this.mark();
+    this.#selectGroup(before);
+    llog('select', 'removeGroup', { id, objectIds: before.objectIds });
   }
 
   // ── undo history: marks, undo, redo ──────────────────────────────────────
@@ -897,9 +914,13 @@ export class EditorDoc {
    * by both apply (→ after) and revert (→ before); updates are immutable
    * replacements so SvelteMap / `$state` reads stay reactive. A `life` value is a
    * whole-object snapshot (insert) or `null` (delete). */
-  #set(d: Diff, value: Primitive | ObjectSnapshot | null): void {
+  #set(d: Diff, value: Primitive | ObjectSnapshot | GroupSnapshot | null): void {
     if (d.target === 'life') {
       this.#applyLife(d.id, value as ObjectSnapshot | null);
+      return;
+    }
+    if (d.target === 'group') {
+      this.#applyGroup(d.id, value as GroupSnapshot | null);
       return;
     }
     if (d.target === 'object') {
@@ -927,6 +948,24 @@ export class EditorDoc {
       this.#objects.set(id, { ...snap.doc });
       this.#resolved.set(id, { ...snap.resolved });
     }
+  }
+
+  #applyGroup(id: number, snap: GroupSnapshot | null): void {
+    if (snap === null) {
+      this.#groups.delete(id);
+      return;
+    }
+    const ids = this.#uniqueKnownIds(snap.objectIds);
+    if (ids.length < 2) {
+      this.#groups.delete(id);
+      return;
+    }
+    for (const [groupId, objectIds] of [...this.#groups.entries()]) {
+      if (groupId !== id && objectIds.some((objectId) => ids.includes(objectId))) {
+        this.#groups.delete(groupId);
+      }
+    }
+    this.#groups.set(id, ids);
   }
 
   /** Build an insert snapshot from a server `ObjectView` (resolved value/style and
@@ -971,7 +1010,30 @@ export class EditorDoc {
         this.#selection.add(d.id);
       } else if (d.target === 'part' && this.#parts.some((p) => p.id === d.id)) {
         this.#selectedPartId = d.id;
+      } else if (d.target === 'group') {
+        const group = this.#groups.get(d.id);
+        if (group) {
+          for (const id of group) this.#selection.add(id);
+        } else {
+          const snap = d.before ?? d.after;
+          for (const id of snap?.objectIds ?? []) {
+            if (this.#objects.has(id)) this.#selection.add(id);
+          }
+        }
       }
+    }
+  }
+
+  #groupSnapshot(id: number): GroupSnapshot | null {
+    const objectIds = this.#groups.get(id);
+    return objectIds ? { id, objectIds: objectIds.slice() } : null;
+  }
+
+  #selectGroup(group: GroupSnapshot): void {
+    this.#selectedPartId = null;
+    this.#selection.clear();
+    for (const id of group.objectIds) {
+      if (this.#objects.has(id)) this.#selection.add(id);
     }
   }
 

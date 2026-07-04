@@ -12,7 +12,7 @@
 // the network replay. Capturing the values up front makes every step's writes
 // immune to interference from a later step already applied in memory.
 
-import type { EditorDoc, Step } from './doc.svelte';
+import type { EditorDoc, GroupSnapshot, Step } from './doc.svelte';
 import { playHistoryEcho } from './echo';
 import type { RestoreObjectRequest } from './persist';
 import * as persist from './persist';
@@ -57,6 +57,8 @@ interface ReplayPlan {
   partHeight: { id: number; height: number }[];
   partKind: { id: number; kind: string }[];
   partProps: { id: number; props: Record<string, unknown> }[];
+  groupCreates: GroupSnapshot[];
+  groupDeletes: number[];
   deletes: number[]; // life absent
 }
 
@@ -76,6 +78,8 @@ function buildPlan(doc: EditorDoc, step: Step): ReplayPlan {
     partHeight: [],
     partKind: [],
     partProps: [],
+    groupCreates: [],
+    groupDeletes: [],
     deletes: [],
   };
 
@@ -90,6 +94,7 @@ function buildPlan(doc: EditorDoc, step: Step): ReplayPlan {
   const pH = new Set<number>();
   const pK = new Set<number>();
   const pP = new Set<number>();
+  const groupIds = new Set<number>();
 
   for (const d of step) {
     if (d.target === 'life') {
@@ -124,12 +129,14 @@ function buildPlan(doc: EditorDoc, step: Step): ReplayPlan {
           console.error('history: object.kind diff is unreachable');
           break;
       }
-    } else {
+    } else if (d.target === 'part') {
       // part
       if (d.prop === 'height') pH.add(d.id);
       else if (d.prop === 'kind') pK.add(d.id);
       else if (d.prop === 'props') pP.add(d.id);
       // 'position' is never emitted (applyPartPositions is non-undoable) — ignore
+    } else {
+      groupIds.add(d.id);
     }
   }
 
@@ -195,6 +202,11 @@ function buildPlan(doc: EditorDoc, step: Step): ReplayPlan {
     const p = doc.getPart(id);
     if (p) plan.partProps.push({ id, props: JSON.parse(p.props || '{}') });
   }
+  for (const id of groupIds) {
+    const group = doc.groups.find((g) => g.id === id);
+    if (group) plan.groupCreates.push({ id: group.id, objectIds: group.objectIds.slice() });
+    else plan.groupDeletes.push(id);
+  }
   return plan;
 }
 
@@ -223,12 +235,17 @@ async function execPlan(doc: EditorDoc, layoutId: string, plan: ReplayPlan): Pro
     );
   }
 
-  // PHASE B — reparents before geometry.
+  // PHASE B — group metadata, then reparents before geometry. Deletes run before
+  // creates so regroup undo/redo can replace overlapping memberships cleanly.
+  await Promise.all(plan.groupDeletes.map((id) => guard(persist.deleteObjectGroup(layoutId, id))));
+  await Promise.all(plan.groupCreates.map((g) => guard(persist.createObjectGroup(layoutId, g.objectIds, g.id))));
+
+  // PHASE C — reparents before geometry.
   await Promise.all(
     plan.reparents.map((r) => guard(persist.setObjectPart(layoutId, r.id, r.partId, r.x, r.y))),
   );
 
-  // PHASE C — geometry, z (single batch), scalars/props/part edits, in parallel.
+  // PHASE D — geometry, z (single batch), scalars/props/part edits, in parallel.
   const jobs: Promise<unknown>[] = [];
   for (const g of plan.geometry)
     jobs.push(guard(persist.setObjectGeometry(layoutId, g.id, { x: g.x, y: g.y, w: g.w, h: g.h })));
@@ -251,7 +268,7 @@ async function execPlan(doc: EditorDoc, layoutId: string, plan: ReplayPlan): Pro
     jobs.push(guard(persist.setPartProps(layoutId, p.id, p.props).then((v) => doc.setPartStyle(p.id, v.partStyle))));
   await Promise.all(jobs);
 
-  // PHASE D — deletes, last.
+  // PHASE E — deletes, last.
   await Promise.all(plan.deletes.map((id) => guard(persist.deleteObject(layoutId, id))));
 
   if (errors.length) doc.setError('History sync failed — reload the layout to reconcile.');

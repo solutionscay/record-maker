@@ -1287,6 +1287,7 @@ async fn update_objects_z(
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateObjectGroupBody {
+    id: Option<i64>,
     object_ids: Vec<i64>,
 }
 
@@ -1300,7 +1301,7 @@ async fn create_object_group(
 ) -> impl IntoResponse {
     let mut sol = st.sol.lock().unwrap();
     match sol
-        .create_object_group(layout_id, &body.object_ids)
+        .create_object_group(layout_id, &body.object_ids, body.id)
         .unwrap()
     {
         Some(group) => axum::Json(object_group_view(group)).into_response(),
@@ -3011,11 +3012,28 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let (_, model) = get_body(state, &format!("/design/{layout_id}/model")).await;
+        let (_, model) = get_body(state.clone(), &format!("/design/{layout_id}/model")).await;
         assert!(model.contains(r#""groups":[]"#), "group removed\n{model}");
         assert!(
             model.contains(&format!(r#""id":{a}"#)) && model.contains(&format!(r#""id":{b}"#)),
             "ungroup leaves child objects in place\n{model}"
+        );
+
+        let (status, body) = post_json_body(
+            state.clone(),
+            &format!("/design/{layout_id}/group"),
+            &format!(r#"{{"id":42,"objectIds":[{a},{b}]}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(&format!(r#""id":42,"objectIds":[{a},{b}]"#)),
+            "explicit-id group restore echoes the restored id\n{body}"
+        );
+        let (_, model) = get_body(state, &format!("/design/{layout_id}/model")).await;
+        assert!(
+            model.contains(&format!(r#""groups":[{{"id":42,"objectIds":[{a},{b}]}}]"#)),
+            "model preserves restored group id\n{model}"
         );
     }
 

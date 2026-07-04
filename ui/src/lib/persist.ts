@@ -170,9 +170,10 @@ export async function setObjectsGeometry(
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
 }
 
-/** Create a durable group over existing objects (#75). */
-export function createObjectGroup(layoutId: string, objectIds: number[]): Promise<ObjectGroupView> {
-  return postJson(`/design/${layoutId}/group`, { objectIds });
+/** Create a durable group over existing objects (#75). History replay supplies
+ * the original id so redo can restore the same group identity. */
+export function createObjectGroup(layoutId: string, objectIds: number[], id?: number): Promise<ObjectGroupView> {
+  return postJson(`/design/${layoutId}/group`, id === undefined ? { objectIds } : { id, objectIds });
 }
 
 /** Remove a durable group without changing child geometry/styles (#75). */

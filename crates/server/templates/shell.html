@@ -489,12 +489,15 @@
         else if (e.key === 'Escape') { e.preventDefault(); revert(); }
       });
     });
-    // Issue 9: clicking a List row's chrome (anywhere but a field input) selects
-    // that record — navigate with `?rec=`. Clicks that land in an editable control
-    // are left to the focus-to-edit controller above, so this never fights it.
+    // Issue 9: clicking a List row selects that record — navigate with `?rec=`.
+    // A field box fills nearly the whole row, so most clicks land on its <input>;
+    // once the row is already current, though, that same click must fall through
+    // to the focus-to-edit controller above instead of re-navigating to itself.
     document.querySelectorAll('.fm-row[data-layout]').forEach(function (row) {
       row.addEventListener('click', function (e) {
-        if (e.target.closest('input, select, textarea, button, a')) return;
+        if (e.target.closest('button, a')) return;
+        var already = row.classList.contains('current');
+        if (already && e.target.closest('input, select, textarea')) return;
         var layout = row.dataset.layout, rec = row.dataset.rec;
         if (layout && rec) location.href = '/browse/' + layout + '?view=list&rec=' + rec;
       });
@@ -531,12 +534,16 @@
         newForm.requestSubmit ? newForm.requestSubmit() : newForm.submit();
         return;
       }
-      // Ctrl/⌘ E — delete the current record (Browse only; present when a record
-      // exists). Routed through requestSubmit so it fires the `submit` event the
-      // data-confirm dialog intercepts — the "cannot be undone" prompt appears.
-      // Never form.submit() here: that skips the submit event and would delete
-      // WITHOUT confirmation; the button click fallback keeps the prompt too.
+      // Ctrl/⌘ E — delete the current record (Browse only; the Delete form is
+      // only present there and when a record is selected). Ctrl/⌘ E is also
+      // macOS's native "move to end of line" text-editing binding, so this backs
+      // off while focus is in a field — hijacking it there would break editing.
+      // Routed through requestSubmit (NEVER form.submit(), which skips the submit
+      // event) so it fires the `submit` the data-confirm dialog intercepts — the
+      // "cannot be undone" prompt appears, same as clicking Delete.
       if (k === 'e') {
+        var inEditable = !!(e.target && e.target.closest && e.target.closest('input, textarea, select, [contenteditable="true"]'));
+        if (inEditable) return;
         var delForm = document.getElementById('rm-delete-record');
         if (!delForm) return;
         e.preventDefault();

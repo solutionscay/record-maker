@@ -10,6 +10,7 @@
   // the `.ctl-select`/`.le-select` rules use), so it drops into either panel.
   import type { FieldChoice } from './model';
   import Icon from './Icon.svelte';
+  import { FIELD_DRAG_MIME } from './dnd';
 
   let {
     fields,
@@ -17,10 +18,12 @@
     values = [],
     onselect,
     onselectMany,
+    onclear,
     multi = false,
     disabled = false,
     placeholder = 'Select field…',
     title = 'Field',
+    dragToPlace = false,
   }: {
     fields: readonly FieldChoice[];
     /** Currently-bound field id, or null when unset (e.g. an unresolved binding). */
@@ -31,10 +34,20 @@
     onselect: (id: number) => void;
     /** Commit the chosen field ids for multi-select placement. */
     onselectMany?: (ids: number[]) => void;
+    /** Deselect everything (multi mode's Clear button). Distinct from
+     * `onselectMany([])` so callers have one obvious place to hang extra
+     * cleanup (e.g. syncing a tool's armed state) on an explicit clear. */
+    onclear?: () => void;
     multi?: boolean;
     disabled?: boolean;
     placeholder?: string;
     title?: string;
+    /** Let rows be dragged out of the list (e.g. onto the layout canvas) instead
+     * of only clicked. Off by default: a single-select instance like the
+     * inspector's Binding row rebinds an EXISTING object and dragging out of it
+     * would be a confusing affordance there, so only the placement picker
+     * (RailTools' "Field to place") opts in. */
+    dragToPlace?: boolean;
   } = $props();
 
   // Each FieldKind::as_str value → the sprite symbol drawn beside the name.
@@ -128,6 +141,28 @@
     else commit(f);
   }
 
+  // Drag a row out to place it (or the whole current multi-selection) on the
+  // canvas. Native HTML5 DnD, not a pointer gesture: it crosses into the
+  // canvas island's own event handling for free, and — the actual point of
+  // this — `draggable="true"` is what stops the browser from treating the
+  // press-drag as a text selection (the "just selects text" symptom this
+  // replaces).
+  function handleDragStart(e: DragEvent, f: FieldChoice | undefined): void {
+    if (!f || !e.dataTransfer) return;
+    // Dragging a row that's already part of the multi-selection drags the
+    // WHOLE selection (the common "grab any selected item" list convention).
+    // Dragging an unselected row drags just that row, and it becomes the
+    // selection — same as a plain click would, so the picker stays consistent
+    // with what just left it.
+    const dragging = multi && selectedSet.has(f.id) ? [...values] : [f.id];
+    if (!(multi && selectedSet.has(f.id))) {
+      rangeAnchorId = f.id;
+      onselectMany?.(dragging);
+    }
+    e.dataTransfer.effectAllowed = 'copy';
+    e.dataTransfer.setData(FIELD_DRAG_MIME, JSON.stringify(dragging));
+  }
+
   // Keep the highlight within bounds as the filter shrinks the list.
   $effect(() => {
     if (highlight >= filtered.length) highlight = Math.max(0, filtered.length - 1);
@@ -200,9 +235,6 @@
       {:else}
         <span class="fs-name">{triggerLabel}</span>
       {/if}
-      {#if multi && selectedFields.length > 1}
-        <span class="fs-count">{selectedFields.length}</span>
-      {/if}
     </span>
     <svg class="fs-caret" width="10" height="7" viewBox="0 0 10 7" aria-hidden="true"
       ><path d="M1 1.5 5 5.5 9 1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg
@@ -230,8 +262,10 @@
             class="fs-opt"
             class:fs-active={i === highlight}
             class:fs-selected={multi && selectedSet.has(f.id)}
+            draggable={dragToPlace}
             onpointerenter={() => (highlight = i)}
             onclick={(e) => choose(f, e)}
+            ondragstart={(e) => handleDragStart(e, f)}
           >
             {#if multi}
               <span class="fs-check">{selectedSet.has(f.id) ? '✓' : ''}</span>
@@ -246,6 +280,9 @@
       </ul>
       {#if multi}
         <div class="fs-actions">
+          {#if values.length > 0}
+            <button type="button" class="fs-clear" onclick={() => onclear?.()}>Clear</button>
+          {/if}
           <button type="button" onclick={close}>Done</button>
         </div>
       {/if}
@@ -288,21 +325,16 @@
     min-width: 0;
     flex: 1 1 auto;
   }
+  /* Flexbox centers the icon and name by box height, but the sprite's ink sits
+     high in its box relative to the font's optical center, reading as
+     misaligned; nudge it down to match. */
+  .fs-current :global(.icon) {
+    margin-top: 2px;
+  }
   .fs-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .fs-count {
-    flex: 0 0 auto;
-    min-width: 18px;
-    padding: 1px 5px;
-    border-radius: 999px;
-    background: var(--rm-accent);
-    color: #fff;
-    font-size: 11px;
-    line-height: 1.3;
-    text-align: center;
   }
   .fs-caret {
     flex: 0 0 auto;
@@ -353,6 +385,12 @@
     color: var(--rm-text);
     cursor: pointer;
   }
+  .fs-opt[draggable='true'] {
+    cursor: grab;
+  }
+  .fs-opt[draggable='true']:active {
+    cursor: grabbing;
+  }
   .fs-selected:not(.fs-active) {
     background: rgba(10, 132, 255, 0.12);
   }
@@ -375,7 +413,9 @@
   }
   .fs-actions {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
+    gap: 6px;
     padding-top: 5px;
     margin-top: 5px;
     border-top: 0.5px solid var(--rm-border);
@@ -389,5 +429,11 @@
     background: var(--rm-control-bg);
     color: var(--rm-text);
     cursor: pointer;
+  }
+  .fs-actions button.fs-clear {
+    margin-right: auto;
+    border-color: transparent;
+    background: transparent;
+    color: var(--rm-text-dim);
   }
 </style>

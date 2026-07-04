@@ -47,10 +47,47 @@
     PART_KINDS.filter((p) => doc.view !== 'form' || (p.id !== 'subsummary' && p.id !== 'grandsummary')),
   );
 
-  // Default the Field dropdown to the first field once the model has hydrated.
+  // A placement (or leaving the Field tool some other way) drops `doc.activeTool`
+  // back to 'pointer', but this component's own `fieldIds` is a separate copy that
+  // doesn't hear about it, so a multi-select used to survive across placements:
+  // re-arming the Field tool reopened the picker with the just-placed fields still
+  // checked. Clear it on the 'field' -> other transition. `prevTool` is a plain
+  // (non-reactive) variable so this effect tracks only `doc.activeTool`, not
+  // `fieldIds`; otherwise it would fight the hydration-default effect below
+  // (each clearing what the other just set) in an infinite loop. Starts
+  // undefined (not read from `doc` at declaration time) so the first run never
+  // reads `doc.activeTool` outside the effect's own reactive tracking.
+  let prevTool: ToolKind | undefined;
   $effect(() => {
-    if (fieldIds.length === 0 && doc.fields.length > 0) fieldIds = [doc.fields[0].id];
+    const tool = doc.activeTool;
+    if (prevTool === 'field' && tool !== 'field') clearFieldSelection();
+    prevTool = tool;
   });
+
+  // Default the Field dropdown to the first field the FIRST time the model
+  // hydrates, so the picker doesn't open on a bare placeholder. `hasDefaulted`
+  // (a plain, non-reactive flag, same trick as `prevTool`) makes this fire only
+  // once: `fieldIds.length === 0` on its own can't tell "nothing picked yet"
+  // apart from "the user explicitly cleared the selection" (clearFieldSelection,
+  // below), so a rule that re-defaults on every emptiness would silently
+  // overwrite an explicit clear on the next tick — the picker would look
+  // permanently pinned to the first field with no way to deselect it.
+  let hasDefaulted = false;
+  $effect(() => {
+    if (!hasDefaulted && fieldIds.length === 0 && doc.fields.length > 0) {
+      fieldIds = [doc.fields[0].id];
+      hasDefaulted = true;
+    }
+  });
+
+  /** Deselect all fields for placement. The one function that clears
+   * `fieldIds`, so every call site (leaving the Field tool, the picker's own
+   * Clear button, future callers) agrees on what "cleared" means and keeps the
+   * store in sync when the Field tool is armed. */
+  function clearFieldSelection(): void {
+    fieldIds = [];
+    if (doc.activeTool === 'field') doc.setTool('field', [], createLabel);
+  }
 
   $effect(() => {
     if (!canAddPartKind(partKind)) {
@@ -150,7 +187,9 @@
           fieldIds = ids;
           onFieldChange();
         }}
-        title="Field to place; Shift-click range, Ctrl/Cmd-click individual"
+        onclear={clearFieldSelection}
+        dragToPlace
+        title="Field to place; Shift-click range, Ctrl/Cmd-click individual, or drag a row onto the canvas"
       />
     </div>
     <label class="le-check">

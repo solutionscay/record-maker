@@ -93,11 +93,11 @@ function playSpecs(stage: HTMLElement, model: DesignModel, specs: EchoSpec[], di
     const element = elements[ids.indexOf(spec.id)];
     if (!element) continue;
     paintGhost(element, parts, model, spec, direction, reduceMotion);
-    if (!reduceMotion) animateElement(element, spec, tops);
+    if (!reduceMotion) animateElement(element, spec, tops, direction);
   }
 }
 
-function animateElement(element: HTMLElement, spec: EchoSpec, tops: Map<number, number>): void {
+function animateElement(element: HTMLElement, spec: EchoSpec, tops: Map<number, number>, direction: Direction): void {
   const fromTop = tops.get(spec.from.partId);
   const toTop = tops.get(spec.to.partId);
   if (fromTop === undefined || toTop === undefined) return;
@@ -108,7 +108,8 @@ function animateElement(element: HTMLElement, spec: EchoSpec, tops: Map<number, 
   const sy = spec.to.h > 0 ? spec.from.h / spec.to.h : 1;
 
   active.get(element)?.cancel();
-  element.classList.add('le-echo-active');
+  const activeClass = `le-echo-active-${direction}`;
+  element.classList.add('le-echo-active', activeClass);
   const animation = element.animate(
     [
       { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, transformOrigin: 'top left' },
@@ -116,7 +117,7 @@ function animateElement(element: HTMLElement, spec: EchoSpec, tops: Map<number, 
       { transform: 'translate(0, 0) scale(1, 1)', transformOrigin: 'top left' },
     ],
     {
-      duration: 260,
+      duration: 300,
       easing: 'cubic-bezier(0.2, 0.9, 0.18, 1)',
       fill: 'none',
     },
@@ -127,7 +128,7 @@ function animateElement(element: HTMLElement, spec: EchoSpec, tops: Map<number, 
     .then(() => {
       if (active.get(element) === animation) {
         active.delete(element);
-        element.classList.remove('le-echo-active');
+        element.classList.remove('le-echo-active', activeClass);
       }
     });
 }
@@ -153,11 +154,11 @@ function paintGhost(
   ghost.style.zIndex = `${spec.from.z}`;
   part.appendChild(ghost);
 
-  const duration = reduceMotion ? 140 : 250;
+  const duration = reduceMotion ? 160 : 300;
   const animation = ghost.animate(
     [
-      { opacity: reduceMotion ? 0.28 : 0.42, transform: 'scale(1)' },
-      { opacity: 0, transform: reduceMotion ? 'scale(1)' : 'scale(0.985)' },
+      { opacity: reduceMotion ? 0.45 : 0.68, transform: 'scale(1)' },
+      { opacity: 0, transform: reduceMotion ? 'scale(1)' : 'scale(0.96)' },
     ],
     { duration, easing: 'ease-out', fill: 'forwards' },
   );

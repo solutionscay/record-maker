@@ -311,17 +311,25 @@
     pointer-events: none;
     user-select: none;
     opacity: 0;
-    filter: saturate(0.8);
+    filter: saturate(0.75) brightness(1.03);
     mix-blend-mode: multiply;
   }
   .le-stage :global(.le-echo-undo) {
-    box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.34), 0 10px 24px rgba(31, 111, 235, 0.18);
+    box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.5), 0 10px 28px rgba(31, 111, 235, 0.26);
   }
   .le-stage :global(.le-echo-redo) {
-    box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.34), 0 10px 24px rgba(217, 119, 6, 0.18);
+    box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.5), 0 10px 28px rgba(217, 119, 6, 0.26);
   }
   .le-stage :global(.le-echo-active) {
     will-change: transform;
+  }
+  .le-stage :global(.le-echo-active-undo) {
+    outline: 2px solid rgba(31, 111, 235, 0.38);
+    outline-offset: 2px;
+  }
+  .le-stage :global(.le-echo-active-redo) {
+    outline: 2px solid rgba(217, 119, 6, 0.38);
+    outline-offset: 2px;
   }
   /* Design mode: make each part band's bounds visible. Browse keeps the bands
      subtle (the faint shell.html divider), but on the canvas the designer needs

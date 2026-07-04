@@ -24,7 +24,9 @@ import { GRID, SNAP_THRESHOLD, clampOrigin, elementsToObjectIds, objectIdsInPain
 import { defaultBox, defaultProps, partAtY } from './create';
 import {
   createObject,
+  createObjectGroup,
   deleteObject,
+  deleteObjectGroup,
   setObjectContent,
   setObjectPart,
   setObjectProps as persistObjectProps,
@@ -94,6 +96,8 @@ export class CanvasInteraction {
   #placing = false;
   /** True while selected object deletion is in flight, so repeat keys do not fan out. */
   #deleting = false;
+  /** True while group/ungroup persistence is in flight, so menu repeats do not race. */
+  #grouping = false;
   /** One-shot: swallow the native `click` the browser fires right after Selecto
    * commits selection. Without it, `#onClick` can run its empty-canvas deselect
    * path and wipe the marquee or modifier-click selection that just landed. A
@@ -1265,6 +1269,50 @@ export class CanvasInteraction {
   }
   deleteSelected(): void {
     void this.#deleteSelectedObjects();
+  }
+  canGroup(): boolean {
+    return this.#doc.selection.size >= 2 && this.#doc.groupIdForSelection() === null;
+  }
+  canUngroup(): boolean {
+    return this.#doc.groupIdForSelection() !== null;
+  }
+  group(): void {
+    void this.#groupSelectedObjects();
+  }
+  ungroup(): void {
+    void this.#ungroupSelectedObjects();
+  }
+
+  async #groupSelectedObjects(): Promise<void> {
+    if (!this.canGroup() || this.#grouping) return;
+    const ids = [...this.#doc.selection];
+    this.#grouping = true;
+    llog('persist', 'context menu: group objects', { ids });
+    try {
+      const group = await createObjectGroup(this.#layoutId, ids);
+      this.#doc.setGroup(group);
+    } catch (e) {
+      lerror('persist', 'failed to group selected object(s)', e);
+      this.#reportError(e);
+    } finally {
+      this.#grouping = false;
+    }
+  }
+
+  async #ungroupSelectedObjects(): Promise<void> {
+    const groupId = this.#doc.groupIdForSelection();
+    if (groupId === null || this.#grouping) return;
+    this.#grouping = true;
+    llog('persist', 'context menu: ungroup objects', { groupId });
+    try {
+      await deleteObjectGroup(this.#layoutId, groupId);
+      this.#doc.removeGroup(groupId);
+    } catch (e) {
+      lerror('persist', 'failed to ungroup selected object(s)', e);
+      this.#reportError(e);
+    } finally {
+      this.#grouping = false;
+    }
   }
 
   /** Choose moveable's target from the real selection only. Hover uses a separate

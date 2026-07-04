@@ -42,6 +42,7 @@ import { lineAngle, lineGeometryForAngle, lineLength, lineShapeStyle, normalizeA
 
 type DrawTool = Exclude<ToolKind, 'pointer'>;
 type IdentitySnapshot = { painted: HTMLElement[]; ids: number[] };
+type PendingObjectClick = { id: number; clientX: number; clientY: number };
 type FieldPlacementTarget = {
   partId: number;
   partHeight: number;
@@ -122,6 +123,7 @@ export class CanvasInteraction {
   #rotateStartLength = 0;
   #dirtyLineProps = new Set<number>();
   #gestureIdentity: IdentitySnapshot | null = null;
+  #pendingObjectClick: PendingObjectClick | null = null;
 
   constructor(stage: HTMLElement, doc: EditorDoc, layoutId: string) {
     this.#stage = stage;
@@ -326,6 +328,7 @@ export class CanvasInteraction {
       // no longer pre-targets objects, so this preserves click-drag in one move
       // without showing resize handles on mere hover.
       llog('drag', 'press on un-targeted object → select + start drag', { id });
+      this.#armObjectClick(id, input);
       this.#doc.selectOnly([id]);
       const ids = [...this.#doc.selection];
       const persistedGroup = this.#persistedGroupIdFor(ids) !== null;
@@ -736,6 +739,7 @@ export class CanvasInteraction {
     window.removeEventListener('pointerup', this.#onDrawUp);
     window.removeEventListener('mousemove', this.#onDrawMove);
     window.removeEventListener('mouseup', this.#onDrawUp);
+    window.removeEventListener('pointerup', this.#onObjectClickUp);
     this.#stage.removeEventListener('dragover', this.#onDragOver);
     this.#stage.removeEventListener('dragleave', this.#onDragLeave);
     this.#stage.removeEventListener('drop', this.#onDrop);
@@ -801,7 +805,18 @@ export class CanvasInteraction {
     if (this.#gesturing || this.#doc.activeTool !== 'pointer') return;
     const target = e.target as Element | null;
     if (!target || this.#moveable.isMoveableElement(target)) return;
-    if (target.closest('.fm-obj') || target.closest('.le-part-label, .le-part-resize')) return;
+    const objEl = target.closest('.fm-obj') as HTMLElement | null;
+    if (objEl) {
+      const id = this.#idForElement(objEl);
+      if (id !== undefined) {
+        if (e.shiftKey || e.metaKey) this.#doc.toggle(id);
+        else this.#doc.selectOnly([id]);
+        this.#targetKey = '';
+        this.#updateTarget(true);
+      }
+      return;
+    }
+    if (target.closest('.le-part-label, .le-part-resize')) return;
 
     // A click on band whitespace (or empty canvas) only DESELECTS. Selecting a part
     // is reserved for its label rail (`.le-part-label`, wired in App.svelte), so a
@@ -821,6 +836,30 @@ export class CanvasInteraction {
     this.#suppressClickUntil = 0;
     return until !== 0 && performance.now() <= until;
   }
+
+  #armObjectClick(id: number, input: MouseEvent | PointerEvent): void {
+    this.#pendingObjectClick = { id, clientX: input.clientX, clientY: input.clientY };
+    window.removeEventListener('pointerup', this.#onObjectClickUp);
+    window.addEventListener('pointerup', this.#onObjectClickUp, { once: true });
+  }
+
+  #onObjectClickUp = (e: PointerEvent): void => {
+    const pending = this.#pendingObjectClick;
+    this.#pendingObjectClick = null;
+    if (!pending) return;
+    const dx = e.clientX - pending.clientX;
+    const dy = e.clientY - pending.clientY;
+    if (Math.hypot(dx, dy) > 3 || this.#moved) return;
+
+    const commit = () => {
+      this.#doc.selectOnly([pending.id]);
+      this.#targetKey = '';
+      this.#updateTarget(true);
+      this.#swallowNextClick();
+    };
+    if (this.#gesturing) requestAnimationFrame(commit);
+    else commit();
+  };
 
   #onDoubleClick = (e: MouseEvent): void => {
     if (this.#doc.activeTool !== 'pointer') return;

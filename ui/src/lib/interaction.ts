@@ -271,13 +271,51 @@ export class CanvasInteraction {
         return;
       }
       const target = input.target as Element | null;
+      // Resolve the real `.fm-obj` under the press point. When 2+ objects are
+      // selected, Moveable renders a transparent "moveable-area" drag-proxy OVER
+      // EVERY member of the group (so dragging any one member drags the whole
+      // group) — that proxy is what `input.target` actually is in that case, not
+      // the object element, so `target.closest('.fm-obj')` misses it. Fall back to
+      // a point hit-test through the full elementsFromPoint stack to find the real
+      // object underneath.
+      const objEl = ((target?.closest('.fm-obj') as HTMLElement | null) ?? this.#objectElementAt(input.clientX, input.clientY)) as
+        | HTMLElement
+        | null;
+      // Shift or Ctrl/Cmd toggles selection membership without starting a drag.
+      // This must be checked BEFORE the moveable-control-box bail-out below:
+      // otherwise a Ctrl/Cmd-click that lands on the group's `moveable-area`
+      // proxy (any click within/around an already-multi-selected group) gets
+      // swallowed as "moveable owns this gesture" and the toggle never runs —
+      // the actual bug a live click-test caught (a static review had missed it).
+      if (objEl && (input.shiftKey || input.ctrlKey || input.metaKey)) {
+        const id = this.#idForElement(objEl);
+        if (id !== undefined) {
+          llog('select', 'toggle membership', { id });
+          this.#doc.toggle(id);
+          e.stop();
+          this.#updateTarget();
+          // `#updateTarget()` can synchronously destroy/replace moveable's group
+          // `.moveable-area` overlay (e.g. shrinking a 2-object group back to a
+          // single target). When the press originally landed on THAT overlay
+          // element and it gets detached from the DOM before the browser fires
+          // the trailing native `click`, the click retargets to the nearest
+          // surviving ancestor — `.le-stage` itself — which slips past #onClick's
+          // `.fm-obj`/moveable guards and reaches `clearSelection()`, wiping out
+          // the toggle we just made. Swallow that one trailing click, exactly
+          // like the marquee `selectEnd` path already does below.
+          this.#suppressNextClick = true;
+          setTimeout(() => {
+            this.#suppressNextClick = false;
+          }, 0);
+          return;
+        }
+      }
       // moveable's own control box (a resize handle / the drag area) → its gesture.
       if (target && this.#moveable.isMoveableElement(target)) {
         llog('drag', 'press on moveable control box → moveable owns gesture');
         e.stop();
         return;
       }
-      const objEl = (target?.closest('.fm-obj') ?? null) as HTMLElement | null;
       if (!objEl) {
         llog('select', 'press on empty canvas → marquee');
         return; // empty canvas → selecto runs its marquee
@@ -285,14 +323,6 @@ export class CanvasInteraction {
       const id = this.#idForElement(objEl);
       if (id === undefined) {
         llog('target', 'press on object but id UNRESOLVED', { painted: this.#paintedElements().length });
-        return;
-      }
-      // Shift or Ctrl/Cmd toggles selection membership without starting a drag.
-      if (input.shiftKey || input.ctrlKey || input.metaKey) {
-        llog('select', 'toggle membership', { id });
-        this.#doc.toggle(id);
-        e.stop();
-        this.#updateTarget();
         return;
       }
       // Already selected/targeted: let Moveable handle this same pointer stream.
@@ -1744,6 +1774,17 @@ export class CanvasInteraction {
   #paintedElements(): HTMLElement[] {
     const canvas = this.#canvas();
     return canvas ? Array.from(canvas.querySelectorAll<HTMLElement>('.fm-obj')) : [];
+  }
+
+  /** Hit-test a client point through the FULL element stack (not just the
+   * topmost element), so a `.fm-obj` underneath one of moveable's own overlay
+   * proxies (e.g. the group `moveable-area` drag-proxy) can still be found. */
+  #objectElementAt(clientX: number, clientY: number): HTMLElement | null {
+    for (const el of document.elementsFromPoint(clientX, clientY)) {
+      const objEl = el.closest('.fm-obj');
+      if (objEl) return objEl as HTMLElement;
+    }
+    return null;
   }
 
   #elementsToIds(elements: Array<HTMLElement | SVGElement>): number[] {

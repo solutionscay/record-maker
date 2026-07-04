@@ -11,12 +11,16 @@
        the server chrome and the Layout-mode Svelte islands inherit them. */
     body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif;
            color: #1b1b1f; -webkit-font-smoothing: antialiased;
+           user-select: none; -webkit-user-select: none;
            --rm-toolbar-bg: #f6f6f7; --rm-sidebar-bg: #f0f0f2; --rm-inspector-bg: #f7f7f8;
            --rm-workspace-bg: #e9e9ec; --rm-text: #1c1c1e; --rm-text-dim: #8a8a8e;
            --rm-border: rgba(0,0,0,.09); --rm-border-strong: rgba(0,0,0,.16);
            --rm-control-bg: #ffffff; --rm-segment-track: #e6e6e9; --rm-segment-active-bg: #ffffff;
            --rm-accent: #0a84ff; --rm-accent-soft: rgba(10,132,255,.12); --rm-danger: #ff453a;
            --rm-shadow-card: 0 1px 3px rgba(0,0,0,.08), 0 8px 26px rgba(0,0,0,.07); }
+    input, textarea, select, [contenteditable="true"], .le-inline-text-editor {
+      user-select: text; -webkit-user-select: text;
+    }
     .app { display: grid; grid-template-columns: var(--rail-w, 226px) 1fr;
            grid-template-rows: auto 1fr auto;
            grid-template-areas: "topbar topbar" "rail content" "status status";
@@ -445,6 +449,20 @@
         if (ok) form.submit();
       });
     });
+  })();
+  </script>
+  {# Text selection is currently useful only while editing a real text control.
+     Everything else in the app is a UI surface: object selection, row selection,
+     buttons, rails, and labels should not create browser text selections. #}
+  <script>
+  (function () {
+    function selectionAllowed(target) {
+      var el = target && target.nodeType === 1 ? target : target && target.parentElement;
+      return !!(el && el.closest && el.closest('input, textarea, select, [contenteditable="true"], .le-inline-text-editor'));
+    }
+    document.addEventListener('selectstart', function (e) {
+      if (!selectionAllowed(e.target)) e.preventDefault();
+    }, true);
   })();
   </script>
 

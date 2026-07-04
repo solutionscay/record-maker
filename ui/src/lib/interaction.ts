@@ -117,12 +117,12 @@ export class CanvasInteraction {
   #placing = false;
   /** True while selected object deletion is in flight, so repeat keys do not fan out. */
   #deleting = false;
-  /** One-shot: swallow the native `click` the browser fires right after a marquee
-   * DRAG release. Without it, `#onClick` (which can't see selecto's marquee) would
-   * run its deselect/select-part path on that click and wipe the selection the
-   * marquee just committed. A bare click (no drag) does NOT set this, so an empty-
-   * canvas click still deselects as before. */
+  /** One-shot: swallow the native `click` the browser fires right after Selecto
+   * commits selection. Without it, `#onClick` can run its empty-canvas deselect
+   * path and wipe the marquee or modifier-click selection that just landed. A
+   * bare empty-canvas click does NOT set this, so it still deselects as before. */
   #suppressNextClick = false;
+  #suppressNextClickUntil = 0;
   /** Active draw-to-create gesture while a non-pointer tool is armed. */
   #drawing: DrawPlacement | null = null;
   #drawPreview: HTMLElement | null = null;
@@ -242,10 +242,7 @@ export class CanvasInteraction {
       // tiny `.fm-obj` box, so that trailing click may look like empty canvas even
       // though Selecto correctly selected the line.
       if (!e.isClick || selectedIds.length > 0) {
-        this.#suppressNextClick = true;
-        setTimeout(() => {
-          this.#suppressNextClick = false;
-        }, 0);
+        this.#suppressTrailingClick();
       }
     });
     // Decide, at press time, who owns the gesture:
@@ -303,10 +300,7 @@ export class CanvasInteraction {
           // `.fm-obj`/moveable guards and reaches `clearSelection()`, wiping out
           // the toggle we just made. Swallow that one trailing click, exactly
           // like the marquee `selectEnd` path already does below.
-          this.#suppressNextClick = true;
-          setTimeout(() => {
-            this.#suppressNextClick = false;
-          }, 0);
+          this.#suppressTrailingClick();
           return;
         }
       }
@@ -830,10 +824,9 @@ export class CanvasInteraction {
   }
 
   #onClick = (e: MouseEvent): void => {
-    // Swallow the single native click that trails a marquee drag-release, so the
-    // committed multi-selection is not immediately cleared by the deselect path.
-    if (this.#suppressNextClick) {
-      this.#suppressNextClick = false;
+    // Swallow the native click that trails a Selecto commit, so a marquee or
+    // modifier-click selection is not immediately cleared by the deselect path.
+    if (this.#consumeSuppressedClick()) {
       return;
     }
     if (this.#gesturing || this.#doc.activeTool !== 'pointer') return;
@@ -849,6 +842,19 @@ export class CanvasInteraction {
     this.#doc.clearSelection();
     this.#updateTarget();
   };
+
+  #suppressTrailingClick(): void {
+    this.#suppressNextClick = true;
+    this.#suppressNextClickUntil = performance.now() + 750;
+  }
+
+  #consumeSuppressedClick(): boolean {
+    if (!this.#suppressNextClick) return false;
+    this.#suppressNextClick = false;
+    const shouldSuppress = performance.now() <= this.#suppressNextClickUntil;
+    this.#suppressNextClickUntil = 0;
+    return shouldSuppress;
+  }
 
   #onDoubleClick = (e: MouseEvent): void => {
     if (this.#doc.activeTool !== 'pointer') return;

@@ -23,7 +23,6 @@
     openFieldId: number | null;
   } = $props();
 
-  // View-by: custom (the stored order — draggable) or a display-only sort.
   type SortBy = 'custom' | 'name' | 'type';
   let sortBy = $state<SortBy>('custom');
   const canReorder = $derived(sortBy === 'custom');
@@ -34,7 +33,6 @@
     return fs;
   });
 
-  // Inline "add field" row.
   let newName = $state('');
   let newKind = $state<FieldKind>('text');
   let addBusy = $state(false);
@@ -51,8 +49,6 @@
     }
   }
 
-  // Drag-to-reorder (custom order only). Track the dragged field, the hovered
-  // row, and whether the insertion goes before/after it (from the pointer).
   let dragId = $state<number | null>(null);
   let overId = $state<number | null>(null);
   let overPos = $state<'before' | 'after'>('before');
@@ -95,17 +91,17 @@
 {#if store.tables.length === 0}
   <div class="fg-blank">
     <p class="fg-blank-title">No tables yet</p>
-    <p class="fg-blank-sub">Create a table before defining fields.</p>
-    <button type="button" class="fg-blank-btn" onclick={onnotables}>Go to Tables</button>
+    <p class="sc-hint">Create a table before defining fields.</p>
+    <button type="button" class="sc-btn" onclick={onnotables}>Go to Tables</button>
   </div>
 {:else}
   <div class="fg">
     <header class="fg-head">
-      <div class="fg-head-group">
-        <label class="fg-hlabel" for="fg-table">Table</label>
+      <div class="fg-group">
+        <label class="sc-micro" for="fg-table">Table</label>
         <select
           id="fg-table"
-          class="fg-select"
+          class="sc-select fg-table-select"
           value={store.selectedTableId}
           onchange={(e) => onswitch(Number(e.currentTarget.value))}
         >
@@ -113,14 +109,14 @@
             <option value={t.id}>{t.name}</option>
           {/each}
         </select>
-        <span class="fg-count">
+        <span class="sc-count">
           {store.fields.length}
           {store.fields.length === 1 ? 'field' : 'fields'} defined
         </span>
       </div>
-      <div class="fg-head-group">
-        <label class="fg-hlabel" for="fg-viewby">View by</label>
-        <select id="fg-viewby" class="fg-select" bind:value={sortBy}>
+      <div class="fg-group">
+        <label class="sc-micro" for="fg-viewby">View by</label>
+        <select id="fg-viewby" class="sc-select fg-viewby" bind:value={sortBy}>
           <option value="custom">Custom order</option>
           <option value="name">Field name</option>
           <option value="type">Type</option>
@@ -132,16 +128,16 @@
       <div class="fg-grid">
         <div class="fg-colhead">
           <span class="fg-c-handle" aria-hidden="true"></span>
-          <span>Field name</span>
-          <span>Type</span>
-          <span>Physical name</span>
+          <span class="sc-micro">Field name</span>
+          <span class="sc-micro">Type</span>
+          <span class="sc-micro">Physical name</span>
           <span class="fg-c-actions" aria-hidden="true"></span>
         </div>
 
         {#if store.loadingFields}
-          <p class="fg-note">Loading fields…</p>
+          <p class="fg-note sc-hint">Loading fields…</p>
         {:else if store.fields.length === 0}
-          <p class="fg-note">No fields yet — add the first one below.</p>
+          <p class="fg-note sc-hint">No fields yet — add the first one below.</p>
         {/if}
 
         {#each displayFields as field (field.id)}
@@ -161,11 +157,10 @@
           />
         {/each}
 
-        <!-- Add-field row -->
         <div class="fg-add">
           <span class="fg-c-handle" aria-hidden="true"></span>
           <input
-            class="fg-add-name"
+            class="sc-input"
             placeholder="New field name"
             bind:value={newName}
             disabled={addBusy}
@@ -174,7 +169,7 @@
             }}
             aria-label="New field name"
           />
-          <select class="fg-add-kind" bind:value={newKind} disabled={addBusy} aria-label="New field type">
+          <select class="sc-select" bind:value={newKind} disabled={addBusy} aria-label="New field type">
             {#each FIELD_KINDS as k (k.kind)}
               <option value={k.kind}>{k.label}</option>
             {/each}
@@ -182,7 +177,7 @@
           <span></span>
           <button
             type="button"
-            class="fg-add-btn"
+            class="sc-btn sc-btn--primary"
             onclick={addField}
             disabled={addBusy || newName.trim().length === 0}
           >
@@ -207,53 +202,28 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 14px 18px;
+    padding: 12px 18px;
     border-bottom: 0.5px solid var(--rm-border);
   }
-  .fg-head-group {
+  .fg-group {
     display: inline-flex;
     align-items: center;
     gap: 8px;
     min-width: 0;
   }
-  .fg-hlabel {
-    font-size: 12px;
+  .fg-table-select {
+    width: auto;
+    min-width: 150px;
     font-weight: 600;
-    color: var(--rm-text-dim);
   }
-  .fg-select {
-    font: inherit;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--rm-text);
-    padding: 6px 26px 6px 9px;
-    border: 0.5px solid var(--rm-border);
-    border-radius: 8px;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-    appearance: none;
-    -webkit-appearance: none;
-    background-color: var(--rm-control-bg);
-    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath d='M1 1.5 5 5.5 9 1.5' fill='none' stroke='%238a8a8e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 9px center;
-    cursor: pointer;
-  }
-  .fg-select:focus {
-    outline: none;
-    border-color: var(--rm-accent);
-  }
-  .fg-count {
-    font-size: 12px;
-    color: var(--rm-text-dim);
-    white-space: nowrap;
+  .fg-viewby {
+    width: auto;
+    min-width: 130px;
   }
   .fg-scroll {
     flex: 1 1 auto;
     min-height: 0;
     overflow: auto;
-  }
-  .fg-grid {
-    background: var(--rm-control-bg);
   }
   /* One shared column template for the header, rows, and add row. */
   .fg-colhead,
@@ -269,87 +239,35 @@
     position: sticky;
     top: 0;
     z-index: 2;
-    height: 34px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--rm-text-dim);
+    height: var(--sc-head-h);
     border-bottom: 0.5px solid var(--rm-border);
     background: var(--rm-toolbar-bg);
   }
   .fg-note {
     margin: 0;
-    padding: 18px 16px;
-    font-size: 13px;
-    color: var(--rm-text-dim);
+    padding: 16px 18px;
   }
   .fg-add {
-    height: 52px;
+    height: 56px;
     border-top: 0.5px solid var(--rm-border);
     background: var(--rm-toolbar-bg);
-  }
-  .fg-add-name,
-  .fg-add-kind {
-    font: inherit;
-    font-size: 13px;
-    padding: 6px 9px;
-    border: 0.5px solid var(--rm-border);
-    border-radius: 7px;
-    background: var(--rm-control-bg);
-    color: var(--rm-text);
-  }
-  .fg-add-name:focus {
-    outline: none;
-    border-color: var(--rm-accent);
-    box-shadow: 0 0 0 3px var(--rm-accent-soft);
-  }
-  .fg-add-btn {
-    font: inherit;
-    font-size: 12.5px;
-    font-weight: 600;
-    padding: 7px 0;
-    border: 0.5px solid transparent;
-    border-radius: 7px;
-    background: var(--rm-accent);
-    color: #fff;
-    cursor: pointer;
-    box-shadow: 0 1px 2px rgba(10, 132, 255, 0.35);
-  }
-  .fg-add-btn:disabled {
-    background: #c7c7cc;
-    box-shadow: none;
-    cursor: default;
   }
   .fg-blank {
     margin: auto;
     padding: 3rem;
     text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
   }
   .fg-blank-title {
-    margin: 0 0 6px;
+    margin: 0;
     font-size: 15px;
     font-weight: 600;
     color: var(--rm-text);
   }
-  .fg-blank-sub {
-    margin: 0 0 14px;
-    font-size: 13px;
-    color: var(--rm-text-dim);
-  }
-  .fg-blank-btn {
-    font: inherit;
-    font-size: 12.5px;
-    font-weight: 600;
-    padding: 8px 14px;
-    border: 0.5px solid var(--rm-border);
-    border-radius: 8px;
-    background: var(--rm-control-bg);
-    color: var(--rm-text);
-    cursor: pointer;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-  }
-  .fg-blank-btn:hover {
-    background: #f0f0f2;
+  .fg-blank .sc-btn {
+    margin-top: 6px;
   }
 </style>

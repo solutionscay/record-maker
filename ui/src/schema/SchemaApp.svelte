@@ -17,13 +17,11 @@
   let drawerFieldId = $state<number | null>(null);
   const drawerField = $derived(store.fields.find((f) => f.id === drawerFieldId) ?? null);
 
-  // Open a table's fields (from the Tables tab or the Fields-tab dropdown).
   async function openTable(id: number) {
     drawerFieldId = null;
     tab = 'fields';
     await store.selectTable(id);
   }
-  // Switching to the Fields tab with nothing selected defaults to the first table.
   async function goFields() {
     tab = 'fields';
     if (store.selectedTableId == null && store.tables.length > 0) {
@@ -66,24 +64,22 @@
   </div>
 
   <footer class="sb-foot">
-    <span class="sb-foot-hint">Changes are saved as you make them.</span>
-    <button type="button" class="sb-done" onclick={() => (window.location.href = '/')}>Done</button>
+    <span class="sc-hint">Changes are saved as you make them.</span>
+    <button type="button" class="sc-btn sc-btn--primary" onclick={() => (window.location.href = '/')}>Done</button>
   </footer>
 </div>
 
 {#if store.error}
   <div class="sb-error" role="alert">
-    <svg class="icon" aria-hidden="true"><use href="#icon-find" /></svg>
+    <svg class="sb-error-ico" aria-hidden="true"><use href="#icon-find" /></svg>
     <span>{store.error}</span>
     <button type="button" class="sb-error-x" title="Dismiss" onclick={() => (store.error = null)}>
-      <svg class="icon" aria-hidden="true"><use href="#icon-minus" /></svg>
+      <svg class="sb-error-ico" aria-hidden="true"><use href="#icon-minus" /></svg>
     </button>
   </div>
 {/if}
 
 <style>
-  /* Full-window surface — no card, no rounding; the island fills the whole
-     content pane edge-to-edge. */
   .sb {
     position: relative;
     height: 100%;
@@ -97,11 +93,11 @@
     flex: none;
     display: flex;
     justify-content: center;
-    padding: 10px 12px;
+    padding: 10px 16px;
     border-bottom: 0.5px solid var(--rm-border);
     background: var(--rm-toolbar-bg);
   }
-  /* Centered segmented tabs (macOS pill), like the reference dialog. */
+  /* Centered segmented tabs (matches the shell's .view-switch / .modes). */
   .sb-tabs {
     display: inline-flex;
     gap: 2px;
@@ -111,7 +107,7 @@
   }
   .sb-tab {
     font: inherit;
-    font-size: 12.5px;
+    font-size: 12px;
     font-weight: 500;
     padding: 5px 16px;
     border: 0;
@@ -119,6 +115,10 @@
     background: transparent;
     color: var(--rm-text-dim);
     cursor: pointer;
+    transition:
+      background 0.12s ease,
+      color 0.12s ease,
+      box-shadow 0.12s ease;
   }
   .sb-tab:hover:not(:disabled):not(.active) {
     color: var(--rm-text);
@@ -141,8 +141,6 @@
     flex-direction: column;
     overflow: hidden;
   }
-  /* Bottom bar — the way out (the surface applies changes live, so one Done,
-     no OK/Cancel transaction). */
   .sb-foot {
     flex: none;
     display: flex;
@@ -153,26 +151,6 @@
     border-top: 0.5px solid var(--rm-border);
     background: var(--rm-toolbar-bg);
   }
-  .sb-foot-hint {
-    font-size: 11.5px;
-    color: var(--rm-text-dim);
-  }
-  .sb-done {
-    font: inherit;
-    font-size: 12.5px;
-    font-weight: 600;
-    padding: 7px 18px;
-    border: 0.5px solid transparent;
-    border-radius: 7px;
-    background: var(--rm-accent);
-    color: #fff;
-    cursor: pointer;
-    box-shadow: 0 1px 2px rgba(10, 132, 255, 0.35);
-  }
-  .sb-done:hover {
-    filter: brightness(1.05);
-  }
-  /* Field-detail drawer scrim — dims the window and closes on click. */
   .sb-scrim {
     position: absolute;
     inset: 0;
@@ -196,7 +174,7 @@
     font-size: 12.5px;
     box-shadow: 0 8px 26px rgba(0, 0, 0, 0.22);
   }
-  .sb-error .icon {
+  .sb-error-ico {
     width: 1em;
     height: 1em;
     fill: currentColor;
@@ -211,13 +189,9 @@
     color: #fff;
     line-height: 0;
     cursor: pointer;
+    transition: background 0.12s ease;
   }
   .sb-error-x:hover {
     background: rgba(255, 255, 255, 0.3);
-  }
-  .sb-error-x .icon {
-    width: 1em;
-    height: 1em;
-    fill: currentColor;
   }
 </style>

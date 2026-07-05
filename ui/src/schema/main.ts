@@ -1,4 +1,5 @@
 import { mount } from 'svelte';
+import './schema.css';
 import SchemaApp from './SchemaApp.svelte';
 
 // Schema-builder island entry (#113). A single mounted island (not an SPA page):

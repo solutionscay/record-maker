@@ -1,9 +1,9 @@
 <script lang="ts">
-  // One field row in the grid (#113). Isolates its own inline-rename buffer (so a
-  // store update elsewhere can't clobber mid-edit) and commits rename/retype/
-  // delete through the store. Reorder is driven by the parent via drag callbacks;
-  // this row owns the draggable handle, a full-row drag ghost, and the insertion
-  // line that shows exactly where the field will land.
+  // One field row in the grid (#113). Inline rename/retype/delete through the
+  // store; the input is one-way bound to field.name so Svelte only rewrites it
+  // when the server value changes (never mid-edit). Reorder is driven by the
+  // parent via drag callbacks; this row owns the draggable handle, a full-row
+  // drag ghost, and the insertion line showing where the field will land.
   import type { SchemaStore } from './store.svelte';
   import type { FieldKind, FieldView } from './types';
   import { FIELD_KINDS, kindIcon } from './types';
@@ -40,18 +40,14 @@
 
   let rowEl: HTMLDivElement;
 
-  // Inline rename: one-way bound to `field.name`, so Svelte only rewrites the
-  // input when the server value changes — it never clobbers what's being typed.
   function commitName(el: HTMLInputElement) {
     const v = el.value.trim();
     if (v && v !== field.name) void store.renameField(field.id, v);
     else el.value = field.name;
   }
-
   function retype(kind: string) {
     if (kind !== field.kind) void store.retypeField(field.id, kind as FieldKind);
   }
-
   async function remove() {
     const ok = await confirmDanger(`Delete the “${field.name}” field? This cannot be undone.`, 'Delete field');
     if (ok) void store.deleteField(field.id);
@@ -62,8 +58,6 @@
     e.dataTransfer?.setData('text/plain', String(field.id));
     if (e.dataTransfer) {
       e.dataTransfer.effectAllowed = 'move';
-      // Drag the WHOLE row as the ghost (not just the little handle), aligned to
-      // the cursor — so it's obvious what's moving.
       const r = rowEl.getBoundingClientRect();
       e.dataTransfer.setDragImage(rowEl, e.clientX - r.left, e.clientY - r.top);
     }
@@ -73,7 +67,6 @@
     if (!reorderable) return;
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-    // Insert before or after this row depending on which half the cursor is over.
     const r = rowEl.getBoundingClientRect();
     ondragoverrow(e.clientY < r.top + r.height / 2 ? 'before' : 'after');
   }
@@ -107,11 +100,11 @@
     ondragend={ondragendrow}
     aria-hidden="true"
   >
-    <svg class="icon" viewBox="0 0 16 16"><circle cx="6" cy="4" r="1" /><circle cx="10" cy="4" r="1" /><circle cx="6" cy="8" r="1" /><circle cx="10" cy="8" r="1" /><circle cx="6" cy="12" r="1" /><circle cx="10" cy="12" r="1" /></svg>
+    <svg class="fg-handle-ico" viewBox="0 0 16 16"><circle cx="6" cy="4" r="1" /><circle cx="10" cy="4" r="1" /><circle cx="6" cy="8" r="1" /><circle cx="10" cy="8" r="1" /><circle cx="6" cy="12" r="1" /><circle cx="10" cy="12" r="1" /></svg>
   </span>
 
   <input
-    class="fg-name"
+    class="sc-cell fg-name"
     value={field.name}
     onblur={(e) => commitName(e.currentTarget)}
     onkeydown={(e) => {
@@ -126,25 +119,20 @@
 
   <span class="fg-type">
     <Icon name={kindIcon(field.kind)} />
-    <select
-      class="fg-type-select"
-      value={field.kind}
-      onchange={(e) => retype(e.currentTarget.value)}
-      aria-label="Field type"
-    >
+    <select class="sc-cell fg-type-select" value={field.kind} onchange={(e) => retype(e.currentTarget.value)} aria-label="Field type">
       {#each FIELD_KINDS as k (k.kind)}
         <option value={k.kind}>{k.label}</option>
       {/each}
     </select>
   </span>
 
-  <code class="fg-phys" title={field.phys}>{field.phys}</code>
+  <code class="sc-phys fg-phys" title={field.phys}>{field.phys}</code>
 
   <span class="fg-actions">
-    <button type="button" class="fg-act" class:on={active} title="Field details" onclick={onedit}>
+    <button type="button" class="sc-btn sc-btn--icon sc-btn--ghost fg-gear" class:on={active} title="Field details" onclick={onedit}>
       <Icon name="settings" />
     </button>
-    <button type="button" class="fg-act danger" title="Delete field" onclick={remove}>
+    <button type="button" class="sc-btn sc-btn--icon sc-btn--ghost sc-btn--danger" title="Delete field" onclick={remove}>
       <Icon name="delete" />
     </button>
   </span>
@@ -153,8 +141,9 @@
 <style>
   :global(.fg-row) {
     position: relative;
-    height: 46px;
+    height: var(--sc-row-h);
     border-top: 0.5px solid var(--rm-border);
+    transition: background 0.12s ease;
   }
   :global(.fg-row):first-of-type {
     border-top: 0;
@@ -165,8 +154,7 @@
   :global(.fg-row.dragging) {
     opacity: 0.35;
   }
-  /* Insertion indicator — a crisp accent line with an end cap, sitting on the
-     boundary the dragged field will drop onto. */
+  /* Insertion indicator — an accent line with an end cap on the drop boundary. */
   .fg-dropline {
     position: absolute;
     left: 8px;
@@ -197,9 +185,13 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    height: 24px;
     cursor: grab;
     color: var(--rm-text-dim);
     border-radius: 5px;
+    transition:
+      background 0.12s ease,
+      color 0.12s ease;
   }
   .fg-handle:hover {
     background: rgba(0, 0, 0, 0.06);
@@ -210,38 +202,17 @@
   }
   .fg-handle.disabled {
     cursor: default;
-    opacity: 0.35;
+    opacity: 0.3;
   }
   .fg-handle.disabled:hover {
     background: transparent;
     color: var(--rm-text-dim);
   }
-  .fg-handle .icon {
+  .fg-handle-ico {
     width: 16px;
     height: 16px;
     fill: currentColor;
     opacity: 0.6;
-  }
-  .fg-name {
-    min-width: 0;
-    font: inherit;
-    font-size: 13px;
-    font-weight: 500;
-    padding: 6px 8px;
-    border: 1px solid transparent;
-    border-radius: 7px;
-    background: transparent;
-    color: var(--rm-text);
-  }
-  .fg-name:hover {
-    border-color: var(--rm-border);
-    background: var(--rm-control-bg);
-  }
-  .fg-name:focus {
-    outline: none;
-    border-color: var(--rm-accent);
-    background: var(--rm-control-bg);
-    box-shadow: 0 0 0 3px var(--rm-accent-soft);
   }
   .fg-type {
     display: inline-flex;
@@ -250,29 +221,17 @@
     min-width: 0;
     color: var(--rm-text-dim);
   }
+  .fg-type :global(.icon) {
+    flex: none;
+  }
   .fg-type-select {
-    min-width: 0;
     flex: 1 1 auto;
-    font: inherit;
-    font-size: 13px;
-    padding: 5px 6px;
-    border: 1px solid transparent;
-    border-radius: 7px;
-    background: transparent;
-    color: var(--rm-text);
   }
-  .fg-type-select:hover {
-    border-color: var(--rm-border);
-    background: var(--rm-control-bg);
-  }
-  .fg-type-select:focus {
-    outline: none;
-    border-color: var(--rm-accent);
+  .fg-name {
+    font-weight: 500;
   }
   .fg-phys {
     min-width: 0;
-    font-size: 11.5px;
-    color: var(--rm-text-dim);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -282,31 +241,21 @@
     justify-content: flex-end;
     gap: 4px;
   }
-  .fg-act {
-    padding: 5px;
-    border: 0;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--rm-text-dim);
-    line-height: 0;
-    cursor: pointer;
+  /* Row actions stay hidden until hover to keep the grid calm. */
+  .fg-actions .sc-btn {
     opacity: 0;
+    transition:
+      opacity 0.12s ease,
+      background 0.12s ease,
+      color 0.12s ease;
   }
-  :global(.fg-row:hover) .fg-act,
-  .fg-act.on,
-  .fg-act:focus-visible {
+  :global(.fg-row:hover) .fg-actions .sc-btn,
+  .fg-actions .sc-btn:focus-visible,
+  .fg-gear.on {
     opacity: 1;
   }
-  .fg-act:hover {
-    background: rgba(0, 0, 0, 0.06);
-    color: var(--rm-text);
-  }
-  .fg-act.on {
+  .fg-gear.on {
     background: var(--rm-accent);
-    color: #fff;
-  }
-  .fg-act.danger:hover {
-    background: var(--rm-danger);
     color: #fff;
   }
 </style>

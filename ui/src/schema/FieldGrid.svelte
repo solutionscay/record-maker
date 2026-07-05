@@ -1,28 +1,38 @@
 <script lang="ts">
-  // Level 2 of the drill-down (#113): the field grid for the open table. A
-  // breadcrumb (‹ Tables) + a table-switcher head the level; the grid is a
-  // spreadsheet-like fast path (inline rename/retype, drag-reorder, delete, add
-  // row); the gear on a row opens the field-detail drawer. The parent owns drag
-  // state; each row (FieldRow) isolates its own inline buffers.
+  // The Fields tab (#113): a Table selector + "N fields defined" + a View-by
+  // control head the grid (inspired by the classic database-definition dialog).
+  // The grid is a spreadsheet-like fast path (inline rename/retype, drag-reorder
+  // in custom order, delete, add row); the gear on a row opens the field-detail
+  // drawer. The parent owns drag state; each row isolates its own inline buffers.
   import type { SchemaStore } from './store.svelte';
-  import type { FieldKind } from './types';
+  import type { FieldKind, FieldView } from './types';
   import { FIELD_KINDS } from './types';
   import FieldRow from './FieldRow.svelte';
-  import Icon from '../lib/Icon.svelte';
 
   let {
     store,
-    onback,
     onswitch,
     onedit,
+    onnotables,
     openFieldId,
   }: {
     store: SchemaStore;
-    onback: () => void;
     onswitch: (id: number) => void;
     onedit: (id: number) => void;
+    onnotables: () => void;
     openFieldId: number | null;
   } = $props();
+
+  // View-by: custom (the stored order — draggable) or a display-only sort.
+  type SortBy = 'custom' | 'name' | 'type';
+  let sortBy = $state<SortBy>('custom');
+  const canReorder = $derived(sortBy === 'custom');
+  const displayFields = $derived.by<FieldView[]>(() => {
+    const fs = store.fields;
+    if (sortBy === 'name') return [...fs].sort((a, b) => a.name.localeCompare(b.name));
+    if (sortBy === 'type') return [...fs].sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name));
+    return fs;
+  });
 
   // Inline "add field" row.
   let newName = $state('');
@@ -41,8 +51,8 @@
     }
   }
 
-  // Drag-to-reorder. Track the dragged field, the row being hovered, and whether
-  // the insertion goes before/after it (computed from the pointer position).
+  // Drag-to-reorder (custom order only). Track the dragged field, the hovered
+  // row, and whether the insertion goes before/after it (from the pointer).
   let dragId = $state<number | null>(null);
   let overId = $state<number | null>(null);
   let overPos = $state<'before' | 'after'>('before');
@@ -76,102 +86,113 @@
     const insertIdx = pos === 'after' ? targetIdx + 1 : targetIdx;
     ids.splice(insertIdx, 0, from);
 
-    // Skip the round-trip if nothing actually moved.
     const current = store.fields.map((f) => f.id);
     if (ids.length === current.length && ids.every((v, i) => v === current[i])) return;
     void store.reorder(ids);
   }
 </script>
 
-<div class="fg">
-  <header class="fg-head">
-    <button type="button" class="fg-back" onclick={onback}>
-      <Icon name="prev" />Tables
-    </button>
-    <span class="fg-crumb-sep">/</span>
-    <!-- Table switcher: jump between tables without leaving the fields level. -->
-    <div class="fg-switch">
-      <select
-        class="fg-switch-select"
-        value={store.selectedTableId}
-        onchange={(e) => onswitch(Number(e.currentTarget.value))}
-        aria-label="Switch table"
-      >
-        {#each store.tables as t (t.id)}
-          <option value={t.id}>{t.name}</option>
-        {/each}
-      </select>
-    </div>
-    <span class="fg-sub">
-      {store.fields.length}
-      {store.fields.length === 1 ? 'field' : 'fields'} · stored as
-      <code>{store.selectedTable?.phys}</code>
-    </span>
-  </header>
-
-  <div class="fg-scroll">
-    <div class="fg-grid">
-      <div class="fg-colhead">
-        <span class="fg-c-handle" aria-hidden="true"></span>
-        <span>Field</span>
-        <span>Type</span>
-        <span>Physical name</span>
-        <span class="fg-c-actions" aria-hidden="true"></span>
-      </div>
-
-      {#if store.loadingFields}
-        <p class="fg-note">Loading fields…</p>
-      {:else if store.fields.length === 0}
-        <p class="fg-note">No fields yet — add the first one below.</p>
-      {/if}
-
-      {#each store.fields as field (field.id)}
-        <FieldRow
-          {store}
-          {field}
-          active={field.id === openFieldId}
-          dragging={field.id === dragId}
-          dropBefore={overId === field.id && overPos === 'before' && dragId != null && dragId !== field.id}
-          dropAfter={overId === field.id && overPos === 'after' && dragId != null && dragId !== field.id}
-          onedit={() => onedit(field.id)}
-          ondragstartrow={() => onDragStart(field.id)}
-          ondragoverrow={(pos) => onDragOver(field.id, pos)}
-          ondroprow={onDrop}
-          ondragendrow={onDragEnd}
-        />
-      {/each}
-
-      <!-- Add-field row -->
-      <div class="fg-add">
-        <span class="fg-c-handle" aria-hidden="true"></span>
-        <input
-          class="fg-add-name"
-          placeholder="New field name"
-          bind:value={newName}
-          disabled={addBusy}
-          onkeydown={(e) => {
-            if (e.key === 'Enter') addField();
-          }}
-          aria-label="New field name"
-        />
-        <select class="fg-add-kind" bind:value={newKind} disabled={addBusy} aria-label="New field type">
-          {#each FIELD_KINDS as k (k.kind)}
-            <option value={k.kind}>{k.label}</option>
+{#if store.tables.length === 0}
+  <div class="fg-blank">
+    <p class="fg-blank-title">No tables yet</p>
+    <p class="fg-blank-sub">Create a table before defining fields.</p>
+    <button type="button" class="fg-blank-btn" onclick={onnotables}>Go to Tables</button>
+  </div>
+{:else}
+  <div class="fg">
+    <header class="fg-head">
+      <div class="fg-head-group">
+        <label class="fg-hlabel" for="fg-table">Table</label>
+        <select
+          id="fg-table"
+          class="fg-select"
+          value={store.selectedTableId}
+          onchange={(e) => onswitch(Number(e.currentTarget.value))}
+        >
+          {#each store.tables as t (t.id)}
+            <option value={t.id}>{t.name}</option>
           {/each}
         </select>
-        <span></span>
-        <button
-          type="button"
-          class="fg-add-btn"
-          onclick={addField}
-          disabled={addBusy || newName.trim().length === 0}
-        >
-          Add
-        </button>
+        <span class="fg-count">
+          {store.fields.length}
+          {store.fields.length === 1 ? 'field' : 'fields'} defined
+        </span>
+      </div>
+      <div class="fg-head-group">
+        <label class="fg-hlabel" for="fg-viewby">View by</label>
+        <select id="fg-viewby" class="fg-select" bind:value={sortBy}>
+          <option value="custom">Custom order</option>
+          <option value="name">Field name</option>
+          <option value="type">Type</option>
+        </select>
+      </div>
+    </header>
+
+    <div class="fg-scroll">
+      <div class="fg-grid">
+        <div class="fg-colhead">
+          <span class="fg-c-handle" aria-hidden="true"></span>
+          <span>Field name</span>
+          <span>Type</span>
+          <span>Physical name</span>
+          <span class="fg-c-actions" aria-hidden="true"></span>
+        </div>
+
+        {#if store.loadingFields}
+          <p class="fg-note">Loading fields…</p>
+        {:else if store.fields.length === 0}
+          <p class="fg-note">No fields yet — add the first one below.</p>
+        {/if}
+
+        {#each displayFields as field (field.id)}
+          <FieldRow
+            {store}
+            {field}
+            reorderable={canReorder}
+            active={field.id === openFieldId}
+            dragging={field.id === dragId}
+            dropBefore={overId === field.id && overPos === 'before' && dragId != null && dragId !== field.id}
+            dropAfter={overId === field.id && overPos === 'after' && dragId != null && dragId !== field.id}
+            onedit={() => onedit(field.id)}
+            ondragstartrow={() => onDragStart(field.id)}
+            ondragoverrow={(pos) => onDragOver(field.id, pos)}
+            ondroprow={onDrop}
+            ondragendrow={onDragEnd}
+          />
+        {/each}
+
+        <!-- Add-field row -->
+        <div class="fg-add">
+          <span class="fg-c-handle" aria-hidden="true"></span>
+          <input
+            class="fg-add-name"
+            placeholder="New field name"
+            bind:value={newName}
+            disabled={addBusy}
+            onkeydown={(e) => {
+              if (e.key === 'Enter') addField();
+            }}
+            aria-label="New field name"
+          />
+          <select class="fg-add-kind" bind:value={newKind} disabled={addBusy} aria-label="New field type">
+            {#each FIELD_KINDS as k (k.kind)}
+              <option value={k.kind}>{k.label}</option>
+            {/each}
+          </select>
+          <span></span>
+          <button
+            type="button"
+            class="fg-add-btn"
+            onclick={addField}
+            disabled={addBusy || newName.trim().length === 0}
+          >
+            Add
+          </button>
+        </div>
       </div>
     </div>
   </div>
-</div>
+{/if}
 
 <style>
   .fg {
@@ -179,87 +200,63 @@
     flex-direction: column;
     min-height: 0;
     height: 100%;
-    background: var(--rm-workspace-bg);
   }
   .fg-head {
     flex: none;
     display: flex;
     align-items: center;
-    gap: 9px;
-    padding: 16px 22px 12px;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 18px;
+    border-bottom: 0.5px solid var(--rm-border);
   }
-  .fg-back {
+  .fg-head-group {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 8px;
+    min-width: 0;
+  }
+  .fg-hlabel {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--rm-text-dim);
+  }
+  .fg-select {
     font: inherit;
     font-size: 13px;
     font-weight: 500;
-    padding: 5px 10px 5px 7px;
+    color: var(--rm-text);
+    padding: 6px 26px 6px 9px;
     border: 0.5px solid var(--rm-border);
     border-radius: 8px;
-    background: var(--rm-control-bg);
-    color: var(--rm-text);
-    cursor: pointer;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-  }
-  .fg-back:hover {
-    background: #f0f0f2;
-  }
-  .fg-back :global(.icon) {
-    flex: none;
-  }
-  .fg-crumb-sep {
-    color: var(--rm-text-dim);
-  }
-  .fg-switch-select {
-    font: inherit;
-    font-size: 17px;
-    font-weight: 700;
-    color: var(--rm-text);
-    padding: 3px 26px 3px 8px;
-    border: 0.5px solid transparent;
-    border-radius: 8px;
-    background-color: transparent;
-    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath d='M1 1.5 5 5.5 9 1.5' fill='none' stroke='%238a8a8e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 8px center;
     appearance: none;
     -webkit-appearance: none;
+    background-color: var(--rm-control-bg);
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath d='M1 1.5 5 5.5 9 1.5' fill='none' stroke='%238a8a8e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 9px center;
     cursor: pointer;
   }
-  .fg-switch-select:hover {
-    border-color: var(--rm-border);
-    background-color: var(--rm-control-bg);
-  }
-  .fg-switch-select:focus {
+  .fg-select:focus {
     outline: none;
     border-color: var(--rm-accent);
   }
-  .fg-sub {
-    margin-left: auto;
-    font-size: 12.5px;
+  .fg-count {
+    font-size: 12px;
     color: var(--rm-text-dim);
-  }
-  .fg-sub code {
-    font-size: 11.5px;
-    padding: 1px 5px;
-    border-radius: 5px;
-    background: rgba(0, 0, 0, 0.05);
+    white-space: nowrap;
   }
   .fg-scroll {
     flex: 1 1 auto;
     min-height: 0;
     overflow: auto;
-    padding: 0 22px 22px;
+    padding: 18px;
   }
   .fg-grid {
-    max-width: 860px;
-    margin: 0 auto;
     background: var(--rm-control-bg);
     border: 0.5px solid var(--rm-border);
-    border-radius: 12px;
-    box-shadow: var(--rm-shadow-card);
+    border-radius: 10px;
     overflow: hidden;
   }
   /* One shared column template for the header, rows, and add row. */
@@ -273,7 +270,7 @@
     padding: 0 12px;
   }
   .fg-colhead {
-    height: 38px;
+    height: 36px;
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
@@ -324,5 +321,36 @@
     background: #c7c7cc;
     box-shadow: none;
     cursor: default;
+  }
+  .fg-blank {
+    margin: auto;
+    padding: 3rem;
+    text-align: center;
+  }
+  .fg-blank-title {
+    margin: 0 0 6px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--rm-text);
+  }
+  .fg-blank-sub {
+    margin: 0 0 14px;
+    font-size: 13px;
+    color: var(--rm-text-dim);
+  }
+  .fg-blank-btn {
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 8px 14px;
+    border: 0.5px solid var(--rm-border);
+    border-radius: 8px;
+    background: var(--rm-control-bg);
+    color: var(--rm-text);
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  }
+  .fg-blank-btn:hover {
+    background: #f0f0f2;
   }
 </style>

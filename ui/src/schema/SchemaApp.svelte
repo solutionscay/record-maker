@@ -1,8 +1,8 @@
 <script lang="ts">
-  // Schema-builder root (#113). Drill-down surface: Tables (level 1) → Fields
-  // (level 2) → Field Detail (a drawer over the fields). The store holds all
-  // schema truth; this owns only the current level and which field the drawer
-  // targets.
+  // Schema-builder root (#113). A full-width, sidebar-less window with in-window
+  // tabs — Tables / Fields / Relationships — inspired by the classic
+  // database-definition dialog. The store holds all schema truth; this owns only
+  // the active tab and which field the drawer targets. Relationships is PR 2.
   import { SchemaStore } from './store.svelte';
   import TablesView from './TablesView.svelte';
   import FieldGrid from './FieldGrid.svelte';
@@ -11,26 +11,27 @@
   const store = new SchemaStore();
   void store.load();
 
-  type Screen = 'tables' | 'fields';
-  let screen = $state<Screen>('tables');
+  type Tab = 'tables' | 'fields';
+  let tab = $state<Tab>('tables');
 
-  // The drawer targets a field by id (not object) so it survives the store
-  // replacing field objects on edit, and auto-closes if that field is deleted.
   let drawerFieldId = $state<number | null>(null);
   const drawerField = $derived(store.fields.find((f) => f.id === drawerFieldId) ?? null);
 
-  // Show the fields level only when a real table is open; otherwise fall back to
-  // the tables level (e.g. the open table was deleted from elsewhere).
-  const onFields = $derived(screen === 'fields' && store.selectedTable != null);
-
+  // Open a table's fields (from the Tables tab or the Fields-tab dropdown).
   async function openTable(id: number) {
     drawerFieldId = null;
-    screen = 'fields';
+    tab = 'fields';
     await store.selectTable(id);
   }
-  function backToTables() {
-    drawerFieldId = null;
-    screen = 'tables';
+  // Switching to the Fields tab with nothing selected defaults to the first table.
+  async function goFields() {
+    tab = 'fields';
+    if (store.selectedTableId == null && store.tables.length > 0) {
+      await store.selectTable(store.tables[0].id);
+    }
+  }
+  function goTables() {
+    tab = 'tables';
   }
   function openField(id: number) {
     drawerFieldId = id;
@@ -41,18 +42,30 @@
 </script>
 
 <div class="sb">
-  {#if onFields}
-    <FieldGrid {store} onback={backToTables} onswitch={openTable} onedit={openField} openFieldId={drawerFieldId} />
-  {:else}
-    <TablesView {store} onopen={openTable} />
-  {/if}
+  <div class="sb-win">
+    <header class="sb-head">
+      <nav class="sb-tabs" aria-label="Schema sections">
+        <button type="button" class="sb-tab" class:active={tab === 'tables'} onclick={goTables}>Tables</button>
+        <button type="button" class="sb-tab" class:active={tab === 'fields'} onclick={goFields}>Fields</button>
+        <button type="button" class="sb-tab" disabled title="Coming soon">Relationships</button>
+      </nav>
+    </header>
 
-  {#if drawerField}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="sb-scrim" onclick={closeDrawer}></div>
-    <FieldDrawer {store} field={drawerField} onclose={closeDrawer} />
-  {/if}
+    <div class="sb-body">
+      {#if tab === 'tables'}
+        <TablesView {store} onopen={openTable} />
+      {:else}
+        <FieldGrid {store} onswitch={openTable} onedit={openField} onnotables={goTables} openFieldId={drawerFieldId} />
+      {/if}
+    </div>
+
+    {#if drawerField}
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="sb-scrim" onclick={closeDrawer}></div>
+      <FieldDrawer {store} field={drawerField} onclose={closeDrawer} />
+    {/if}
+  </div>
 </div>
 
 {#if store.error}
@@ -67,13 +80,77 @@
 
 <style>
   .sb {
-    position: relative;
     height: 100%;
     min-height: 0;
-    overflow: hidden;
+    overflow: auto;
+    display: flex;
+    justify-content: center;
+    padding: 20px;
     background: var(--rm-workspace-bg);
   }
-  /* Field-detail drawer scrim — dims the fields level and closes on click. */
+  /* Dialog-like window: a centered card that fills the height and owns its scroll. */
+  .sb-win {
+    position: relative;
+    width: 100%;
+    max-width: 940px;
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--rm-control-bg);
+    border: 0.5px solid var(--rm-border);
+    border-radius: 14px;
+    box-shadow: var(--rm-shadow-card);
+    overflow: hidden;
+  }
+  .sb-head {
+    flex: none;
+    display: flex;
+    justify-content: center;
+    padding: 12px;
+    border-bottom: 0.5px solid var(--rm-border);
+    background: var(--rm-toolbar-bg);
+  }
+  /* Centered segmented tabs (macOS pill), like the reference dialog. */
+  .sb-tabs {
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 8px;
+    background: var(--rm-segment-track);
+  }
+  .sb-tab {
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    padding: 5px 16px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--rm-text-dim);
+    cursor: pointer;
+  }
+  .sb-tab:hover:not(:disabled):not(.active) {
+    color: var(--rm-text);
+  }
+  .sb-tab.active {
+    background: var(--rm-segment-active-bg);
+    color: var(--rm-text);
+    font-weight: 600;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.14);
+  }
+  .sb-tab:disabled {
+    color: #bcbcc1;
+    cursor: default;
+  }
+  .sb-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  /* Field-detail drawer scrim — dims the window and closes on click. */
   .sb-scrim {
     position: absolute;
     inset: 0;

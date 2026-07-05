@@ -13,6 +13,7 @@
   let {
     store,
     field,
+    reorderable,
     active,
     dragging,
     dropBefore,
@@ -25,6 +26,7 @@
   }: {
     store: SchemaStore;
     field: FieldView;
+    reorderable: boolean;
     active: boolean;
     dragging: boolean;
     dropBefore: boolean;
@@ -56,6 +58,7 @@
   }
 
   function onDragStart(e: DragEvent) {
+    if (!reorderable) return;
     e.dataTransfer?.setData('text/plain', String(field.id));
     if (e.dataTransfer) {
       e.dataTransfer.effectAllowed = 'move';
@@ -67,6 +70,7 @@
     ondragstartrow();
   }
   function onDragOver(e: DragEvent) {
+    if (!reorderable) return;
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
     // Insert before or after this row depending on which half the cursor is over.
@@ -74,6 +78,7 @@
     ondragoverrow(e.clientY < r.top + r.height / 2 ? 'before' : 'after');
   }
   function onDrop(e: DragEvent) {
+    if (!reorderable) return;
     e.preventDefault();
     ondroprow();
   }
@@ -95,8 +100,9 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <span
     class="fg-handle"
-    title="Drag to reorder"
-    draggable="true"
+    class:disabled={!reorderable}
+    title={reorderable ? 'Drag to reorder' : 'Switch to “Custom order” to reorder'}
+    draggable={reorderable}
     ondragstart={onDragStart}
     ondragend={ondragendrow}
     aria-hidden="true"
@@ -201,6 +207,14 @@
   }
   .fg-handle:active {
     cursor: grabbing;
+  }
+  .fg-handle.disabled {
+    cursor: default;
+    opacity: 0.35;
+  }
+  .fg-handle.disabled:hover {
+    background: transparent;
+    color: var(--rm-text-dim);
   }
   .fg-handle .icon {
     width: 16px;

@@ -403,6 +403,9 @@
     </aside>
     {% endif %}
 
+    {# Schema mode has its own in-window footer (the Done button); the shared
+       status strip (collapse toggle / mode) would be redundant there. #}
+    {% if chrome.mode != "schema" %}
     <footer class="statusbar">
       <button type="button" class="collapse" title="Collapse / expand the sidebar"
               onclick="document.querySelector('.app').classList.toggle('rail-collapsed')"><svg class="icon"><use href="#icon-collapse"></use></svg></button>
@@ -410,6 +413,7 @@
       {% if chrome.editing %}<span class="status-edit" title="Record open for editing">&#9679; Editing</span>{% endif %}
       <span class="status-detail">{% block statusbar %}{% endblock %}</span>
     </footer>
+    {% endif %}
   </div>
   {# Standard app dialog. One native <dialog> shared by the whole app; opened
      via window.appConfirm() or declaratively by any form with `data-confirm`. The

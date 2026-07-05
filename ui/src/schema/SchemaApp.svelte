@@ -64,6 +64,11 @@
       <FieldDrawer {store} field={drawerField} onclose={closeDrawer} />
     {/if}
   </div>
+
+  <footer class="sb-foot">
+    <span class="sb-foot-hint">Changes are saved as you make them.</span>
+    <button type="button" class="sb-done" onclick={() => (window.location.href = '/')}>Done</button>
+  </footer>
 </div>
 
 {#if store.error}
@@ -135,6 +140,37 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+  /* Bottom bar — the way out (the surface applies changes live, so one Done,
+     no OK/Cancel transaction). */
+  .sb-foot {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 14px;
+    padding: 10px 18px;
+    border-top: 0.5px solid var(--rm-border);
+    background: var(--rm-toolbar-bg);
+  }
+  .sb-foot-hint {
+    font-size: 11.5px;
+    color: var(--rm-text-dim);
+  }
+  .sb-done {
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 7px 18px;
+    border: 0.5px solid transparent;
+    border-radius: 7px;
+    background: var(--rm-accent);
+    color: #fff;
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(10, 132, 255, 0.35);
+  }
+  .sb-done:hover {
+    filter: brightness(1.05);
   }
   /* Field-detail drawer scrim — dims the window and closes on click. */
   .sb-scrim {

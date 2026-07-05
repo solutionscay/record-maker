@@ -161,22 +161,28 @@
     height: 100%;
     min-height: 0;
     overflow: auto;
+    display: flex;
+    flex-direction: column;
   }
   .tv-inner {
-    max-width: 760px;
-    margin: 0 auto;
-    padding: 26px 22px 40px;
+    display: contents;
   }
   .tv-head {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    flex: none;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 14px;
+    padding: 12px 18px;
+    border-bottom: 0.5px solid var(--rm-border);
+    background: var(--rm-toolbar-bg);
   }
   .tv-title {
     margin: 0;
-    font-size: 21px;
-    font-weight: 700;
+    font-size: 13px;
+    font-weight: 600;
     color: var(--rm-text);
   }
   .tv-new,
@@ -206,10 +212,6 @@
   }
   .tv-card {
     background: var(--rm-control-bg);
-    border: 0.5px solid var(--rm-border);
-    border-radius: 12px;
-    box-shadow: var(--rm-shadow-card);
-    overflow: hidden;
   }
   .tv-note {
     margin: 0;
@@ -241,8 +243,8 @@
     display: flex;
     align-items: center;
     gap: 11px;
-    padding: 0 12px 0 14px;
-    height: 50px;
+    padding: 0 16px 0 18px;
+    height: 48px;
     border-top: 0.5px solid var(--rm-border);
   }
   .tv-row:first-child {

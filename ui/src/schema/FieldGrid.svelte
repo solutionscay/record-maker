@@ -251,26 +251,25 @@
     flex: 1 1 auto;
     min-height: 0;
     overflow: auto;
-    padding: 18px;
   }
   .fg-grid {
     background: var(--rm-control-bg);
-    border: 0.5px solid var(--rm-border);
-    border-radius: 10px;
-    overflow: hidden;
   }
   /* One shared column template for the header, rows, and add row. */
   .fg-colhead,
   .fg-add,
   :global(.fg-row) {
     display: grid;
-    grid-template-columns: 34px minmax(0, 1.6fr) 150px minmax(0, 1fr) 84px;
+    grid-template-columns: 34px minmax(0, 1.6fr) 160px minmax(0, 1fr) 84px;
     align-items: center;
-    gap: 10px;
-    padding: 0 12px;
+    gap: 12px;
+    padding: 0 18px;
   }
   .fg-colhead {
-    height: 36px;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    height: 34px;
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;

@@ -42,22 +42,20 @@
 </script>
 
 <div class="sb">
-  <div class="sb-win">
-    <header class="sb-head">
-      <nav class="sb-tabs" aria-label="Schema sections">
-        <button type="button" class="sb-tab" class:active={tab === 'tables'} onclick={goTables}>Tables</button>
-        <button type="button" class="sb-tab" class:active={tab === 'fields'} onclick={goFields}>Fields</button>
-        <button type="button" class="sb-tab" disabled title="Coming soon">Relationships</button>
-      </nav>
-    </header>
+  <header class="sb-head">
+    <nav class="sb-tabs" aria-label="Schema sections">
+      <button type="button" class="sb-tab" class:active={tab === 'tables'} onclick={goTables}>Tables</button>
+      <button type="button" class="sb-tab" class:active={tab === 'fields'} onclick={goFields}>Fields</button>
+      <button type="button" class="sb-tab" disabled title="Coming soon">Relationships</button>
+    </nav>
+  </header>
 
-    <div class="sb-body">
-      {#if tab === 'tables'}
-        <TablesView {store} onopen={openTable} />
-      {:else}
-        <FieldGrid {store} onswitch={openTable} onedit={openField} onnotables={goTables} openFieldId={drawerFieldId} />
-      {/if}
-    </div>
+  <div class="sb-body">
+    {#if tab === 'tables'}
+      <TablesView {store} onopen={openTable} />
+    {:else}
+      <FieldGrid {store} onswitch={openTable} onedit={openField} onnotables={goTables} openFieldId={drawerFieldId} />
+    {/if}
 
     {#if drawerField}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -79,35 +77,22 @@
 {/if}
 
 <style>
+  /* Full-window surface — no card, no rounding; the island fills the whole
+     content pane edge-to-edge. */
   .sb {
-    height: 100%;
-    min-height: 0;
-    overflow: auto;
-    display: flex;
-    justify-content: center;
-    padding: 20px;
-    background: var(--rm-workspace-bg);
-  }
-  /* Dialog-like window: a centered card that fills the height and owns its scroll. */
-  .sb-win {
     position: relative;
-    width: 100%;
-    max-width: 940px;
     height: 100%;
     min-height: 0;
     display: flex;
     flex-direction: column;
-    background: var(--rm-control-bg);
-    border: 0.5px solid var(--rm-border);
-    border-radius: 14px;
-    box-shadow: var(--rm-shadow-card);
     overflow: hidden;
+    background: var(--rm-control-bg);
   }
   .sb-head {
     flex: none;
     display: flex;
     justify-content: center;
-    padding: 12px;
+    padding: 10px 12px;
     border-bottom: 0.5px solid var(--rm-border);
     background: var(--rm-toolbar-bg);
   }
@@ -144,6 +129,7 @@
     cursor: default;
   }
   .sb-body {
+    position: relative;
     flex: 1 1 auto;
     min-height: 0;
     display: flex;

@@ -1,22 +1,37 @@
 <script lang="ts">
-  // Schema-builder root (#113). Owns the single store and the three-pane surface:
-  // the table list (left), the field grid for the selected table (center), and a
-  // master-detail field drawer (right) that opens when a field is edited. UI-only
-  // drawer state lives here; all schema truth lives in the store.
+  // Schema-builder root (#113). Drill-down surface: Tables (level 1) → Fields
+  // (level 2) → Field Detail (a drawer over the fields). The store holds all
+  // schema truth; this owns only the current level and which field the drawer
+  // targets.
   import { SchemaStore } from './store.svelte';
-  import TableList from './TableList.svelte';
+  import TablesView from './TablesView.svelte';
   import FieldGrid from './FieldGrid.svelte';
   import FieldDrawer from './FieldDrawer.svelte';
-  import Icon from '../lib/Icon.svelte';
 
   const store = new SchemaStore();
   void store.load();
+
+  type Screen = 'tables' | 'fields';
+  let screen = $state<Screen>('tables');
 
   // The drawer targets a field by id (not object) so it survives the store
   // replacing field objects on edit, and auto-closes if that field is deleted.
   let drawerFieldId = $state<number | null>(null);
   const drawerField = $derived(store.fields.find((f) => f.id === drawerFieldId) ?? null);
 
+  // Show the fields level only when a real table is open; otherwise fall back to
+  // the tables level (e.g. the open table was deleted from elsewhere).
+  const onFields = $derived(screen === 'fields' && store.selectedTable != null);
+
+  async function openTable(id: number) {
+    drawerFieldId = null;
+    screen = 'fields';
+    await store.selectTable(id);
+  }
+  function backToTables() {
+    drawerFieldId = null;
+    screen = 'tables';
+  }
   function openField(id: number) {
     drawerFieldId = id;
   }
@@ -25,23 +40,17 @@
   }
 </script>
 
-<div class="sb" class:has-drawer={drawerField}>
-  <TableList {store} />
-
-  <section class="sb-main">
-    {#if store.loading}
-      <div class="sb-center"><p class="sb-muted">Loading schema…</p></div>
-    {:else if !store.selectedTable}
-      <div class="sb-center">
-        <p class="sb-empty-title">No tables yet</p>
-        <p class="sb-muted">Create your first table in the list on the left to start adding fields.</p>
-      </div>
-    {:else}
-      <FieldGrid {store} onedit={openField} openFieldId={drawerFieldId} />
-    {/if}
-  </section>
+<div class="sb">
+  {#if onFields}
+    <FieldGrid {store} onback={backToTables} onswitch={openTable} onedit={openField} openFieldId={drawerFieldId} />
+  {:else}
+    <TablesView {store} onopen={openTable} />
+  {/if}
 
   {#if drawerField}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="sb-scrim" onclick={closeDrawer}></div>
     <FieldDrawer {store} field={drawerField} onclose={closeDrawer} />
   {/if}
 </div>
@@ -51,54 +60,32 @@
     <svg class="icon" aria-hidden="true"><use href="#icon-find" /></svg>
     <span>{store.error}</span>
     <button type="button" class="sb-error-x" title="Dismiss" onclick={() => (store.error = null)}>
-      <Icon name="minus" />
+      <svg class="icon" aria-hidden="true"><use href="#icon-minus" /></svg>
     </button>
   </div>
 {/if}
 
 <style>
   .sb {
-    display: grid;
-    grid-template-columns: 248px 1fr;
+    position: relative;
     height: 100%;
     min-height: 0;
+    overflow: hidden;
     background: var(--rm-workspace-bg);
   }
-  .sb.has-drawer {
-    grid-template-columns: 248px 1fr 340px;
+  /* Field-detail drawer scrim — dims the fields level and closes on click. */
+  .sb-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 15;
+    background: rgba(20, 22, 28, 0.14);
   }
-  .sb-main {
-    min-width: 0;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  .sb-center {
-    margin: auto;
-    max-width: 24rem;
-    text-align: center;
-    padding: 2rem;
-  }
-  .sb-empty-title {
-    margin: 0 0 6px;
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--rm-text);
-  }
-  .sb-muted {
-    margin: 0;
-    font-size: 13px;
-    line-height: 1.5;
-    color: var(--rm-text-dim);
-  }
-  /* Error banner — bottom-center toast over the surface. */
   .sb-error {
     position: fixed;
     left: 50%;
     bottom: 44px;
     transform: translateX(-50%);
-    z-index: 50;
+    z-index: 60;
     display: flex;
     align-items: center;
     gap: 10px;
@@ -128,5 +115,10 @@
   }
   .sb-error-x:hover {
     background: rgba(255, 255, 255, 0.3);
+  }
+  .sb-error-x .icon {
+    width: 1em;
+    height: 1em;
+    fill: currentColor;
   }
 </style>

@@ -69,6 +69,8 @@ const ICONS = {
   // zoom-out reuse `minus`. One symbol each, referenced from several controls.
   plus: 'plus',
   minus: 'minus',
+  // Settings gear — opens the schema builder's field-detail drawer (#113).
+  settings: 'settings-cog-2',
   // Field-kind type glyphs for the searchable field pickers (FieldSelect.svelte,
   // #79). One per FieldKind::as_str value the server sends on FieldChoice.kind.
   'type-text': 'text-start-t',

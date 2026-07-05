@@ -45,14 +45,6 @@
            padding: 5px 11px; border-radius: 7px; border: .5px solid var(--rm-border);
            background: var(--rm-control-bg); color: var(--rm-text); box-shadow: 0 1px 2px rgba(0,0,0,.06); }
     .act:disabled { color: #b8b8bd; border-color: var(--rm-border); background: #f0f0f1; cursor: not-allowed; box-shadow: none; }
-    /* Global "Schema" nav (#113) — a topbar link to the schema-builder surface,
-       styled like a quiet toolbar control; the accent segment marks it active. */
-    .schema-link { display: inline-flex; align-items: center; gap: .35em; font-size: 12px; font-weight: 500;
-           padding: 5px 11px; border-radius: 7px; text-decoration: none; color: var(--rm-text-dim);
-           border: .5px solid transparent; }
-    .schema-link:hover { color: var(--rm-text); background: var(--rm-segment-track); }
-    .schema-link.active { color: var(--rm-accent); background: var(--rm-accent-soft); font-weight: 600; }
-    .schema-link .icon { vertical-align: -.12em; }
     /* Icon system (#72) — pixelarticons `<symbol>`s referenced by `<use>`, shared by
        the server chrome and the Svelte islands. An `em`-sized `currentColor` box, so
        every icon inherits its control's colour and active/disabled/hover state. */
@@ -277,10 +269,6 @@
   <div class="app {% if chrome.mode == "design" %}has-inspector{% endif %}{% if chrome.mode == "schema" %}is-schema{% endif %}">
     <header class="topbar">
       <span class="brand"><svg class="icon"><use href="#icon-app"></use></svg>Record Maker</span>
-      {# Global schema-builder entry (#113): app-level, always present, so tables &
-         fields are reachable from any mode. Active when on the schema surface. #}
-      <a class="schema-link {% if chrome.mode == "schema" %}active{% endif %}" href="/schema"
-         title="Manage tables &amp; fields"><svg class="icon"><use href="#icon-field"></use></svg>Schema</a>
       {% if !chrome.view_tabs.is_empty() %}
       <nav class="view-switch" title="View as">
         {% for v in chrome.view_tabs %}
@@ -676,6 +664,14 @@
     {% when None %}
     {% endmatch %}
     document.addEventListener('keydown', function (e) {
+      // Ctrl/⌘ Shift D — open the schema builder. Global entry for now; a proper
+      // menu entry replaces it later (#113). Handled before the no-shift guard
+      // below because this binding intentionally uses Shift.
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'd') {
+        e.preventDefault();
+        if (MODE !== 'schema') window.location.href = '/schema';
+        return;
+      }
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
       var k = e.key.toLowerCase();
       // Ctrl/⌘ A must never invoke the browser's page select-all. In Layout Mode

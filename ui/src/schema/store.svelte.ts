@@ -40,15 +40,12 @@ export class SchemaStore {
     }
   }
 
-  /** Initial load: fetch tables, then the first table's fields. */
+  /** Initial load: fetch the table list. Fields load lazily when a table is
+   * opened (the drill-down starts on the Tables level, #113). */
   async load(): Promise<void> {
     this.loading = true;
     const tables = await this.guard(() => api.listTables());
     this.tables = tables ?? [];
-    const first = this.tables[0]?.id ?? null;
-    this.selectedTableId = first;
-    if (first != null) await this.loadFields(first);
-    else this.fields = [];
     this.loading = false;
   }
 
@@ -71,12 +68,12 @@ export class SchemaStore {
 
   // ── tables ──────────────────────────────────────────────────────────────
 
-  /** Create a table and select it. Returns the new table (or null on failure). */
+  /** Create a table and append it to the list. Returns the new table (or null on
+   * failure); the caller decides whether to drill into it. */
   async createTable(name: string): Promise<TableView | null> {
     const table = await this.guard(() => api.createTable(name.trim()));
     if (!table) return null;
     this.tables = [...this.tables, table];
-    await this.selectTable(table.id);
     return table;
   }
 

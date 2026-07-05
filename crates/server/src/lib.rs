@@ -3629,10 +3629,6 @@ mod tests {
             html.contains(r#"src="/ui/schema-builder.js""#),
             "schema page loads the schema-builder bundle"
         );
-        assert!(
-            html.contains(r#"class="schema-link active""#),
-            "the global Schema nav is marked active on its own surface"
-        );
 
         // The builder node never appears on other surfaces.
         let (_, browse) = get_body(state, "/").await;

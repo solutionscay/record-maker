@@ -2,7 +2,8 @@
   // One field row in the grid (#113). Isolates its own inline-rename buffer (so a
   // store update elsewhere can't clobber mid-edit) and commits rename/retype/
   // delete through the store. Reorder is driven by the parent via drag callbacks;
-  // this row owns the draggable handle and the drop target.
+  // this row owns the draggable handle, a full-row drag ghost, and the insertion
+  // line that shows exactly where the field will land.
   import type { SchemaStore } from './store.svelte';
   import type { FieldKind, FieldView } from './types';
   import { FIELD_KINDS, kindIcon } from './types';
@@ -14,7 +15,8 @@
     field,
     active,
     dragging,
-    dropTarget,
+    dropBefore,
+    dropAfter,
     onedit,
     ondragstartrow,
     ondragoverrow,
@@ -25,17 +27,19 @@
     field: FieldView;
     active: boolean;
     dragging: boolean;
-    dropTarget: boolean;
+    dropBefore: boolean;
+    dropAfter: boolean;
     onedit: () => void;
     ondragstartrow: () => void;
-    ondragoverrow: () => void;
+    ondragoverrow: (pos: 'before' | 'after') => void;
     ondroprow: () => void;
     ondragendrow: () => void;
   } = $props();
 
-  // Inline rename: the input is one-way bound to `field.name`, so Svelte only
-  // rewrites it when the server value actually changes — it never clobbers what's
-  // being typed. We read the DOM value on commit.
+  let rowEl: HTMLDivElement;
+
+  // Inline rename: one-way bound to `field.name`, so Svelte only rewrites the
+  // input when the server value changes — it never clobbers what's being typed.
   function commitName(el: HTMLInputElement) {
     const v = el.value.trim();
     if (v && v !== field.name) void store.renameField(field.id, v);
@@ -53,13 +57,21 @@
 
   function onDragStart(e: DragEvent) {
     e.dataTransfer?.setData('text/plain', String(field.id));
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      // Drag the WHOLE row as the ghost (not just the little handle), aligned to
+      // the cursor — so it's obvious what's moving.
+      const r = rowEl.getBoundingClientRect();
+      e.dataTransfer.setDragImage(rowEl, e.clientX - r.left, e.clientY - r.top);
+    }
     ondragstartrow();
   }
   function onDragOver(e: DragEvent) {
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-    ondragoverrow();
+    // Insert before or after this row depending on which half the cursor is over.
+    const r = rowEl.getBoundingClientRect();
+    ondragoverrow(e.clientY < r.top + r.height / 2 ? 'before' : 'after');
   }
   function onDrop(e: DragEvent) {
     e.preventDefault();
@@ -69,14 +81,17 @@
 
 <!-- svelte-ignore a11y_interactive_supports_focus -->
 <div
+  bind:this={rowEl}
   class="fg-row"
   class:active
   class:dragging
-  class:drop-target={dropTarget}
   role="row"
   ondragover={onDragOver}
   ondrop={onDrop}
 >
+  {#if dropBefore}<div class="fg-dropline top"></div>{/if}
+  {#if dropAfter}<div class="fg-dropline bottom"></div>{/if}
+
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <span
     class="fg-handle"
@@ -120,8 +135,8 @@
   <code class="fg-phys" title={field.phys}>{field.phys}</code>
 
   <span class="fg-actions">
-    <button type="button" class="fg-act" class:on={active} title="Edit field" onclick={onedit}>
-      <Icon name="field" />
+    <button type="button" class="fg-act" class:on={active} title="Field details" onclick={onedit}>
+      <Icon name="settings" />
     </button>
     <button type="button" class="fg-act danger" title="Delete field" onclick={remove}>
       <Icon name="delete" />
@@ -131,6 +146,7 @@
 
 <style>
   :global(.fg-row) {
+    position: relative;
     height: 46px;
     border-top: 0.5px solid var(--rm-border);
   }
@@ -141,10 +157,35 @@
     background: var(--rm-accent-soft);
   }
   :global(.fg-row.dragging) {
-    opacity: 0.4;
+    opacity: 0.35;
   }
-  :global(.fg-row.drop-target) {
-    box-shadow: inset 0 2px 0 var(--rm-accent);
+  /* Insertion indicator — a crisp accent line with an end cap, sitting on the
+     boundary the dragged field will drop onto. */
+  .fg-dropline {
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    height: 2px;
+    background: var(--rm-accent);
+    border-radius: 2px;
+    z-index: 3;
+    pointer-events: none;
+  }
+  .fg-dropline::before {
+    content: '';
+    position: absolute;
+    left: -3px;
+    top: -2px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--rm-accent);
+  }
+  .fg-dropline.top {
+    top: -1px;
+  }
+  .fg-dropline.bottom {
+    bottom: -1px;
   }
   .fg-handle {
     display: inline-flex;
@@ -152,6 +193,11 @@
     justify-content: center;
     cursor: grab;
     color: var(--rm-text-dim);
+    border-radius: 5px;
+  }
+  .fg-handle:hover {
+    background: rgba(0, 0, 0, 0.06);
+    color: var(--rm-text);
   }
   .fg-handle:active {
     cursor: grabbing;
@@ -160,7 +206,7 @@
     width: 16px;
     height: 16px;
     fill: currentColor;
-    opacity: 0.55;
+    opacity: 0.6;
   }
   .fg-name {
     min-width: 0;

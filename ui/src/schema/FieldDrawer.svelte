@@ -11,6 +11,15 @@
 
   let { store, field, onclose }: { store: SchemaStore; field: FieldView; onclose: () => void } = $props();
 
+  // Close on Escape while the drawer is open.
+  $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onclose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
   type Category = 'name' | 'type' | 'advanced';
   let category = $state<Category>('name');
   const CATEGORIES: { key: Category; label: string }[] = [
@@ -120,11 +129,30 @@
 
 <style>
   .fd {
+    position: absolute;
+    top: 0;
+    right: 0;
+    z-index: 20;
+    width: 360px;
+    max-width: 100%;
+    height: 100%;
     display: flex;
     flex-direction: column;
     min-height: 0;
     border-left: 0.5px solid var(--rm-border);
     background: var(--rm-inspector-bg);
+    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.14);
+    animation: fd-slide 0.16s ease-out;
+  }
+  @keyframes fd-slide {
+    from {
+      transform: translateX(16px);
+      opacity: 0.4;
+    }
+    to {
+      transform: translateX(0);
+      opacity: 1;
+    }
   }
   .fd-head {
     flex: none;

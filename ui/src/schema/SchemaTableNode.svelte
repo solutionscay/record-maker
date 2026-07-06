@@ -85,16 +85,36 @@
             <span class="tn-badge tn-badge--fk" title={`References ${field.fkNames.join(', ')}`}>fk</span>
           {/if}
         </button>
+        <!-- Both sides carry a target+target and source+target handle pair (#139)
+             so an edge can attach to whichever side actually faces the other
+             table, instead of being fixed to target-left/source-right
+             regardless of layout. Paint order keeps the left dot reading
+             blue (target) and the right dot green (source), matching the
+             original single-handle-per-side look. -->
+        <Handle
+          type="source"
+          id={`source-left-${field.id}`}
+          position={Position.Left}
+          class="tn-handle tn-handle--source"
+          style={`top: ${handleTop(index)}`}
+        />
         <Handle
           type="target"
-          id={`target-${field.id}`}
+          id={`target-left-${field.id}`}
           position={Position.Left}
           class="tn-handle tn-handle--target"
           style={`top: ${handleTop(index)}`}
         />
         <Handle
+          type="target"
+          id={`target-right-${field.id}`}
+          position={Position.Right}
+          class="tn-handle tn-handle--target"
+          style={`top: ${handleTop(index)}`}
+        />
+        <Handle
           type="source"
-          id={`source-${field.id}`}
+          id={`source-right-${field.id}`}
           position={Position.Right}
           class="tn-handle tn-handle--source"
           style={`top: ${handleTop(index)}`}

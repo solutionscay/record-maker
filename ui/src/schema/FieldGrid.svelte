@@ -3,6 +3,7 @@
   // create/edit. Rows do not inline edit schema.
   import type { SchemaStore } from './store.svelte';
   import type { FieldView } from './types';
+  import { fieldBadgeInfo } from './fieldBadges';
   import FieldRow from './FieldRow.svelte';
   import Icon from '../lib/Icon.svelte';
 
@@ -112,6 +113,7 @@
           <span class="fg-c-handle" aria-hidden="true"></span>
           <span class="sc-micro">Field name</span>
           <span class="sc-micro">Type</span>
+          <span class="sc-micro">Settings</span>
           <span class="sc-micro">Notes</span>
           <span class="fg-c-actions" aria-hidden="true"></span>
         </div>
@@ -125,6 +127,7 @@
         {#each displayFields as field (field.id)}
           <FieldRow
             {field}
+            badges={store.selectedTableId == null ? null : fieldBadgeInfo(store, store.selectedTableId, field)}
             reorderable={canReorder}
             active={field.id === openFieldId}
             dragging={field.id === dragId}
@@ -177,7 +180,7 @@
   .fg-colhead,
   :global(.fg-row) {
     display: grid;
-    grid-template-columns: 34px minmax(0, 1.4fr) 160px minmax(0, 1.8fr) 34px;
+    grid-template-columns: 34px minmax(0, 1.1fr) 130px minmax(150px, 0.95fr) minmax(0, 1.5fr) 34px;
     align-items: center;
     gap: 12px;
     padding: 0 18px;

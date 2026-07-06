@@ -79,6 +79,8 @@ pub struct FieldMeta {
     /// Physical column name in data.db (always `f_<id>` — a safe identifier).
     pub phys: String,
     pub kind: FieldKind,
+    /// Raw JSON options bag from `meta_field.options`.
+    pub options: String,
     pub position: i64,
 }
 
@@ -201,6 +203,7 @@ impl Solution {
             notes: String::new(),
             phys: fphys,
             kind: f.kind,
+            options: String::new(),
             position,
         })
     }
@@ -317,6 +320,24 @@ impl Solution {
             )?;
         }
         tx.commit()?;
+        self.field_by_id(table_id, field_id)
+    }
+
+    /// Update a field's raw JSON options bag. The engine stores this opaquely;
+    /// server/UI code owns the shape for validation, auto-enter, and future rules.
+    pub fn update_field_options(
+        &self,
+        table_id: i64,
+        field_id: i64,
+        options: &str,
+    ) -> Result<Option<FieldMeta>> {
+        let n = self.app.execute(
+            "UPDATE meta_field SET options=?1 WHERE id=?2 AND table_id=?3",
+            params![options, field_id, table_id],
+        )?;
+        if n == 0 {
+            return Ok(None);
+        }
         self.field_by_id(table_id, field_id)
     }
 
@@ -477,7 +498,7 @@ impl Solution {
     /// Look up a field by id, scoped to its table.
     pub fn field_by_id(&self, table_id: i64, field_id: i64) -> Result<Option<FieldMeta>> {
         let mut stmt = self.app.prepare(
-            "SELECT id, name, notes, phys_name, kind, position FROM meta_field \
+            "SELECT id, name, notes, phys_name, kind, COALESCE(options, ''), position FROM meta_field \
              WHERE table_id=?1 AND id=?2",
         )?;
         let mut rows = stmt.query_map(params![table_id, field_id], |r| {
@@ -488,7 +509,8 @@ impl Solution {
                 notes: r.get(2)?,
                 phys: r.get(3)?,
                 kind: FieldKind::parse(&kind_s).unwrap_or(FieldKind::Text),
-                position: r.get(5)?,
+                options: r.get(5)?,
+                position: r.get(6)?,
             })
         })?;
         match rows.next() {
@@ -500,7 +522,7 @@ impl Solution {
     /// Fields of a table, in display order.
     pub fn fields(&self, table_id: i64) -> Result<Vec<FieldMeta>> {
         let mut stmt = self.app.prepare(
-            "SELECT id, name, notes, phys_name, kind, position FROM meta_field \
+            "SELECT id, name, notes, phys_name, kind, COALESCE(options, ''), position FROM meta_field \
              WHERE table_id=?1 ORDER BY position, id",
         )?;
         let rows = stmt.query_map(params![table_id], |r| {
@@ -511,7 +533,8 @@ impl Solution {
                 notes: r.get(2)?,
                 phys: r.get(3)?,
                 kind: FieldKind::parse(&kind_s).unwrap_or(FieldKind::Text),
-                position: r.get(5)?,
+                options: r.get(5)?,
+                position: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

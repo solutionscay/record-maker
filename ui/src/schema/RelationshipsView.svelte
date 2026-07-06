@@ -59,6 +59,8 @@
         id: field.id,
         name: field.name,
         kind: field.kind,
+        required: field.options?.validation?.required ?? false,
+        unique: field.options?.validation?.unique ?? false,
         fkNames: from.map((r) => `${r.name} -> ${tableName(r.toTable)}.${fieldName(r.toTable, r.toField)}`),
         keyNames: to.map((r) => `${tableName(r.fromTable)}.${fieldName(r.fromTable, r.fromField)} -> ${r.name}`),
       };

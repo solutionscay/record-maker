@@ -3,7 +3,7 @@
 // screen; these only talk to the server and return the views it assigns, so the
 // store can reflect server truth after every op (#113 acceptance).
 
-import type { FieldKind, FieldView, TableView } from './types';
+import type { FieldKind, FieldView, RelationshipView, TableView } from './types';
 
 /** A failed schema op — carries the server's status + message body so the store
  * can surface a real reason (the endpoints return CONFLICT/BAD_REQUEST with a
@@ -46,6 +46,12 @@ export const listTables = (): Promise<TableView[]> => getJson('/schema/tables');
 export const createTable = (name: string): Promise<TableView> =>
   postJson('/schema/tables', { name });
 
+export const createTableWithNotes = (name: string, notes: string): Promise<TableView> =>
+  postJson('/schema/tables', { name, notes });
+
+export const updateTable = (id: number, name: string, notes: string): Promise<TableView> =>
+  postJson(`/schema/tables/${id}`, { name, notes });
+
 export const renameTable = (id: number, name: string): Promise<TableView> =>
   postJson(`/schema/tables/${id}/rename`, { name });
 
@@ -59,6 +65,17 @@ export const listFields = (tableId: number): Promise<FieldView[]> =>
 export const createField = (tableId: number, name: string, kind: FieldKind): Promise<FieldView> =>
   postJson(`/schema/tables/${tableId}/fields`, { name, kind });
 
+export const createFieldWithNotes = (tableId: number, name: string, kind: FieldKind, notes: string): Promise<FieldView> =>
+  postJson(`/schema/tables/${tableId}/fields`, { name, kind, notes });
+
+export const updateField = (
+  tableId: number,
+  fieldId: number,
+  name: string,
+  kind: FieldKind,
+  notes: string,
+): Promise<FieldView> => postJson(`/schema/tables/${tableId}/fields/${fieldId}`, { name, kind, notes });
+
 export const renameField = (tableId: number, fieldId: number, name: string): Promise<FieldView> =>
   postJson(`/schema/tables/${tableId}/fields/${fieldId}/rename`, { name });
 
@@ -70,3 +87,15 @@ export const reorderFields = (tableId: number, fieldIds: number[]): Promise<Fiel
 
 export const deleteField = (tableId: number, fieldId: number): Promise<void> =>
   postVoid(`/schema/tables/${tableId}/fields/${fieldId}/delete`);
+
+// ── relationships ───────────────────────────────────────────────────────────
+
+export const listRelationships = (): Promise<RelationshipView[]> => getJson('/schema/relationships');
+
+export const createRelationship = (rel: Omit<RelationshipView, 'id'>): Promise<RelationshipView> =>
+  postJson('/schema/relationships', rel);
+
+export const updateRelationship = (id: number, rel: Omit<RelationshipView, 'id'>): Promise<RelationshipView> =>
+  postJson(`/schema/relationships/${id}`, rel);
+
+export const deleteRelationship = (id: number): Promise<void> => postVoid(`/schema/relationships/${id}/delete`);

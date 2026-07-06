@@ -1,24 +1,23 @@
 <script lang="ts">
-  // The Fields tab (#113): a Table selector + "N fields defined" + a View-by
-  // control head the grid (inspired by the classic database-definition dialog).
-  // The grid is a spreadsheet-like fast path (inline rename/retype, drag-reorder
-  // in custom order, delete, add row); the gear on a row opens the field-detail
-  // drawer. The parent owns drag state; each row isolates its own inline buffers.
+  // Fields tab (#113/#119): table selector, sort/reorder, and drawer-driven
+  // create/edit. Rows do not inline edit schema.
   import type { SchemaStore } from './store.svelte';
-  import type { FieldKind, FieldView } from './types';
-  import { FIELD_KINDS } from './types';
+  import type { FieldView } from './types';
   import FieldRow from './FieldRow.svelte';
+  import Icon from '../lib/Icon.svelte';
 
   let {
     store,
     onswitch,
     onedit,
+    onnew,
     onnotables,
     openFieldId,
   }: {
     store: SchemaStore;
     onswitch: (id: number) => void;
     onedit: (id: number) => void;
+    onnew: () => void;
     onnotables: () => void;
     openFieldId: number | null;
   } = $props();
@@ -30,24 +29,8 @@
     const fs = store.fields;
     if (sortBy === 'name') return [...fs].sort((a, b) => a.name.localeCompare(b.name));
     if (sortBy === 'type') return [...fs].sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name));
-    return fs;
+    return [...fs];
   });
-
-  let newName = $state('');
-  let newKind = $state<FieldKind>('text');
-  let addBusy = $state(false);
-
-  async function addField() {
-    const name = newName.trim();
-    if (!name || addBusy) return;
-    addBusy = true;
-    const field = await store.addField(name, newKind);
-    addBusy = false;
-    if (field) {
-      newName = '';
-      newKind = 'text';
-    }
-  }
 
   let dragId = $state<number | null>(null);
   let overId = $state<number | null>(null);
@@ -79,12 +62,8 @@
     ids.splice(fromIdx, 1);
     let targetIdx = ids.indexOf(target);
     if (targetIdx < 0) targetIdx = ids.length - 1;
-    const insertIdx = pos === 'after' ? targetIdx + 1 : targetIdx;
-    ids.splice(insertIdx, 0, from);
-
-    const current = store.fields.map((f) => f.id);
-    if (ids.length === current.length && ids.every((v, i) => v === current[i])) return;
-    void store.reorder(ids);
+    ids.splice(pos === 'after' ? targetIdx + 1 : targetIdx, 0, from);
+    store.reorder(ids);
   }
 </script>
 
@@ -121,6 +100,9 @@
           <option value="name">Field name</option>
           <option value="type">Type</option>
         </select>
+        <button type="button" class="sc-btn sc-btn--primary" onclick={onnew} disabled={store.selectedTableId == null}>
+          <Icon name="plus" />New field
+        </button>
       </div>
     </header>
 
@@ -134,15 +116,14 @@
           <span class="fg-c-actions" aria-hidden="true"></span>
         </div>
 
-        {#if store.loadingFields}
-          <p class="fg-note sc-hint">Loading fields…</p>
+        {#if store.loading}
+          <p class="fg-note sc-hint">Loading fields...</p>
         {:else if store.fields.length === 0}
-          <p class="fg-note sc-hint">No fields yet — add the first one below.</p>
+          <p class="fg-note sc-hint">No fields yet.</p>
         {/if}
 
         {#each displayFields as field (field.id)}
           <FieldRow
-            {store}
             {field}
             reorderable={canReorder}
             active={field.id === openFieldId}
@@ -156,34 +137,6 @@
             ondragendrow={onDragEnd}
           />
         {/each}
-
-        <div class="fg-add">
-          <span class="fg-c-handle" aria-hidden="true"></span>
-          <input
-            class="sc-input"
-            placeholder="New field name"
-            bind:value={newName}
-            disabled={addBusy}
-            onkeydown={(e) => {
-              if (e.key === 'Enter') addField();
-            }}
-            aria-label="New field name"
-          />
-          <select class="sc-select" bind:value={newKind} disabled={addBusy} aria-label="New field type">
-            {#each FIELD_KINDS as k (k.kind)}
-              <option value={k.kind}>{k.label}</option>
-            {/each}
-          </select>
-          <span></span>
-          <button
-            type="button"
-            class="sc-btn sc-btn--primary"
-            onclick={addField}
-            disabled={addBusy || newName.trim().length === 0}
-          >
-            Add
-          </button>
-        </div>
       </div>
     </div>
   </div>
@@ -225,12 +178,10 @@
     min-height: 0;
     overflow: auto;
   }
-  /* One shared column template for the header, rows, and add row. */
   .fg-colhead,
-  .fg-add,
   :global(.fg-row) {
     display: grid;
-    grid-template-columns: 34px minmax(0, 1.6fr) 160px minmax(0, 1fr) 84px;
+    grid-template-columns: 34px minmax(0, 1.6fr) 160px minmax(0, 1fr) 48px;
     align-items: center;
     gap: 12px;
     padding: 0 18px;
@@ -246,11 +197,6 @@
   .fg-note {
     margin: 0;
     padding: 16px 18px;
-  }
-  .fg-add {
-    height: 56px;
-    border-top: 0.5px solid var(--rm-border);
-    background: var(--rm-toolbar-bg);
   }
   .fg-blank {
     margin: auto;

@@ -32,6 +32,7 @@ export function kindIcon(kind: string): string {
 export interface TableView {
   id: number;
   name: string;
+  notes: string;
   phys: string;
 }
 
@@ -40,7 +41,18 @@ export interface TableView {
 export interface FieldView {
   id: number;
   name: string;
+  notes: string;
   phys: string;
-  kind: string;
+  kind: FieldKind;
   position: number;
+}
+
+/** A named relationship between two table fields. Mirrors `RelationshipSchemaView`. */
+export interface RelationshipView {
+  id: number;
+  name: string;
+  fromTable: number;
+  toTable: number;
+  fromField: number;
+  toField: number;
 }

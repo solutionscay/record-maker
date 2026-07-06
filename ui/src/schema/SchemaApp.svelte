@@ -1,41 +1,98 @@
 <script lang="ts">
-  // Schema-builder root (#113). A full-width, sidebar-less window with in-window
-  // tabs — Tables / Fields / Relationships — inspired by the classic
-  // database-definition dialog. The store holds all schema truth; this owns only
-  // the active tab and which field the drawer targets. Relationships is PR 2.
+  // Schema-builder root (#113/#119). Tables, fields, and relationships edit a
+  // local draft; the footer Save applies the draft through the schema API.
   import { SchemaStore } from './store.svelte';
   import TablesView from './TablesView.svelte';
+  import TableDrawer from './TableDrawer.svelte';
   import FieldGrid from './FieldGrid.svelte';
   import FieldDrawer from './FieldDrawer.svelte';
+  import RelationshipsView from './RelationshipsView.svelte';
+  import RelationshipDrawer from './RelationshipDrawer.svelte';
 
   const store = new SchemaStore();
   void store.load();
 
-  type Tab = 'tables' | 'fields';
+  type Tab = 'tables' | 'fields' | 'relationships';
   let tab = $state<Tab>('tables');
 
-  let drawerFieldId = $state<number | null>(null);
-  const drawerField = $derived(store.fields.find((f) => f.id === drawerFieldId) ?? null);
+  let tableDrawerId = $state<number | null | undefined>(undefined);
+  let fieldDrawer = $state<{ tableId: number; id: number | null } | null>(null);
+  let relationshipDrawerId = $state<number | null | undefined>(undefined);
 
-  async function openTable(id: number) {
-    drawerFieldId = null;
-    tab = 'fields';
-    await store.selectTable(id);
+  const tableDrawerOpen = $derived(tableDrawerId !== undefined);
+  const drawerTable = $derived(tableDrawerId == null ? null : (store.tableById(tableDrawerId) ?? null));
+  const drawerField = $derived(fieldDrawer?.id == null ? null : store.fieldById(fieldDrawer.tableId, fieldDrawer.id));
+  const drawerRelationship = $derived(
+    relationshipDrawerId == null ? null : (store.relationships.find((r) => r.id === relationshipDrawerId) ?? null),
+  );
+
+  function closeDrawers() {
+    tableDrawerId = undefined;
+    fieldDrawer = null;
+    relationshipDrawerId = undefined;
   }
-  async function goFields() {
+
+  function openTable(id: number) {
+    closeDrawers();
     tab = 'fields';
-    if (store.selectedTableId == null && store.tables.length > 0) {
-      await store.selectTable(store.tables[0].id);
-    }
+    store.selectTable(id);
+  }
+  function goFields() {
+    closeDrawers();
+    tab = 'fields';
+    if (store.selectedTableId == null && store.tables.length > 0) store.selectTable(store.tables[0].id);
   }
   function goTables() {
+    closeDrawers();
     tab = 'tables';
   }
-  function openField(id: number) {
-    drawerFieldId = id;
+  function goRelationships() {
+    closeDrawers();
+    tab = 'relationships';
   }
-  function closeDrawer() {
-    drawerFieldId = null;
+
+  function newTable() {
+    closeDrawers();
+    tableDrawerId = null;
+  }
+  function editTable(id: number) {
+    closeDrawers();
+    tableDrawerId = id;
+  }
+  function newField() {
+    const tableId = store.selectedTableId ?? store.tables[0]?.id;
+    if (tableId == null) return;
+    store.selectTable(tableId);
+    closeDrawers();
+    fieldDrawer = { tableId, id: null };
+  }
+  function editField(id: number) {
+    if (store.selectedTableId == null) return;
+    closeDrawers();
+    fieldDrawer = { tableId: store.selectedTableId, id };
+  }
+  function newRelationship() {
+    closeDrawers();
+    relationshipDrawerId = null;
+  }
+  function editRelationship(id: number) {
+    closeDrawers();
+    relationshipDrawerId = id;
+  }
+
+  async function saveSchema() {
+    const ok = await store.saveAll();
+    if (ok) closeDrawers();
+  }
+
+  function discard() {
+    store.discardChanges();
+    closeDrawers();
+  }
+
+  function done() {
+    if (store.hasChanges && !window.confirm('Discard unsaved schema changes?')) return;
+    window.location.href = '/';
   }
 </script>
 
@@ -44,28 +101,44 @@
     <nav class="sb-tabs" aria-label="Schema sections">
       <button type="button" class="sb-tab" class:active={tab === 'tables'} onclick={goTables}>Tables</button>
       <button type="button" class="sb-tab" class:active={tab === 'fields'} onclick={goFields}>Fields</button>
-      <button type="button" class="sb-tab" disabled title="Coming soon">Relationships</button>
+      <button type="button" class="sb-tab" class:active={tab === 'relationships'} onclick={goRelationships}>Relationships</button>
     </nav>
   </header>
 
   <div class="sb-body">
     {#if tab === 'tables'}
-      <TablesView {store} onopen={openTable} />
+      <TablesView {store} onopen={openTable} onnew={newTable} onedit={editTable} />
+    {:else if tab === 'fields'}
+      <FieldGrid {store} onswitch={openTable} onedit={editField} onnew={newField} onnotables={goTables} openFieldId={fieldDrawer?.id ?? null} />
     {:else}
-      <FieldGrid {store} onswitch={openTable} onedit={openField} onnotables={goTables} openFieldId={drawerFieldId} />
+      <RelationshipsView {store} onnew={newRelationship} onedit={editRelationship} />
     {/if}
 
-    {#if drawerField}
+    {#if tableDrawerOpen}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="sb-scrim" onclick={closeDrawer}></div>
-      <FieldDrawer {store} field={drawerField} onclose={closeDrawer} />
+      <div class="sb-scrim" onclick={closeDrawers}></div>
+      <TableDrawer {store} table={drawerTable} onclose={closeDrawers} />
+    {:else if fieldDrawer}
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="sb-scrim" onclick={closeDrawers}></div>
+      <FieldDrawer {store} tableId={fieldDrawer.tableId} field={drawerField} onclose={closeDrawers} />
+    {:else if relationshipDrawerId !== undefined}
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="sb-scrim" onclick={closeDrawers}></div>
+      <RelationshipDrawer {store} relationship={drawerRelationship} onclose={closeDrawers} />
     {/if}
   </div>
 
   <footer class="sb-foot">
-    <span class="sc-hint">Changes are saved as you make them.</span>
-    <button type="button" class="sc-btn sc-btn--primary" onclick={() => (window.location.href = '/')}>Done</button>
+    <span class="sc-hint sb-status">{store.changeSummary}</span>
+    <button type="button" class="sc-btn" onclick={discard} disabled={!store.hasChanges || store.saving}>Discard</button>
+    <button type="button" class="sc-btn sc-btn--primary" onclick={saveSchema} disabled={!store.hasChanges || store.saving}>
+      {store.saving ? 'Saving...' : 'Save'}
+    </button>
+    <button type="button" class="sc-btn" onclick={done}>Done</button>
   </footer>
 </div>
 
@@ -97,7 +170,6 @@
     border-bottom: 0.5px solid var(--rm-border);
     background: var(--rm-toolbar-bg);
   }
-  /* Centered segmented tabs (matches the shell's .view-switch / .modes). */
   .sb-tabs {
     display: inline-flex;
     gap: 2px;
@@ -120,7 +192,7 @@
       color 0.12s ease,
       box-shadow 0.12s ease;
   }
-  .sb-tab:hover:not(:disabled):not(.active) {
+  .sb-tab:hover:not(.active) {
     color: var(--rm-text);
   }
   .sb-tab.active {
@@ -128,10 +200,6 @@
     color: var(--rm-text);
     font-weight: 600;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.14);
-  }
-  .sb-tab:disabled {
-    color: #bcbcc1;
-    cursor: default;
   }
   .sb-body {
     position: relative;
@@ -146,10 +214,13 @@
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    gap: 14px;
+    gap: 10px;
     padding: 10px 18px;
     border-top: 0.5px solid var(--rm-border);
     background: var(--rm-toolbar-bg);
+  }
+  .sb-status {
+    margin-right: auto;
   }
   .sb-scrim {
     position: absolute;

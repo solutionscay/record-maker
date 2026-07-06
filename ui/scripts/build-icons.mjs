@@ -69,8 +69,10 @@ const ICONS = {
   // zoom-out reuse `minus`. One symbol each, referenced from several controls.
   plus: 'plus',
   minus: 'minus',
-  // Settings gear — opens the schema builder's field-detail drawer (#113).
+  // Settings gear — used where a control represents options/details.
   settings: 'settings-cog-2',
+  // Edit drawer affordance for schema rows.
+  edit: 'pencil',
   // Field-kind type glyphs for the searchable field pickers (FieldSelect.svelte,
   // #79). One per FieldKind::as_str value the server sends on FieldChoice.kind.
   'type-text': 'text-start-t',
@@ -88,7 +90,7 @@ function innerPaths(name) {
   const raw = readFileSync(resolve(svgDir, `${name}.svg`), 'utf8');
   const m = raw.match(/<svg[^>]*>([\s\S]*?)<\/svg>/);
   if (!m) throw new Error(`unrecognised SVG shape in ${name}.svg`);
-  return m[1].trim().replace(/\s+/g, ' ');
+  return m[1].trim().replace(/\s+/g, ' ').replaceAll('fill="black"', 'fill="currentColor"');
 }
 
 const license = readFileSync(resolve(root, 'vendor/pixelarticons/LICENSE'), 'utf8').trim();

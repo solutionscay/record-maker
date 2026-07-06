@@ -1,6 +1,6 @@
 <script lang="ts">
-  // Tables tab (#113/#119): rows navigate to fields, while create/edit/delete
-  // live in the table drawer. No row-level inline schema mutations.
+  // Tables tab (#113/#119/#121): a grid of user tables. Edit opens the table
+  // drawer; the chevron alone drills into the table's fields.
   import type { SchemaStore } from './store.svelte';
   import Icon from '../lib/Icon.svelte';
 
@@ -38,29 +38,34 @@
       </div>
     {/if}
 
+    {#if !store.loading && store.tables.length > 0}
+      <div class="tv-colhead">
+        <span class="tv-c-icon" aria-hidden="true"></span>
+        <span class="sc-micro">Table</span>
+        <span class="sc-micro">Notes</span>
+        <span class="tv-c-actions" aria-hidden="true"></span>
+        <span class="tv-c-nav" aria-hidden="true"></span>
+      </div>
+    {/if}
+
     {#each store.tables as table (table.id)}
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="tv-row is-link" onclick={() => onopen(table.id)}>
+      <div class="tv-row">
         <svg class="tv-ico" aria-hidden="true"><use href="#icon-app" /></svg>
-        <span class="tv-main">
-          <span class="tv-name">{table.name}</span>
-          <span class="tv-notes">{table.notes || 'No notes'}</span>
-        </span>
+        <span class="tv-name">{table.name}</span>
+        <span class="tv-notes" title={table.notes || 'No notes'}>{table.notes || 'No notes'}</span>
         <span class="tv-actions">
           <button
             type="button"
             class="sc-btn sc-btn--icon sc-btn--ghost"
             title="Edit table"
-            onclick={(e) => {
-              e.stopPropagation();
-              onedit(table.id);
-            }}
+            onclick={() => onedit(table.id)}
           >
-            <Icon name="settings" />
+            <Icon name="edit" />
           </button>
         </span>
-        <svg class="tv-chev" aria-hidden="true"><use href="#icon-next" /></svg>
+        <button type="button" class="tv-nav" title="Show fields" onclick={() => onopen(table.id)}>
+          <svg class="tv-chev" aria-hidden="true"><use href="#icon-next" /></svg>
+        </button>
       </div>
     {/each}
   </div>
@@ -112,23 +117,29 @@
   .tv-empty .sc-btn {
     margin-top: 6px;
   }
+  .tv-colhead,
   .tv-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1.35fr) minmax(0, 1.9fr) 34px 28px;
     align-items: center;
-    gap: 11px;
+    gap: 12px;
+    padding: 0 12px 0 18px;
+  }
+  .tv-colhead {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    height: var(--sc-head-h);
+    border-bottom: 0.5px solid var(--rm-border);
+    background: var(--rm-toolbar-bg);
+  }
+  .tv-row {
     min-height: var(--sc-row-h);
-    padding: 7px 12px 7px 18px;
-    border-top: 0.5px solid var(--rm-border);
-  }
-  .tv-row:first-child {
-    border-top: 0;
-  }
-  .tv-row.is-link {
-    cursor: pointer;
+    border-bottom: 0.5px solid var(--rm-border);
     transition: background 0.12s ease;
   }
-  .tv-row.is-link:hover {
-    background: var(--rm-accent-soft);
+  .tv-row:hover {
+    background: rgba(0, 0, 0, 0.02);
   }
   .tv-ico,
   .tv-chev {
@@ -138,14 +149,8 @@
     flex: none;
     color: var(--rm-text-dim);
   }
-  .tv-main {
-    flex: 1 1 auto;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
   .tv-name {
+    min-width: 0;
     font-size: 13px;
     font-weight: 600;
     color: var(--rm-text);
@@ -161,14 +166,29 @@
     white-space: nowrap;
   }
   .tv-actions {
-    flex: none;
-    display: inline-flex;
-    align-items: center;
+    display: flex;
+    justify-content: center;
     opacity: 0;
     transition: opacity 0.12s ease;
   }
-  .tv-row.is-link:hover .tv-actions,
+  .tv-row:hover .tv-actions,
   .tv-actions:focus-within {
     opacity: 1;
+  }
+  .tv-nav {
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--rm-text-dim);
+    cursor: pointer;
+  }
+  .tv-nav:hover {
+    background: rgba(0, 0, 0, 0.06);
+    color: var(--rm-text);
   }
 </style>

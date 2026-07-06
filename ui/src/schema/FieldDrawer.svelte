@@ -25,9 +25,21 @@
   let unique = $state(false);
   let rangeMin = $state('');
   let rangeMax = $state('');
+  let referenceEnabled = $state(false);
+  let referenceName = $state('');
+  let referenceToTable = $state<number | null>(null);
+  let referenceToField = $state<number | null>(null);
 
   const hasRange = $derived(kind === 'number' || kind === 'date' || kind === 'time' || kind === 'timestamp');
   const rangeInputType = $derived(kind === 'number' ? 'number' : kind === 'date' ? 'date' : kind === 'time' ? 'time' : 'datetime-local');
+  const referenceFields = $derived(referenceToTable == null ? [] : (store.fieldsByTable[referenceToTable] ?? []));
+  const referenceValid = $derived(
+    !referenceEnabled ||
+      (referenceName.trim().length > 0 &&
+        referenceToTable != null &&
+        referenceToField != null &&
+        store.fieldById(referenceToTable, referenceToField) != null),
+  );
 
   $effect(() => {
     name = field?.name ?? '';
@@ -37,6 +49,24 @@
     unique = field?.options?.validation?.unique ?? false;
     rangeMin = field?.options?.validation?.range?.min ?? '';
     rangeMax = field?.options?.validation?.range?.max ?? '';
+    referenceEnabled = field?.options?.reference != null;
+    referenceName = field?.options?.reference?.name ?? '';
+    referenceToTable = field?.options?.reference?.toTable ?? store.tables[0]?.id ?? null;
+    referenceToField =
+      field?.options?.reference?.toField ??
+      (referenceToTable == null ? null : (store.fieldsByTable[referenceToTable]?.[0]?.id ?? null));
+  });
+
+  $effect(() => {
+    if (!referenceEnabled) return;
+    if (!referenceName.trim()) referenceName = (name.trim() || 'relationship').toLocaleLowerCase().replace(/\s+/g, '_');
+    if (referenceToTable == null || !store.tableById(referenceToTable)) {
+      referenceToTable = store.tables[0]?.id ?? null;
+    }
+    const fields = referenceToTable == null ? [] : (store.fieldsByTable[referenceToTable] ?? []);
+    if (referenceToField == null || !fields.some((f) => f.id === referenceToField)) {
+      referenceToField = fields[0]?.id ?? null;
+    }
   });
 
   $effect(() => {
@@ -56,7 +86,15 @@
       if (rangeMin.trim()) validation.range.min = rangeMin.trim();
       if (rangeMax.trim()) validation.range.max = rangeMax.trim();
     }
-    return Object.keys(validation).length > 0 ? { validation } : {};
+    const options: FieldOptions = Object.keys(validation).length > 0 ? { validation } : {};
+    if (referenceEnabled && referenceToTable != null && referenceToField != null) {
+      options.reference = {
+        name: referenceName.trim(),
+        toTable: referenceToTable,
+        toField: referenceToField,
+      };
+    }
+    return options;
   }
 
   function save() {
@@ -120,6 +158,50 @@
       {/if}
     </section>
 
+    <section class="fd-section" aria-labelledby="fd-reference">
+      <span id="fd-reference" class="sc-micro fd-label">Reference</span>
+      <label class="fd-check">
+        <input type="checkbox" bind:checked={referenceEnabled} />
+        <span>References another field</span>
+      </label>
+      {#if referenceEnabled}
+        <div class="fd-ref">
+          <label>
+            <span class="sc-hint">Relationship name</span>
+            <input class="sc-input" bind:value={referenceName} />
+          </label>
+          <label>
+            <span class="sc-hint">Target table</span>
+            <select
+              class="sc-select"
+              value={referenceToTable ?? ''}
+              onchange={(e) => {
+                referenceToTable = Number(e.currentTarget.value);
+                referenceToField = store.fieldsByTable[referenceToTable]?.[0]?.id ?? null;
+              }}
+            >
+              {#each store.tables as table (table.id)}
+                <option value={table.id}>{table.name}</option>
+              {/each}
+            </select>
+          </label>
+          <label>
+            <span class="sc-hint">Target field</span>
+            <select
+              class="sc-select"
+              value={referenceToField ?? ''}
+              onchange={(e) => (referenceToField = Number(e.currentTarget.value))}
+              disabled={referenceFields.length === 0}
+            >
+              {#each referenceFields as target (target.id)}
+                <option value={target.id}>{target.name}</option>
+              {/each}
+            </select>
+          </label>
+        </div>
+      {/if}
+    </section>
+
     <label class="sc-micro fd-label" for="fd-notes">Notes</label>
     <textarea id="fd-notes" class="sc-textarea" rows="5" bind:value={notes}></textarea>
 
@@ -145,7 +227,7 @@
     {/if}
     <span class="fd-spacer"></span>
     <button type="button" class="sc-btn" onclick={onclose}>Cancel</button>
-    <button type="button" class="sc-btn sc-btn--primary" onclick={save} disabled={name.trim().length === 0}>Save</button>
+    <button type="button" class="sc-btn sc-btn--primary" onclick={save} disabled={name.trim().length === 0 || !referenceValid}>Save</button>
   </footer>
 </aside>
 
@@ -263,6 +345,18 @@
     margin-top: 8px;
   }
   .fd-range label {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .fd-ref {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 8px;
+  }
+  .fd-ref label {
     min-width: 0;
     display: flex;
     flex-direction: column;

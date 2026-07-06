@@ -241,8 +241,6 @@ export class EditorDoc {
   /** Active Create-zone tool (#62). `pointer` is select/drag; any other value arms
    * the canvas to place that kind on the next click. */
   #activeTool = $state<ToolKind>('pointer');
-  /** The primary field a `field`-tool placement binds (legacy single-select path). */
-  #toolFieldId = $state<number | null>(null);
   /** All fields the rail's `field` tool should place as a batch. */
   #toolFieldIds = $state<number[]>([]);
   /** Whether a field placement should also create a static label object. */
@@ -833,10 +831,6 @@ export class EditorDoc {
     return this.#activeTool;
   }
 
-  get toolFieldId(): number | null {
-    return this.#toolFieldId;
-  }
-
   get toolFieldIds(): readonly number[] {
     return this.#toolFieldIds;
   }
@@ -851,7 +845,6 @@ export class EditorDoc {
     this.#activeTool = tool;
     const ids = tool === 'field' ? (Array.isArray(fieldIds) ? fieldIds.slice() : fieldIds === null ? [] : [fieldIds]) : [];
     this.#toolFieldIds = ids;
-    this.#toolFieldId = ids[0] ?? null;
     this.#toolCreateLabel = tool === 'field' ? createLabel : true;
     llog('tool', 'setTool', { tool, fieldIds: this.#toolFieldIds, createLabel: this.#toolCreateLabel });
   }

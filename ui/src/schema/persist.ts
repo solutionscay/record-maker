@@ -85,12 +85,6 @@ export const updateField = (
   options: FieldOptions,
 ): Promise<FieldView> => postJson(`/schema/tables/${tableId}/fields/${fieldId}`, { name, kind, notes, options });
 
-export const renameField = (tableId: number, fieldId: number, name: string): Promise<FieldView> =>
-  postJson(`/schema/tables/${tableId}/fields/${fieldId}/rename`, { name });
-
-export const retypeField = (tableId: number, fieldId: number, kind: FieldKind): Promise<FieldView> =>
-  postJson(`/schema/tables/${tableId}/fields/${fieldId}/retype`, { kind });
-
 export const reorderFields = (tableId: number, fieldIds: number[]): Promise<FieldView[]> =>
   postJson(`/schema/tables/${tableId}/fields/order`, { fieldIds });
 

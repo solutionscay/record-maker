@@ -251,6 +251,12 @@ export class EditorDoc {
   /** Last hydration/load error, surfaced in the editor chrome. */
   #error = $state<string | null>(null);
 
+  /** Monotonic content version: bumped by every mutation the render model
+   * reflects (document edits, hydration, session style/value refreshes). A cheap
+   * dependency for effects that must re-run when the canvas content changes but
+   * should NOT walk the whole `renderModel` to track it (App.svelte's sync). */
+  #version = $state(0);
+
   // ── presence scope (multi-user seam; no behaviour yet) ──
   readonly #presence = new SvelteMap<string, PeerPresence>();
 
@@ -329,6 +335,7 @@ export class EditorDoc {
     this.#hovered = null;
     this.#error = null;
     this.#hydrated = true;
+    this.#version++;
     llog('store', 'hydrated', {
       parts: this.#parts.length,
       objects: this.#objects.size,
@@ -356,6 +363,13 @@ export class EditorDoc {
     return this.#hydrated;
   }
 
+  /** The document-content version (see `#version`) — read it in an effect to
+   * re-run whenever the render model's content changes, without tracking the
+   * whole model. */
+  get version(): number {
+    return this.#version;
+  }
+
   /** The structural document record for one object (live geometry, etc.) — what
    * #46 reads to compute drag deltas. Read-only; mutate via the commands. */
   getObject(id: number): Readonly<ObjectDoc> | undefined {
@@ -371,14 +385,18 @@ export class EditorDoc {
     return this.#parts;
   }
 
-  /**
-   * The canvas render model — the #44 `DesignModel` shape, rebuilt from document
-   * state joined with the session render projection. Objects are ordered back→
-   * front by `(z, id)` and parts top→bottom by `(position, id)`, mirroring the
-   * engine's SQL ordering exactly, so the Svelte DOM stays byte-identical to the
-   * askama golden (the parity contract, #44). Reactive: any command re-derives it.
-   */
-  get renderModel(): DesignModel {
+  /** The memoized render model — see [`EditorDoc.renderModel`]. A `$derived.by`
+   * class field so ALL readers (canvas, inspector, interaction layer) share ONE
+   * rebuild per reactive flush instead of re-deriving on every getter read. */
+  readonly #renderModel: DesignModel = $derived.by(() => {
+    // One grouping pass over the object map (instead of a spread+filter+sort of
+    // the whole map per part), then a per-part stacking sort.
+    const byPart = new Map<number, ObjectDoc[]>();
+    for (const o of this.#objects.values()) {
+      const group = byPart.get(o.partId);
+      if (group) group.push(o);
+      else byPart.set(o.partId, [o]);
+    }
     const parts: PartView[] = this.#parts
       .slice()
       .sort((a, b) => a.position - b.position || a.id - b.id)
@@ -388,8 +406,7 @@ export class EditorDoc {
         height: p.height,
         props: p.props,
         partStyle: p.partStyle,
-        objects: [...this.#objects.values()]
-          .filter((o) => o.partId === p.id)
+        objects: (byPart.get(p.id) ?? [])
           .sort((a, b) => a.z - b.z || a.id - b.id)
           .map((o) => this.#toView(o)),
       }));
@@ -406,6 +423,18 @@ export class EditorDoc {
         .sort(([a], [b]) => a - b)
         .map(([id, objectIds]) => ({ id, objectIds: objectIds.slice() })),
     };
+  });
+
+  /**
+   * The canvas render model — the #44 `DesignModel` shape, rebuilt from document
+   * state joined with the session render projection. Objects are ordered back→
+   * front by `(z, id)` and parts top→bottom by `(position, id)`, mirroring the
+   * engine's SQL ordering exactly, so the Svelte DOM stays byte-identical to the
+   * askama golden (the parity contract, #44). Reactive AND memoized: any command
+   * invalidates it, but repeated reads within a flush share one rebuild.
+   */
+  get renderModel(): DesignModel {
+    return this.#renderModel;
   }
 
   // Key order MUST match the server's ObjectView serde output (main.rs), since
@@ -506,6 +535,7 @@ export class EditorDoc {
     const next = this.#parts.slice();
     next[i] = { ...next[i], partStyle };
     this.#parts = next;
+    this.#version++;
   }
 
   /** Set an object's appearance bag (#49 / Style zone) — the opaque `props` JSON
@@ -555,6 +585,7 @@ export class EditorDoc {
     ];
     if (positions && positions.length) this.applyPartPositions(positions);
     this.selectPart(view.id);
+    this.#version++;
     llog('store', 'addPart', { id: view.id, kind: view.kind, position });
   }
 
@@ -569,6 +600,7 @@ export class EditorDoc {
     this.#parts = this.#parts.map((p) =>
       byId.has(p.id) ? { ...p, position: byId.get(p.id)! } : p,
     );
+    this.#version++;
     llog('store', 'applyPartPositions', { list });
   }
 
@@ -585,6 +617,7 @@ export class EditorDoc {
       }
     }
     if (this.#selectedPartId === id) this.#selectedPartId = null;
+    this.#version++;
     llog('store', 'removePart', { id });
   }
 
@@ -600,6 +633,7 @@ export class EditorDoc {
       textStyle: styles.textStyle,
       shapeStyle: styles.shapeStyle,
     });
+    this.#version++;
   }
 
   /** Remove an object (#48 delete / undo of a create) as one undoable delete step.
@@ -630,6 +664,7 @@ export class EditorDoc {
       textStyle: view.textStyle,
       shapeStyle: view.shapeStyle,
     });
+    this.#version++;
   }
 
   // ── document/session bridge: durable groups (#75) ────────────────────────
@@ -925,10 +960,12 @@ export class EditorDoc {
   #set(d: Diff, value: Primitive | ObjectSnapshot | GroupSnapshot | null): void {
     if (d.target === 'life') {
       this.#applyLife(d.id, value as ObjectSnapshot | null);
+      this.#version++;
       return;
     }
     if (d.target === 'group') {
       this.#applyGroup(d.id, value as GroupSnapshot | null);
+      this.#version++;
       return;
     }
     if (d.target === 'object') {
@@ -942,6 +979,7 @@ export class EditorDoc {
       next[i] = { ...next[i], [d.prop]: value } as PartDoc;
       this.#parts = next;
     }
+    this.#version++;
   }
 
   /** Apply a `life` diff: a `null` snapshot deletes the object (and drops its

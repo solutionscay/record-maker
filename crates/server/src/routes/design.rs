@@ -16,9 +16,10 @@ use record_maker_engine::{
 
 use crate::style::{object_style, shape_style, text_style};
 use crate::viewmodel::{
-    by_name_for_rec, by_name_map, clamp_rec, layout_canvas_width, layout_table, object_view,
-    object_view_for_rec, part_view, related_route_choices, render_part, updated_object_view,
-    updated_part_view, FieldChoice, ObjectView, PartView, RelatedRouteChoice,
+    by_name_for_rec, by_name_map, canvas_width, clamp_rec, layout_parts_with_objects,
+    layout_table, object_view, part_view, related_route_choices, render_part_with_objects,
+    updated_object_view, updated_part_view, FieldChoice, ObjectView, PartView,
+    RelatedRouteChoice,
 };
 use crate::{not_found, AppError, AppResult, AppState};
 
@@ -26,10 +27,10 @@ use crate::{not_found, AppError, AppResult, AppState};
 /// labels + live values for record `?rec=N` (1-based; defaults to the first
 /// record, blank values when the table is empty — geometry is record-independent,
 /// so an empty table still has a designable canvas). The Svelte canvas renders
-/// from this over the same axum contract Browse uses (ADR #42). `render_part` is
-/// the single server-side resolver shared with Browse, so values/bindings can
-/// never diverge between the two surfaces; only the DOM emission is mirrored
-/// client-side (and guarded by a parity test).
+/// from this over the same axum contract Browse uses (ADR #42).
+/// `render_part_with_objects` is the single server-side resolver shared with
+/// Browse, so values/bindings can never diverge between the two surfaces; only
+/// the DOM emission is mirrored client-side (and guarded by a parity test).
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DesignModel {
@@ -91,11 +92,12 @@ pub(crate) async fn design_model(
     } else {
         HashMap::new()
     };
-    let parts = sol
-        .parts(layout_id)
-        .unwrap()
+    // One parts+objects fetch feeds both the rendered parts and the width.
+    let parts_objects = layout_parts_with_objects(&sol, layout_id);
+    let width = canvas_width(&parts_objects);
+    let parts = parts_objects
         .iter()
-        .map(|p| render_part(&sol, p, &by_name))
+        .map(|(p, objects)| render_part_with_objects(p, objects, &by_name))
         .collect();
     let field_choices = fields
         .iter()
@@ -109,7 +111,7 @@ pub(crate) async fn design_model(
         layout_id,
         rec,
         total,
-        width: layout_canvas_width(&sol, layout_id),
+        width,
         view: lay.view.clone(),
         fields: field_choices,
         related_routes: related_route_choices(&sol, &table),
@@ -426,11 +428,10 @@ pub(crate) async fn create_design_object(
 
     // Re-read the freshly inserted rows and project them exactly as the model
     // would, so the store's added object is byte-identical to a model fetch.
-    let part_objs = sol.objects(body.part_id).unwrap();
     let views: Vec<ObjectView> = created_ids
         .iter()
-        .filter_map(|id| part_objs.iter().find(|o| o.id == *id))
-        .map(|o| object_view(o, &by_name))
+        .filter_map(|id| sol.object_by_id(layout_id, *id).unwrap())
+        .map(|o| object_view(&o, &by_name))
         .collect();
     Ok(Json(views))
 }
@@ -472,9 +473,9 @@ pub(crate) async fn restore_design_objects(
     Json(body): Json<RestoreObjectsBody>,
 ) -> AppResult<Json<Vec<ObjectView>>> {
     let mut sol = st.sol.lock().unwrap();
-    if layout_table(&sol, layout_id).is_none() {
+    let Some((_lay, table)) = layout_table(&sol, layout_id) else {
         return Err(AppError::no_such_layout(layout_id));
-    }
+    };
     let mut restores = Vec::with_capacity(body.objects.len());
     for o in &body.objects {
         let kind =
@@ -499,11 +500,14 @@ pub(crate) async fn restore_design_objects(
         RestoreResult::PartNotFound => return Err(AppError::not_found()),
         RestoreResult::IdInUse => return Err(AppError::conflict("id in use")),
     }
-    let rec = body.rec;
+    // The record projection is identical for every restored object, so resolve
+    // the fields + record once instead of per object.
+    let fields = sol.fields(table.id).unwrap();
+    let by_name = by_name_for_rec(&sol, &table, &fields, body.rec);
     let mut views = Vec::with_capacity(restores.len());
     for o in &restores {
-        match object_view_for_rec(&sol, layout_id, o.id, rec) {
-            Some(v) => views.push(v),
+        match sol.object_by_id(layout_id, o.id).unwrap() {
+            Some(object) => views.push(object_view(&object, &by_name)),
             None => return Err(AppError::not_found()),
         }
     }
@@ -678,6 +682,21 @@ pub(crate) async fn delete_design_object(
         return Err(AppError::not_found());
     }
     Ok(StatusCode::OK)
+}
+
+/// Delete several objects from a layout in one transaction — the bulk sibling
+/// of [`delete_design_object`], mirroring [`update_objects_geometry`]: the
+/// canvas POSTs `[id, …]` for a multi-delete/cut. Always 200 (unknown ids are
+/// simply skipped); the body is the count actually removed, so the client can
+/// detect a stale selection.
+pub(crate) async fn delete_design_objects(
+    State(st): State<AppState>,
+    Path(layout_id): Path<i64>,
+    Json(ids): Json<Vec<i64>>,
+) -> impl IntoResponse {
+    let mut sol = st.sol.lock().unwrap();
+    let removed = sol.delete_objects(layout_id, &ids).unwrap();
+    (StatusCode::OK, removed.to_string()).into_response()
 }
 
 /// The appearance bag the Style zone commits (#49) — an opaque JSON object the

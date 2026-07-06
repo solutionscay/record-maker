@@ -101,22 +101,34 @@ pub(crate) fn flipbook(
     }
 }
 
+/// A table's per-view sibling layouts drawn from an already-fetched layout list,
+/// in id order — the in-memory equivalent of `Solution::layouts_for_table`, so
+/// chrome/stepper construction runs one `layouts()` query instead of one per
+/// table.
+fn layouts_for_table_in(layouts: &[LayoutMeta], table_id: i64) -> Vec<&LayoutMeta> {
+    let mut siblings: Vec<&LayoutMeta> = layouts
+        .iter()
+        .filter(|l| l.table_id == table_id)
+        .collect();
+    siblings.sort_by_key(|l| l.id);
+    siblings
+}
+
 /// Build the Layout-mode stepper: prev/next steps through the **logical layouts**
 /// (one per table, in picker order) while holding the current view, so the
 /// designer flips between layouts the way the record stepper flips records (#57).
 /// In Layout mode the pagination control navigates layouts, not records.
-pub(crate) fn layout_stepper(sol: &Solution, current: &LayoutMeta) -> Option<Flipbook> {
+/// `layouts` is the full layout list (name order), fetched once by the caller
+/// and shared with [`Chrome::build_with_layouts`].
+pub(crate) fn layout_stepper(layouts: &[LayoutMeta], current: &LayoutMeta) -> Option<Flipbook> {
     let view = canonical_view(&current.view);
     // Each table (its Form layout is the canonical handle) → that table's layout
     // for the CURRENT view, so stepping holds the view axis steady.
-    let steps: Vec<i64> = sol
-        .layouts()
-        .unwrap_or_default()
-        .into_iter()
+    let steps: Vec<i64> = layouts
+        .iter()
         .filter(|l| l.view == "form")
         .filter_map(|l| {
-            sol.layouts_for_table(l.table_id)
-                .ok()?
+            layouts_for_table_in(layouts, l.table_id)
                 .into_iter()
                 .find(|s| s.view == view)
                 .map(|s| s.id)
@@ -176,26 +188,32 @@ impl Chrome {
     /// so the view toggle switches among sibling layout ids and the picker lists
     /// one entry per table (its Form layout is the canonical handle).
     pub(crate) fn build(sol: &Solution, mode: &'static str, current: Option<&LayoutMeta>) -> Self {
+        Self::build_with_layouts(&sol.layouts().unwrap_or_default(), mode, current)
+    }
+
+    /// [`Chrome::build`] over an already-fetched layout list, so a handler that
+    /// also needs the list for the [`layout_stepper`] fetches it once.
+    pub(crate) fn build_with_layouts(
+        all: &[LayoutMeta],
+        mode: &'static str,
+        current: Option<&LayoutMeta>,
+    ) -> Self {
         let current_table = current.map(|c| c.table_id);
-        let layouts = sol
-            .layouts()
-            .map(|ls| {
-                ls.into_iter()
-                    .filter(|l| l.view == "form")
-                    .map(|l| LayoutLink {
-                        selected: current_table == Some(l.table_id),
-                        id: l.id,
-                        name: l.name,
-                    })
-                    .collect()
+        let layouts = all
+            .iter()
+            .filter(|l| l.view == "form")
+            .map(|l| LayoutLink {
+                selected: current_table == Some(l.table_id),
+                id: l.id,
+                name: l.name.clone(),
             })
-            .unwrap_or_default();
+            .collect();
         // The view toggle switches among the current table's per-view sibling
         // layouts — each view is its own layout id now. It stays in the current
         // mode, so Layout mode can design each view (Browse browses each).
         let view_tabs = match current {
             Some(cur) => {
-                let siblings = sol.layouts_for_table(cur.table_id).unwrap_or_default();
+                let siblings = layouts_for_table_in(all, cur.table_id);
                 VIEWS
                     .iter()
                     .filter_map(|&v| {
@@ -475,32 +493,43 @@ pub(crate) fn by_name_for_rec(
     fields: &[FieldMeta],
     rec: Option<i64>,
 ) -> HashMap<String, (i64, String, String, FieldKind)> {
-    let ids = sol.record_ids(table).unwrap();
-    let rec = clamp_rec_n(rec, ids.len() as i64);
+    // COUNT + LIMIT/OFFSET instead of materialising the whole found set: this
+    // runs on every small object mutation, which only needs the one record.
+    let total = sol.record_count(table).unwrap();
+    let rec = clamp_rec_n(rec, total);
     if rec < 1 {
         return HashMap::new();
     }
-    match sol
-        .get_record(table, fields, ids[(rec - 1) as usize])
-        .unwrap()
-    {
+    let Some(id) = sol.record_id_at(table, rec).unwrap() else {
+        return HashMap::new();
+    };
+    match sol.get_record(table, fields, id).unwrap() {
         Some(cells) => by_name_map(fields, cells),
         None => HashMap::new(),
     }
 }
 
-/// Resolve one object into its `ObjectView` (#44/#60), bound against `by_name`.
-/// The single per-object projection shared by [`render_part`] and the create
-/// handler, so an object placed on the canvas serialises byte-identically to one
-/// read back from the model — there is no second mapping to drift.
-pub(crate) fn object_view(
-    o: &ObjectMeta,
-    by_name: &HashMap<String, (i64, String, String, FieldKind)>,
-) -> ObjectView {
-    let (field, field_id, label, raw_value, field_kind) = resolve_object(o, by_name);
+/// The record-independent render state of one object: its derived CSS strings,
+/// resolved content slot, and pre-parsed `format` bag. Computing these is pure
+/// projection of the object's own metadata, so per-record renders (every List
+/// row repeats the same body objects) reuse one of these instead of re-deriving
+/// styles and re-parsing props per record.
+pub(crate) struct PreparedObject {
+    meta: ObjectMeta,
+    shape: bool,
+    /// The text slot is only meaningful for `text` objects; fields/shapes carry
+    /// none, so the renderer never reads a stray content.
+    content: String,
+    object_style: String,
+    text_style: String,
+    shape_style: String,
+    /// The `format` sub-bag of the object's props (#77/#78), pre-parsed.
+    format: Option<serde_json::Value>,
+}
+
+/// Precompute an object's record-independent render state (see [`PreparedObject`]).
+pub(crate) fn prepare_object(o: ObjectMeta) -> PreparedObject {
     let shape = o.kind.is_shape();
-    // The text slot is only meaningful for `text` objects; fields/shapes carry
-    // none, so the renderer never reads a stray content.
     let content = match o.kind {
         ObjectKind::Text => o.content.clone().unwrap_or_default(),
         _ => String::new(),
@@ -511,7 +540,28 @@ pub(crate) fn object_view(
         String::new()
     };
     let object_style = object_style(o.kind, o.props.as_deref());
-    let mut text_style = text_style(o.kind, o.props.as_deref());
+    let text_style = text_style(o.kind, o.props.as_deref());
+    let format = parse_props(o.props.as_deref()).and_then(|v| v.get("format").cloned());
+    PreparedObject {
+        meta: o,
+        shape,
+        content,
+        object_style,
+        text_style,
+        shape_style,
+        format,
+    }
+}
+
+/// Project a prepared object against one record's `by_name` map — the
+/// record-dependent half of [`object_view`].
+fn prepared_object_view(
+    p: &PreparedObject,
+    by_name: &HashMap<String, (i64, String, String, FieldKind)>,
+) -> ObjectView {
+    let o = &p.meta;
+    let (field, field_id, label, raw_value, field_kind) = resolve_object(o, by_name);
+    let mut text_style = p.text_style.clone();
     // Value formatting (#77/#78) is display-only: applied to the resolved value
     // for BOTH Browse and the design canvas, driven by the `format` sub-bag of
     // the object's props and the bound field's kind. A negative-number color is
@@ -520,9 +570,7 @@ pub(crate) fn object_view(
     // binding (`field_kind == None`) leaves the placeholder untouched.
     let value = match field_kind {
         Some(kind) => {
-            let props = parse_props(o.props.as_deref());
-            let spec = props.as_ref().and_then(|v| v.get("format"));
-            let formatted = format::format_value(&raw_value, spec, kind);
+            let formatted = format::format_value(&raw_value, p.format.as_ref(), kind);
             if let Some(color) = formatted.color {
                 text_style.push_str(&format!("color:{color};"));
             }
@@ -534,7 +582,7 @@ pub(crate) fn object_view(
         id: o.id,
         kind: o.kind.as_str(),
         field,
-        shape,
+        shape: p.shape,
         field_id,
         x: o.x,
         y: o.y,
@@ -543,15 +591,26 @@ pub(crate) fn object_view(
         z: o.z,
         read_only: o.read_only,
         binding: o.binding.clone().unwrap_or_default(),
-        content,
+        content: p.content.clone(),
         props: o.props.clone().unwrap_or_default(),
-        object_style,
+        object_style: p.object_style.clone(),
         text_style,
         label,
         value,
         raw: raw_value,
-        shape_style,
+        shape_style: p.shape_style.clone(),
     }
+}
+
+/// Resolve one object into its `ObjectView` (#44/#60), bound against `by_name`.
+/// The single per-object projection shared by [`render_part`] and the create
+/// handler, so an object placed on the canvas serialises byte-identically to one
+/// read back from the model — there is no second mapping to drift.
+pub(crate) fn object_view(
+    o: &ObjectMeta,
+    by_name: &HashMap<String, (i64, String, String, FieldKind)>,
+) -> ObjectView {
+    prepared_object_view(&prepare_object(o.clone()), by_name)
 }
 
 pub(crate) fn object_view_for_rec(
@@ -627,6 +686,40 @@ pub(crate) fn related_route_choices(sol: &Solution, table: &TableMeta) -> Vec<Re
         .collect()
 }
 
+/// All of a layout's parts with their objects, fetched once (position order,
+/// objects in stacking order). The shared prefetch for handlers that would
+/// otherwise re-query the same parts/objects several times per request.
+pub(crate) fn layout_parts_with_objects(
+    sol: &Solution,
+    layout_id: i64,
+) -> Vec<(PartMeta, Vec<ObjectMeta>)> {
+    sol.parts(layout_id)
+        .unwrap()
+        .into_iter()
+        .map(|p| {
+            let objects = sol.objects(p.id).unwrap();
+            (p, objects)
+        })
+        .collect()
+}
+
+/// Render one part from prefetched objects — [`render_part`]'s core, for
+/// callers that already hold the layout's parts+objects.
+pub(crate) fn render_part_with_objects(
+    part: &PartMeta,
+    objects: &[ObjectMeta],
+    by_name: &HashMap<String, (i64, String, String, FieldKind)>,
+) -> PartView {
+    PartView {
+        id: part.id,
+        kind: part.kind.as_str(),
+        height: part.height,
+        props: part.props.clone().unwrap_or_default(),
+        part_style: part_style(part.props.as_deref()),
+        objects: objects.iter().map(|o| object_view(o, by_name)).collect(),
+    }
+}
+
 /// Render one part's objects, positioned and bound against `by_name` (an empty
 /// map leaves field values blank — used for header/footer with no record).
 pub(crate) fn render_part(
@@ -634,19 +727,51 @@ pub(crate) fn render_part(
     part: &PartMeta,
     by_name: &HashMap<String, (i64, String, String, FieldKind)>,
 ) -> PartView {
-    let objects = sol
-        .objects(part.id)
-        .unwrap()
-        .iter()
-        .map(|o| object_view(o, by_name))
-        .collect();
-    PartView {
+    render_part_with_objects(part, &sol.objects(part.id).unwrap(), by_name)
+}
+
+/// A part with its objects' record-independent render state precomputed, so a
+/// per-record render (List view repeats the body band for every record) only
+/// re-resolves the bound values instead of re-querying objects and re-deriving
+/// their CSS each time.
+pub(crate) struct PreparedPart {
+    id: i64,
+    kind: &'static str,
+    height: i64,
+    props: String,
+    part_style: String,
+    objects: Vec<PreparedObject>,
+}
+
+/// Precompute a part's record-independent render state from prefetched objects.
+pub(crate) fn prepare_part(part: &PartMeta, objects: Vec<ObjectMeta>) -> PreparedPart {
+    PreparedPart {
         id: part.id,
         kind: part.kind.as_str(),
         height: part.height,
         props: part.props.clone().unwrap_or_default(),
         part_style: part_style(part.props.as_deref()),
-        objects,
+        objects: objects.into_iter().map(prepare_object).collect(),
+    }
+}
+
+/// Render a prepared part against one record's `by_name` map. Emits the same
+/// `PartView` as [`render_part`], minus the per-record re-derivation.
+pub(crate) fn render_prepared_part(
+    prep: &PreparedPart,
+    by_name: &HashMap<String, (i64, String, String, FieldKind)>,
+) -> PartView {
+    PartView {
+        id: prep.id,
+        kind: prep.kind,
+        height: prep.height,
+        props: prep.props.clone(),
+        part_style: prep.part_style.clone(),
+        objects: prep
+            .objects
+            .iter()
+            .map(|p| prepared_object_view(p, by_name))
+            .collect(),
     }
 }
 
@@ -681,12 +806,13 @@ pub(crate) fn updated_part_view(
     Ok(Json(part_view(&part)))
 }
 
-/// Canvas width for a layout: the rightmost object edge + a margin. Geometry is
-/// record-independent, so this is the same for every record (Form and List).
-pub(crate) fn layout_canvas_width(sol: &Solution, layout_id: i64) -> i64 {
+/// Canvas width for a layout, from its prefetched parts+objects
+/// ([`layout_parts_with_objects`]): the rightmost object edge + a margin.
+/// Geometry is record-independent, so this is the same for every record.
+pub(crate) fn canvas_width(parts: &[(PartMeta, Vec<ObjectMeta>)]) -> i64 {
     let mut w = 0i64;
-    for p in sol.parts(layout_id).unwrap() {
-        for o in sol.objects(p.id).unwrap() {
+    for (_p, objects) in parts {
+        for o in objects {
             w = w.max(o.x + o.w);
         }
     }
@@ -719,22 +845,22 @@ pub(crate) fn build_form_record(
     Some(FormRecord { id, parts })
 }
 
-/// Build the List-view render: header/footer parts once, the Body part(s)
-/// repeated per record bound to its values. `current_rec` (1-based) marks the
-/// flipbook's row. Returns `(header, rows, footer)`.
-/// The header and footer bands of a layout, rendered once with no record bound.
-/// Shared by List and Table Browse views so both frame their rows with the same
-/// bands: header / sub-summary render above, footer / grand-summary below.
-pub(crate) fn build_bands(sol: &Solution, layout_id: i64) -> (Vec<PartView>, Vec<PartView>) {
+/// The header and footer bands of a layout, rendered once with no record bound,
+/// from prefetched parts+objects ([`layout_parts_with_objects`]). Shared by List
+/// and Table Browse views so both frame their rows with the same bands: header /
+/// sub-summary render above, footer / grand-summary below.
+pub(crate) fn build_bands(
+    parts: &[(PartMeta, Vec<ObjectMeta>)],
+) -> (Vec<PartView>, Vec<PartView>) {
     let no_record = HashMap::new();
     let (mut header, mut footer) = (Vec::new(), Vec::new());
-    for p in sol.parts(layout_id).unwrap() {
+    for (p, objects) in parts {
         match p.kind {
             PartKind::Footer | PartKind::GrandSummary => {
-                footer.push(render_part(sol, &p, &no_record))
+                footer.push(render_part_with_objects(p, objects, &no_record))
             }
             PartKind::Header | PartKind::SubSummary => {
-                header.push(render_part(sol, &p, &no_record))
+                header.push(render_part_with_objects(p, objects, &no_record))
             }
             PartKind::Body => {}
         }
@@ -742,34 +868,35 @@ pub(crate) fn build_bands(sol: &Solution, layout_id: i64) -> (Vec<PartView>, Vec
     (header, footer)
 }
 
+/// Build the List-view render: header/footer parts once, the Body part(s)
+/// repeated per record bound to its values. `current_rec` (1-based) marks the
+/// flipbook's row. Returns `(header, rows, footer)`. Parts+objects are fetched
+/// once and the body bands' record-independent state is precomputed, so the
+/// per-record loop only resolves values (one bulk record fetch, no N+1).
 pub(crate) fn build_list(
     sol: &Solution,
     layout_id: i64,
     table: &TableMeta,
     fields: &[FieldMeta],
-    ids: &[i64],
     current_rec: i64,
 ) -> (Vec<PartView>, Vec<ListRow>, Vec<PartView>) {
-    let (header, footer) = build_bands(sol, layout_id);
-    let body_parts: Vec<_> = sol
-        .parts(layout_id)
-        .unwrap()
+    let parts = layout_parts_with_objects(sol, layout_id);
+    let (header, footer) = build_bands(&parts);
+    let body_parts: Vec<PreparedPart> = parts
         .into_iter()
-        .filter(|p| p.kind == PartKind::Body)
+        .filter(|(p, _)| p.kind == PartKind::Body)
+        .map(|(p, objects)| prepare_part(&p, objects))
         .collect();
 
     let mut rows = Vec::new();
-    for (i, &id) in ids.iter().enumerate() {
-        let Some(cells) = sol.get_record(table, fields, id).unwrap() else {
-            continue;
-        };
-        let by_name = by_name_map(fields, cells);
+    for (i, r) in sol.list_records(table, fields).unwrap().into_iter().enumerate() {
+        let by_name = by_name_map(fields, r.cells);
         let parts = body_parts
             .iter()
-            .map(|p| render_part(sol, p, &by_name))
+            .map(|p| render_prepared_part(p, &by_name))
             .collect();
         rows.push(ListRow {
-            id,
+            id: r.id,
             current: (i as i64) + 1 == current_rec,
             parts,
         });
@@ -778,13 +905,13 @@ pub(crate) fn build_list(
 }
 
 /// Map each table column to its value-format bag (the `format` sub-object of a
-/// field object's props) drawn from `layout_id`'s objects. Table columns are
-/// field-derived, so a column formats iff the layout holds a field object bound
-/// to it that carries a `format` bag; later objects win on a duplicate binding.
-/// Form/List format per-object via [`object_view`]; this brings Table to parity.
+/// field object's props) drawn from the layout's prefetched parts+objects
+/// ([`layout_parts_with_objects`]). Table columns are field-derived, so a column
+/// formats iff the layout holds a field object bound to it that carries a
+/// `format` bag; later objects win on a duplicate binding. Form/List format
+/// per-object via [`object_view`]; this brings Table to parity.
 pub(crate) fn layout_field_formats(
-    sol: &Solution,
-    layout_id: i64,
+    parts: &[(PartMeta, Vec<ObjectMeta>)],
     fields: &[FieldMeta],
 ) -> HashMap<i64, serde_json::Value> {
     let by_name: HashMap<String, i64> = fields
@@ -792,13 +919,7 @@ pub(crate) fn layout_field_formats(
         .map(|f| (f.name.to_lowercase(), f.id))
         .collect();
     let mut map = HashMap::new();
-    let Ok(parts) = sol.parts(layout_id) else {
-        return map;
-    };
-    for p in parts {
-        let Ok(objects) = sol.objects(p.id) else {
-            continue;
-        };
+    for (_p, objects) in parts {
         for o in objects {
             let Some(binding) = o.binding.as_deref() else {
                 continue;

@@ -26,6 +26,7 @@ import {
   createObject,
   createObjectGroup,
   deleteObject,
+  deleteObjects,
   deleteObjectGroup,
   setObjectContent,
   setObjectPart,
@@ -127,6 +128,13 @@ export class CanvasInteraction {
   #rotateStartLength = 0;
   #dirtyLineProps = new Set<number>();
   #gestureIdentity: IdentitySnapshot | null = null;
+  /** Cached paint-order identity snapshot for NON-gesture lookups (hover
+   * pointermove, click/selection id resolution). Built lazily on first use and
+   * invalidated by `refresh()` — App.svelte's sync effect calls that after every
+   * render-model change, i.e. whenever the canvas DOM / paint order can differ —
+   * so a mouse move no longer rebuilds the full querySelectorAll + paint order
+   * per event. Gestures still pin their own start-of-gesture snapshot. */
+  #identityCache: IdentitySnapshot | null = null;
   #pendingObjectClick: PendingObjectClick | null = null;
 
   constructor(stage: HTMLElement, doc: EditorDoc, layoutId: string) {
@@ -373,6 +381,9 @@ export class CanvasInteraction {
   /** Reconcile moveable's target with the store selection (called reactively when
    * selection or geometry changes — e.g. after an undo). No-op during a gesture. */
   refresh(): void {
+    // The render model (and thus the canvas DOM) may have changed — drop the
+    // cached paint-order snapshot so the next lookup re-reads the fresh DOM.
+    this.#identityCache = null;
     this.#updateTarget(true);
     // Geometry-only changes (align/distribute/resize-match, undo/redo of same)
     // keep the same selected ids but move the DOM boxes underneath moveable.
@@ -966,7 +977,8 @@ export class CanvasInteraction {
     this.#deleting = true;
     llog('persist', 'delete selected object(s)', { ids });
     try {
-      await Promise.all(ids.map((id) => deleteObject(this.#layoutId, id)));
+      // One bulk POST (transactional server-side) instead of one per object.
+      await deleteObjects(this.#layoutId, ids);
       for (const id of ids) this.#doc.removeObject(id);
       this.#doc.mark();
       this.#setHover(null);
@@ -1247,7 +1259,9 @@ export class CanvasInteraction {
       if (c.clip.readOnly !== c.view.readOnly) roItems.push({ id: c.view.id, readOnly: c.clip.readOnly });
     }
     if (zItems.length) await setObjectsZ(this.#layoutId, zItems);
-    for (const r of roItems) await setObjectReadOnly(this.#layoutId, r.id, r.readOnly, this.#doc.rec);
+    // Read-only flags are independent per object — persist them in parallel
+    // instead of a sequential await loop.
+    await Promise.all(roItems.map((r) => setObjectReadOnly(this.#layoutId, r.id, r.readOnly, this.#doc.rec)));
   }
 
   // ── public clipboard surface (for a future menu / rail; zero-refactor add) ──
@@ -1870,7 +1884,7 @@ export class CanvasInteraction {
   }
 
   #currentIdentity(): IdentitySnapshot {
-    return this.#gestureIdentity ?? this.#identitySnapshot();
+    return this.#gestureIdentity ?? (this.#identityCache ??= this.#identitySnapshot());
   }
 
   /** Hit-test a client point through the FULL element stack (not just the

@@ -37,7 +37,7 @@ pub use seed::seed;
 use routes::browse::{browse, design, index, schema_page};
 use routes::design::{
     create_design_object, create_design_part, create_object_group, delete_design_object,
-    delete_design_part, delete_object_group, design_model, move_design_part,
+    delete_design_objects, delete_design_part, delete_object_group, design_model, move_design_part,
     restore_design_objects, update_object_binding, update_object_binding_path,
     update_object_content, update_object_geometry, update_object_part, update_object_props,
     update_object_read_only, update_objects_geometry, update_objects_z, update_part_height,
@@ -294,6 +294,10 @@ pub fn app(state: AppState) -> Router {
         .route("/design/:layout/object/:id/part", post(update_object_part))
         .route("/design/:layout/geometry", post(update_objects_geometry))
         .route("/design/:layout/z", post(update_objects_z))
+        .route(
+            "/design/:layout/objects/delete",
+            post(delete_design_objects),
+        )
         .route("/design/:layout/group", post(create_object_group))
         .route(
             "/design/:layout/group/:id/delete",

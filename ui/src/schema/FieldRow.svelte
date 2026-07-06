@@ -3,10 +3,12 @@
   // the drag handle and explicit edit action.
   import type { FieldView } from './types';
   import { kindIcon, kindLabel } from './types';
+  import type { FieldBadgeInfo } from './fieldBadges';
   import Icon from '../lib/Icon.svelte';
 
   let {
     field,
+    badges,
     reorderable,
     active,
     dragging,
@@ -19,6 +21,7 @@
     ondragendrow,
   }: {
     field: FieldView;
+    badges: FieldBadgeInfo | null;
     reorderable: boolean;
     active: boolean;
     dragging: boolean;
@@ -32,7 +35,6 @@
   } = $props();
 
   let rowEl: HTMLDivElement;
-  const isPrimary = $derived(field.options?.validation?.primary === true);
 
   function onDragStart(e: DragEvent) {
     if (!reorderable) return;
@@ -86,12 +88,29 @@
 
   <span class="fg-name-cell">
     <span class="fg-name">{field.name}</span>
-    {#if isPrimary}<span class="fg-badge" title="Primary ID">ID</span>{/if}
   </span>
 
   <span class="fg-type">
     <Icon name={kindIcon(field.kind)} />
     <span>{kindLabel(field.kind)}</span>
+  </span>
+
+  <span class="fg-settings">
+    {#if badges?.primary}
+      <span class="fg-badge fg-badge--primary" title="Primary ID">ID</span>
+    {/if}
+    {#if badges?.required}
+      <span class="fg-badge fg-badge--required" title="Required">REQ</span>
+    {/if}
+    {#if badges?.unique}
+      <span class="fg-badge fg-badge--unique" title="Unique">UNIQ</span>
+    {/if}
+    {#if badges && badges.keyNames.length > 0}
+      <span class="fg-badge" title={`Referenced by ${badges.keyNames.join(', ')}`}>KEY</span>
+    {/if}
+    {#if badges && badges.fkNames.length > 0}
+      <span class="fg-badge fg-badge--fk" title={`References ${badges.fkNames.join(', ')}`}>FK</span>
+    {/if}
   </span>
 
   <span class="fg-notes" title={field.notes || 'No notes'}>{field.notes || 'No notes'}</span>
@@ -189,6 +208,13 @@
     font-weight: 600;
     color: var(--rm-text);
   }
+  .fg-settings {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+  }
   .fg-badge {
     flex: none;
     height: 18px;
@@ -202,6 +228,26 @@
     font-weight: 700;
     line-height: 17px;
     text-align: center;
+  }
+  .fg-badge--primary {
+    border-color: transparent;
+    background: rgba(255, 159, 10, 0.16);
+    color: #8a5a00;
+  }
+  .fg-badge--required {
+    border-color: transparent;
+    background: rgba(255, 69, 58, 0.12);
+    color: var(--rm-danger);
+  }
+  .fg-badge--unique {
+    border-color: transparent;
+    background: rgba(175, 82, 222, 0.12);
+    color: #7a2fa0;
+  }
+  .fg-badge--fk {
+    border-color: transparent;
+    background: rgba(52, 199, 89, 0.14);
+    color: #247a38;
   }
   .fg-type {
     display: inline-flex;

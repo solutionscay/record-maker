@@ -13,6 +13,7 @@
   import '@xyflow/svelte/dist/style.css';
   import type { SchemaStore } from './store.svelte';
   import Icon from '../lib/Icon.svelte';
+  import { fieldBadgeInfo } from './fieldBadges';
   import SchemaRelationshipEdge, { type SchemaRelationshipEdgeData } from './SchemaRelationshipEdge.svelte';
   import SchemaTableNode, { type SchemaGraphField, type SchemaTableNodeData } from './SchemaTableNode.svelte';
   import type { RelationshipView, TableView } from './types';
@@ -31,14 +32,6 @@
     onfield: (id: number, tableId?: number) => void;
   } = $props();
 
-  function tableName(id: number): string {
-    return store.tableById(id)?.name ?? 'Missing table';
-  }
-
-  function fieldName(tableId: number, fieldId: number): string {
-    return store.fieldById(tableId, fieldId)?.name ?? 'Missing field';
-  }
-
   const canCreate = $derived(store.tables.some((t) => (store.fieldsByTable[t.id] ?? []).length > 0));
 
   const nodeTypes: NodeTypes = { schemaTable: SchemaTableNode };
@@ -52,20 +45,12 @@
   }
 
   function fieldRows(table: TableView): SchemaGraphField[] {
-    return (store.fieldsByTable[table.id] ?? []).map((field) => {
-      const from = store.relationships.filter((r) => r.fromTable === table.id && r.fromField === field.id);
-      const to = store.relationships.filter((r) => r.toTable === table.id && r.toField === field.id);
-      return {
-        id: field.id,
-        name: field.name,
-        kind: field.kind,
-        primary: field.options?.validation?.primary ?? false,
-        required: field.options?.validation?.required ?? false,
-        unique: field.options?.validation?.unique ?? false,
-        fkNames: from.map((r) => `${r.name} -> ${tableName(r.toTable)}.${fieldName(r.toTable, r.toField)}`),
-        keyNames: to.map((r) => `${tableName(r.fromTable)}.${fieldName(r.fromTable, r.fromField)} -> ${r.name}`),
-      };
-    });
+    return (store.fieldsByTable[table.id] ?? []).map((field) => ({
+      id: field.id,
+      name: field.name,
+      kind: field.kind,
+      ...fieldBadgeInfo(store, table.id, field),
+    }));
   }
 
   function nodePosition(index: number): { x: number; y: number } {

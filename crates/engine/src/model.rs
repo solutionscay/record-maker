@@ -5,6 +5,7 @@ use rusqlite::params;
 use rusqlite::types::ValueRef;
 use serde_json::Value;
 
+use crate::options::{FieldReference, FieldReferenceError};
 use crate::Solution;
 
 /// Logical field type. Maps to a SQLite column affinity.
@@ -809,6 +810,9 @@ impl Solution {
 
     /// Declare a named FK relationship. Returns `None` when any referenced table
     /// or field does not exist, or when a field is not on the declared table.
+    ///
+    /// The source field's options `reference` key is stamped in the SAME
+    /// transaction, so the options bag and the relationship row cannot disagree.
     pub fn create_relationship(
         &mut self,
         rel: &NewRelationship,
@@ -816,7 +820,11 @@ impl Solution {
         if !self.relationship_refs_are_valid(rel)? {
             return Ok(None);
         }
-        self.app.execute(
+        let source = self
+            .field_by_id(rel.from_table, rel.from_field)?
+            .context("validated source field")?;
+        let tx = self.app.transaction()?;
+        tx.execute(
             "INSERT INTO meta_relationship(name, from_table, to_table, from_field, to_field) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -827,19 +835,55 @@ impl Solution {
                 rel.to_field
             ],
         )?;
-        self.relationship_by_id(self.app.last_insert_rowid())
+        let id = tx.last_insert_rowid();
+        let saved = RelationshipMeta {
+            id,
+            name: rel.name.clone(),
+            from_table: rel.from_table,
+            to_table: rel.to_table,
+            from_field: rel.from_field,
+            to_field: rel.to_field,
+        };
+        stamp_reference(&tx, &source, Some(&saved))?;
+        tx.commit()?;
+        self.relationship_by_id(id)
     }
 
     /// Replace a relationship declaration.
+    ///
+    /// Options stay in step transactionally: the new source field's `reference`
+    /// key is stamped, and when the FK side moved, the old source field's key is
+    /// cleared — all with the row update itself.
     pub fn update_relationship(
         &mut self,
         id: i64,
         rel: &NewRelationship,
     ) -> Result<Option<RelationshipMeta>> {
-        if self.relationship_by_id(id)?.is_none() || !self.relationship_refs_are_valid(rel)? {
+        let Some(old) = self.relationship_by_id(id)? else {
+            return Ok(None);
+        };
+        if !self.relationship_refs_are_valid(rel)? {
             return Ok(None);
         }
-        self.app.execute(
+        let source = self
+            .field_by_id(rel.from_table, rel.from_field)?
+            .context("validated source field")?;
+        let moved = (old.from_table, old.from_field) != (rel.from_table, rel.from_field);
+        let old_source = if moved {
+            self.field_by_id(old.from_table, old.from_field)?
+        } else {
+            None
+        };
+        let saved = RelationshipMeta {
+            id,
+            name: rel.name.clone(),
+            from_table: rel.from_table,
+            to_table: rel.to_table,
+            from_field: rel.from_field,
+            to_field: rel.to_field,
+        };
+        let tx = self.app.transaction()?;
+        tx.execute(
             "UPDATE meta_relationship \
              SET name=?1, from_table=?2, to_table=?3, from_field=?4, to_field=?5 \
              WHERE id=?6",
@@ -852,14 +896,80 @@ impl Solution {
                 id
             ],
         )?;
+        if let Some(old_source) = &old_source {
+            stamp_reference(&tx, old_source, None)?;
+        }
+        stamp_reference(&tx, &source, Some(&saved))?;
+        tx.commit()?;
         self.relationship_by_id(id)
     }
 
-    /// Delete a declared relationship by id.
-    pub fn delete_relationship(&self, id: i64) -> Result<usize> {
-        Ok(self
-            .app
-            .execute("DELETE FROM meta_relationship WHERE id=?1", params![id])?)
+    /// Delete a declared relationship by id, clearing the source field's options
+    /// `reference` key in the same transaction.
+    pub fn delete_relationship(&mut self, id: i64) -> Result<usize> {
+        let Some(old) = self.relationship_by_id(id)? else {
+            return Ok(0);
+        };
+        let source = self.field_by_id(old.from_table, old.from_field)?;
+        let tx = self.app.transaction()?;
+        let n = tx.execute("DELETE FROM meta_relationship WHERE id=?1", params![id])?;
+        if let Some(source) = &source {
+            stamp_reference(&tx, source, None)?;
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// Atomically align a field's reference constraint with the relationship
+    /// store (#128 theme D): upsert the field's relationship row when `reference`
+    /// is `Some` (first existing relationship from the field wins, matching the
+    /// schema surface's read side), or delete it when `None` — each leg keeps
+    /// the options `reference` key in step within one transaction, so a
+    /// mid-sequence failure cannot leave the two sides disagreeing.
+    ///
+    /// Returns the saved relationship (`None` when the reference was cleared).
+    /// Fails with a downcastable [`crate::FieldReferenceError`] when the source
+    /// or target field does not exist.
+    pub fn set_field_reference(
+        &mut self,
+        table_id: i64,
+        field_id: i64,
+        reference: Option<&FieldReference>,
+    ) -> Result<Option<RelationshipMeta>> {
+        if self.field_by_id(table_id, field_id)?.is_none() {
+            bail!(FieldReferenceError::SourceFieldMissing);
+        }
+        let existing = self
+            .relationships_from_table(table_id)?
+            .into_iter()
+            .find(|r| r.from_field == field_id);
+        let Some(reference) = reference else {
+            if let Some(rel) = existing {
+                self.delete_relationship(rel.id)?;
+            }
+            return Ok(None);
+        };
+        if self
+            .field_by_id(reference.to_table, reference.to_field)?
+            .is_none()
+        {
+            bail!(FieldReferenceError::TargetFieldMissing);
+        }
+        let rel = NewRelationship {
+            name: reference.name.clone(),
+            from_table: table_id,
+            to_table: reference.to_table,
+            from_field: field_id,
+            to_field: reference.to_field,
+        };
+        let saved = match existing {
+            Some(existing) => self.update_relationship(existing.id, &rel)?,
+            None => self.create_relationship(&rel)?,
+        };
+        match saved {
+            Some(rel) => Ok(Some(rel)),
+            None => bail!(FieldReferenceError::RelationshipFieldsMissing),
+        }
     }
 
     fn relationship_refs_are_valid(&self, rel: &NewRelationship) -> Result<bool> {
@@ -896,6 +1006,26 @@ impl Solution {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// Rewrite `field`'s options `reference` key inside `tx` — set from `rel`, or
+/// removed when `None`. The write shares the relationship row's transaction so
+/// both sides commit (or roll back) together.
+fn stamp_reference(
+    tx: &rusqlite::Transaction<'_>,
+    field: &FieldMeta,
+    rel: Option<&RelationshipMeta>,
+) -> Result<()> {
+    let options = field.options_value();
+    let options = match rel {
+        Some(rel) => crate::options::with_reference(options, rel),
+        None => crate::options::without_reference(options),
+    };
+    tx.execute(
+        "UPDATE meta_field SET options=?1 WHERE id=?2",
+        params![serde_json::to_string(&options)?, field.id],
+    )?;
+    Ok(())
 }
 
 fn relationship_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RelationshipMeta> {

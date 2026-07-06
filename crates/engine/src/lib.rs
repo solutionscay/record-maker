@@ -11,6 +11,7 @@ pub mod data;
 pub mod db;
 pub mod layout;
 pub mod model;
+pub mod options;
 pub mod schema;
 
 pub use data::Record;
@@ -22,4 +23,7 @@ pub use layout::{
 pub use model::{
     FieldKind, FieldMeta, NewField, NewRelationship, NewValueList, RelationshipMeta, TableMeta,
     ValueListItem, ValueListMeta,
+};
+pub use options::{
+    FieldOptions, FieldReference, FieldReferenceError, RangeRule, ValidationError, ValidationRules,
 };

@@ -85,7 +85,12 @@ impl Solution {
 
     /// Insert a row. `values` are `(field, string-value)` pairs; SQLite type
     /// affinity converts the strings into each column's type.
+    ///
+    /// Every field's validation rules (required / unique / range /
+    /// member-of-value-list — see [`crate::options`]) are enforced first; a
+    /// rejected write fails with a downcastable [`crate::ValidationError`].
     pub fn insert_record(&self, table: &TableMeta, values: &[(&FieldMeta, String)]) -> Result<i64> {
+        self.validate_record_values(table, values, None)?;
         if values.is_empty() {
             self.data
                 .execute(&format!("INSERT INTO {} DEFAULT VALUES", table.phys), [])?;
@@ -144,12 +149,18 @@ impl Solution {
     }
 
     /// Update a row's fields by id. No-op if `values` is empty.
+    ///
+    /// Validation runs first (excluding row `id` from uniqueness); a rejected
+    /// write fails with a downcastable [`crate::ValidationError`]. Note that a
+    /// required field missing from `values` fails validation even though the
+    /// write would not have touched it — commits submit the full record.
     pub fn update_record(
         &self,
         table: &TableMeta,
         id: i64,
         values: &[(&FieldMeta, String)],
     ) -> Result<()> {
+        self.validate_record_values(table, values, Some(id))?;
         if values.is_empty() {
             return Ok(());
         }

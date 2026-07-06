@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Redirect},
 };
 
-use crate::validate::{collect_values, validate_record_values};
+use crate::validate::{collect_values, validation_message};
 use crate::viewmodel::{clamp_rec, layout_table, view_param};
 use crate::AppState;
 
@@ -25,10 +25,13 @@ pub(crate) async fn create_record(
         if let Some((lay, table)) = layout_table(&sol, layout_id) {
             let fields = sol.fields(table.id).unwrap();
             let values = collect_values(&fields, &form);
-            if let Err(msg) = validate_record_values(&sol, &table, &fields, &values, None) {
+            // Validation is enforced inside the engine's insert; a rejected
+            // write surfaces here as the same 400 + message as always.
+            let inserted = sol.insert_record(&table, &values);
+            if let Some(msg) = validation_message(&inserted) {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
-            sol.insert_record(&table, &values).unwrap();
+            inserted.unwrap();
             // Land on the new record: it sorts last by id (record_ids is ORDER BY id).
             let total = sol.record_ids(&table).unwrap().len();
             let view = view_param(&form, &lay.view);
@@ -52,10 +55,13 @@ pub(crate) async fn save_record(
         if let Some((lay, table)) = layout_table(&sol, layout_id) {
             let fields = sol.fields(table.id).unwrap();
             let values = collect_values(&fields, &form);
-            if let Err(msg) = validate_record_values(&sol, &table, &fields, &values, Some(id)) {
+            // Validation is enforced inside the engine's update; a rejected
+            // write surfaces here as the same 400 + message as always.
+            let saved = sol.update_record(&table, id, &values);
+            if let Some(msg) = validation_message(&saved) {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
-            sol.update_record(&table, id, &values).unwrap();
+            saved.unwrap();
             st.locks.lock().unwrap().remove(&(table.id, id));
             let view = view_param(&form, &lay.view);
             let rec = clamp_rec(&form, sol.record_ids(&table).unwrap().len() as i64);

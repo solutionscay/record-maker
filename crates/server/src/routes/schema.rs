@@ -8,12 +8,12 @@ use axum::{
     Json,
 };
 use record_maker_engine::{
-    FieldKind, FieldMeta, NewField, NewRelationship, NewValueList, RelationshipMeta, Solution,
-    TableMeta, ValueListItem, ValueListMeta,
+    options::with_reference, FieldKind, FieldMeta, FieldReference, FieldReferenceError, NewField,
+    NewRelationship, NewValueList, RelationshipMeta, Solution, TableMeta, ValueListItem,
+    ValueListMeta,
 };
 use serde_json::Value;
 
-use crate::validate::field_options_value;
 use crate::{AppError, AppResult, AppState};
 
 #[derive(serde::Serialize)]
@@ -35,13 +35,6 @@ pub(crate) struct FieldSchemaView {
     kind: String,
     options: Value,
     position: i64,
-}
-
-#[derive(Clone, Debug)]
-struct ReferenceConstraint {
-    name: String,
-    to_table: i64,
-    to_field: i64,
 }
 
 #[derive(serde::Serialize)]
@@ -215,7 +208,10 @@ fn canonical_options(options: &Value) -> Result<String, &'static str> {
     serde_json::to_string(options).map_err(|_| "field options must be valid JSON")
 }
 
-fn reference_constraint(options: &Value) -> Result<Option<ReferenceConstraint>, &'static str> {
+/// Parse the posted options bag's `reference` key into the engine's typed
+/// [`FieldReference`] — the HTTP-payload-shape half of the sync; the engine
+/// owns applying it ([`Solution::set_field_reference`]).
+fn reference_constraint(options: &Value) -> Result<Option<FieldReference>, &'static str> {
     let Some(reference) = options.get("reference") else {
         return Ok(None);
     };
@@ -239,7 +235,7 @@ fn reference_constraint(options: &Value) -> Result<Option<ReferenceConstraint>, 
         .get("toField")
         .and_then(Value::as_i64)
         .ok_or("field reference needs a target field")?;
-    Ok(Some(ReferenceConstraint {
+    Ok(Some(FieldReference {
         name: name.to_string(),
         to_table,
         to_field,
@@ -271,32 +267,10 @@ fn relationships_by_source_field(
     map
 }
 
-fn options_with_relationship_reference(mut options: Value, rel: &RelationshipMeta) -> Value {
-    let Some(obj) = options.as_object_mut() else {
-        return options;
-    };
-    obj.insert(
-        "reference".to_string(),
-        serde_json::json!({
-            "name": rel.name,
-            "toTable": rel.to_table,
-            "toField": rel.to_field,
-        }),
-    );
-    options
-}
-
-fn options_without_reference(mut options: Value) -> Value {
-    if let Some(obj) = options.as_object_mut() {
-        obj.remove("reference");
-    }
-    options
-}
-
 fn field_options_for_schema(sol: &Solution, table_id: i64, field: &FieldMeta) -> Value {
-    let options = field_options_value(field);
+    let options = field.options_value();
     match relationship_for_source_field(sol, table_id, field.id) {
-        Ok(Some(rel)) => options_with_relationship_reference(options, &rel),
+        Ok(Some(rel)) => with_reference(options, &rel),
         _ => options,
     }
 }
@@ -306,25 +280,11 @@ fn field_schema_view_for_table(sol: &Solution, table_id: i64, field: FieldMeta) 
     field_schema_view_with_options(field, options)
 }
 
-fn update_field_reference_options(
-    sol: &Solution,
-    table_id: i64,
-    field_id: i64,
-    rel: Option<&RelationshipMeta>,
-) -> anyhow::Result<()> {
-    let Some(field) = sol.field_by_id(table_id, field_id)? else {
-        return Ok(());
-    };
-    let options = field_options_value(&field);
-    let options = match rel {
-        Some(rel) => options_with_relationship_reference(options, rel),
-        None => options_without_reference(options),
-    };
-    let options_json = serde_json::to_string(&options)?;
-    sol.update_field_options(table_id, field_id, &options_json)?;
-    Ok(())
-}
-
+/// Align a field's reference constraint with the relationship store: parse the
+/// posted `reference` key, then hand the whole sync to the engine's single
+/// transactional [`Solution::set_field_reference`] op. The status mapping is
+/// unchanged: bad payload → 400, missing source/target field → 404 (with the
+/// engine error's message), anything else → 409.
 fn sync_reference_constraint(
     sol: &mut Solution,
     table_id: i64,
@@ -333,51 +293,11 @@ fn sync_reference_constraint(
 ) -> Result<Option<RelationshipMeta>, (StatusCode, String)> {
     let reference =
         reference_constraint(options).map_err(|msg| (StatusCode::BAD_REQUEST, msg.to_string()))?;
-    if sol
-        .field_by_id(table_id, field_id)
-        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?
-        .is_none()
-    {
-        return Err((StatusCode::NOT_FOUND, "source field not found".to_string()));
-    }
-    let existing = relationship_for_source_field(sol, table_id, field_id)
-        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
-    let Some(reference) = reference else {
-        if let Some(rel) = existing {
-            sol.delete_relationship(rel.id)
-                .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
-        }
-        return Ok(None);
-    };
-    if sol
-        .field_by_id(reference.to_table, reference.to_field)
-        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?
-        .is_none()
-    {
-        return Err((StatusCode::NOT_FOUND, "target field not found".to_string()));
-    }
-    let rel = NewRelationship {
-        name: reference.name,
-        from_table: table_id,
-        to_table: reference.to_table,
-        from_field: field_id,
-        to_field: reference.to_field,
-    };
-    let saved = match existing {
-        Some(existing) => sol
-            .update_relationship(existing.id, &rel)
-            .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?,
-        None => sol
-            .create_relationship(&rel)
-            .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?,
-    };
-    match saved {
-        Some(rel) => Ok(Some(rel)),
-        None => Err((
-            StatusCode::NOT_FOUND,
-            "relationship fields not found".to_string(),
-        )),
-    }
+    sol.set_field_reference(table_id, field_id, reference.as_ref())
+        .map_err(|e| match e.downcast_ref::<FieldReferenceError>() {
+            Some(err) => (StatusCode::NOT_FOUND, err.to_string()),
+            None => (StatusCode::CONFLICT, e.to_string()),
+        })
 }
 
 fn relationship_body(body: RelationshipBody) -> NewRelationship {
@@ -473,9 +393,9 @@ pub(crate) async fn schema_fields(
         .unwrap()
         .into_iter()
         .map(|field| {
-            let options = field_options_value(&field);
+            let options = field.options_value();
             let options = match rels.get(&field.id) {
-                Some(rel) => options_with_relationship_reference(options, rel),
+                Some(rel) => with_reference(options, rel),
                 None => options,
             };
             field_schema_view_with_options(field, options)
@@ -514,7 +434,7 @@ fn apply_field_options(
         .ok_or_else(AppError::not_found)?;
     let options = rel.as_ref().map_or_else(
         || field_options_for_schema(sol, table_id, &field),
-        |rel| options_with_relationship_reference(field_options_value(&field), rel),
+        |rel| with_reference(field.options_value(), rel),
     );
     Ok(Json(field_schema_view_with_options(field, options)))
 }
@@ -609,10 +529,11 @@ pub(crate) async fn create_schema_relationship(
 ) -> AppResult<Json<RelationshipSchemaView>> {
     let rel = relationship_body(body);
     let mut sol = st.sol.lock().unwrap();
+    // The engine stamps the source field's options `reference` key in the same
+    // transaction as the relationship row (#134).
     let rel = sol
         .create_relationship(&rel)?
         .ok_or_else(AppError::not_found)?;
-    update_field_reference_options(&sol, rel.from_table, rel.from_field, Some(&rel))?;
     Ok(Json(relationship_schema_view(rel)))
 }
 
@@ -623,16 +544,11 @@ pub(crate) async fn update_schema_relationship(
 ) -> AppResult<Json<RelationshipSchemaView>> {
     let rel = relationship_body(body);
     let mut sol = st.sol.lock().unwrap();
-    let old = sol.relationship_by_id(id)?;
+    // The engine clears the old source field's `reference` key (when the FK
+    // side moved) and stamps the new one, transactionally with the row (#134).
     let rel = sol
         .update_relationship(id, &rel)?
         .ok_or_else(AppError::not_found)?;
-    if let Some(old) = old {
-        if old.from_table != rel.from_table || old.from_field != rel.from_field {
-            update_field_reference_options(&sol, old.from_table, old.from_field, None)?;
-        }
-    }
-    update_field_reference_options(&sol, rel.from_table, rel.from_field, Some(&rel))?;
     Ok(Json(relationship_schema_view(rel)))
 }
 
@@ -640,13 +556,11 @@ pub(crate) async fn delete_schema_relationship(
     State(st): State<AppState>,
     Path(id): Path<i64>,
 ) -> AppResult<StatusCode> {
-    let sol = st.sol.lock().unwrap();
-    let old = sol.relationship_by_id(id)?;
+    let mut sol = st.sol.lock().unwrap();
+    // The engine clears the source field's `reference` key in the same
+    // transaction as the row delete (#134).
     if sol.delete_relationship(id)? == 0 {
         return Err(AppError::not_found());
-    }
-    if let Some(old) = old {
-        update_field_reference_options(&sol, old.from_table, old.from_field, None)?;
     }
     Ok(StatusCode::OK)
 }

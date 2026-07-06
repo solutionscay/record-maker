@@ -140,6 +140,33 @@ impl Solution {
         self.data.execute(&sql, params_from_iter(ps))?;
         Ok(())
     }
+
+    /// True when a field already contains `value`, optionally excluding one row.
+    /// Used by schema-level validation before writes reach SQLite.
+    pub fn field_value_exists(
+        &self,
+        table: &TableMeta,
+        field: &FieldMeta,
+        value: &str,
+        exclude_id: Option<i64>,
+    ) -> Result<bool> {
+        let (sql, params): (String, Vec<Value>) = match exclude_id {
+            Some(id) => (
+                format!(
+                    "SELECT 1 FROM {} WHERE {}=?1 AND id<>?2 LIMIT 1",
+                    table.phys, field.phys
+                ),
+                vec![Value::Text(value.to_string()), Value::Integer(id)],
+            ),
+            None => (
+                format!("SELECT 1 FROM {} WHERE {}=?1 LIMIT 1", table.phys, field.phys),
+                vec![Value::Text(value.to_string())],
+            ),
+        };
+        let mut stmt = self.data.prepare(&sql)?;
+        let mut rows = stmt.query(params_from_iter(params))?;
+        Ok(rows.next()?.is_some())
+    }
 }
 
 fn value_to_string(v: ValueRef<'_>) -> String {

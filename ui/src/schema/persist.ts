@@ -3,7 +3,7 @@
 // screen; these only talk to the server and return the views it assigns, so the
 // store can reflect server truth after every op (#113 acceptance).
 
-import type { FieldKind, FieldView, RelationshipView, TableView } from './types';
+import type { FieldKind, FieldOptions, FieldView, RelationshipView, TableView } from './types';
 
 /** A failed schema op — carries the server's status + message body so the store
  * can surface a real reason (the endpoints return CONFLICT/BAD_REQUEST with a
@@ -68,13 +68,22 @@ export const createField = (tableId: number, name: string, kind: FieldKind): Pro
 export const createFieldWithNotes = (tableId: number, name: string, kind: FieldKind, notes: string): Promise<FieldView> =>
   postJson(`/schema/tables/${tableId}/fields`, { name, kind, notes });
 
+export const createFieldWithDetails = (
+  tableId: number,
+  name: string,
+  kind: FieldKind,
+  notes: string,
+  options: FieldOptions,
+): Promise<FieldView> => postJson(`/schema/tables/${tableId}/fields`, { name, kind, notes, options });
+
 export const updateField = (
   tableId: number,
   fieldId: number,
   name: string,
   kind: FieldKind,
   notes: string,
-): Promise<FieldView> => postJson(`/schema/tables/${tableId}/fields/${fieldId}`, { name, kind, notes });
+  options: FieldOptions,
+): Promise<FieldView> => postJson(`/schema/tables/${tableId}/fields/${fieldId}`, { name, kind, notes, options });
 
 export const renameField = (tableId: number, fieldId: number, name: string): Promise<FieldView> =>
   postJson(`/schema/tables/${tableId}/fields/${fieldId}/rename`, { name });

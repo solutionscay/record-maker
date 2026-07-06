@@ -27,6 +27,23 @@ export function kindIcon(kind: string): string {
   return FIELD_KINDS.find((k) => k.kind === kind)?.icon ?? 'field';
 }
 
+export interface FieldValidationOptions {
+  required?: boolean;
+  unique?: boolean;
+  range?: {
+    min?: string;
+    max?: string;
+  };
+}
+
+export interface FieldOptions {
+  validation?: FieldValidationOptions;
+}
+
+export function emptyFieldOptions(): FieldOptions {
+  return {};
+}
+
 /** A user table — mirrors the server's `TableSchemaView`. `phys` is the physical
  * table name in data.db (derived from `name`; read-only in the UI for now). */
 export interface TableView {
@@ -44,6 +61,7 @@ export interface FieldView {
   notes: string;
   phys: string;
   kind: FieldKind;
+  options: FieldOptions;
   position: number;
 }
 

@@ -2,7 +2,7 @@
   // Field drawer (#113/#119). Edits stay local until this drawer's Save updates
   // the schema draft; the server is not touched until the schema window Save.
   import type { SchemaStore } from './store.svelte';
-  import type { FieldKind, FieldView } from './types';
+  import type { FieldKind, FieldOptions, FieldView } from './types';
   import { FIELD_KINDS, kindIcon, kindLabel } from './types';
   import Icon from '../lib/Icon.svelte';
 
@@ -21,11 +21,22 @@
   let name = $state('');
   let kind = $state<FieldKind>('text');
   let notes = $state('');
+  let required = $state(false);
+  let unique = $state(false);
+  let rangeMin = $state('');
+  let rangeMax = $state('');
+
+  const hasRange = $derived(kind === 'number' || kind === 'date' || kind === 'time' || kind === 'timestamp');
+  const rangeInputType = $derived(kind === 'number' ? 'number' : kind === 'date' ? 'date' : kind === 'time' ? 'time' : 'datetime-local');
 
   $effect(() => {
     name = field?.name ?? '';
     kind = field?.kind ?? 'text';
     notes = field?.notes ?? '';
+    required = field?.options?.validation?.required ?? false;
+    unique = field?.options?.validation?.unique ?? false;
+    rangeMin = field?.options?.validation?.range?.min ?? '';
+    rangeMax = field?.options?.validation?.range?.max ?? '';
   });
 
   $effect(() => {
@@ -36,8 +47,20 @@
     return () => window.removeEventListener('keydown', onKey);
   });
 
+  function optionsDraft(): FieldOptions {
+    const validation: NonNullable<FieldOptions['validation']> = {};
+    if (required) validation.required = true;
+    if (unique) validation.unique = true;
+    if (hasRange && (rangeMin.trim() || rangeMax.trim())) {
+      validation.range = {};
+      if (rangeMin.trim()) validation.range.min = rangeMin.trim();
+      if (rangeMax.trim()) validation.range.max = rangeMax.trim();
+    }
+    return Object.keys(validation).length > 0 ? { validation } : {};
+  }
+
   function save() {
-    const saved = store.saveFieldDraft(tableId, field?.id ?? null, name, kind, notes);
+    const saved = store.saveFieldDraft(tableId, field?.id ?? null, name, kind, notes, optionsDraft());
     if (saved) onclose();
   }
 
@@ -72,6 +95,30 @@
         <option value={k.kind}>{k.label}</option>
       {/each}
     </select>
+
+    <section class="fd-section" aria-labelledby="fd-validation">
+      <span id="fd-validation" class="sc-micro fd-label">Validation</span>
+      <label class="fd-check">
+        <input type="checkbox" bind:checked={required} />
+        <span>Required</span>
+      </label>
+      <label class="fd-check">
+        <input type="checkbox" bind:checked={unique} />
+        <span>Unique</span>
+      </label>
+      {#if hasRange}
+        <div class="fd-range">
+          <label>
+            <span class="sc-hint">Min</span>
+            <input class="sc-input" type={rangeInputType} bind:value={rangeMin} />
+          </label>
+          <label>
+            <span class="sc-hint">Max</span>
+            <input class="sc-input" type={rangeInputType} bind:value={rangeMax} />
+          </label>
+        </div>
+      {/if}
+    </section>
 
     <label class="sc-micro fd-label" for="fd-notes">Notes</label>
     <textarea id="fd-notes" class="sc-textarea" rows="5" bind:value={notes}></textarea>
@@ -192,6 +239,34 @@
     background: rgba(0, 0, 0, 0.05);
     color: var(--rm-text);
     word-break: break-all;
+  }
+  .fd-section {
+    margin-top: 16px;
+  }
+  .fd-check {
+    height: 28px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--rm-text);
+  }
+  .fd-check input {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--rm-accent);
+  }
+  .fd-range {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
+    margin-top: 8px;
+  }
+  .fd-range label {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
   }
   .fd-note {
     margin: 14px 0 0;

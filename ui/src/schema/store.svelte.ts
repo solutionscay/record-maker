@@ -4,7 +4,7 @@
 
 import * as api from './persist';
 import { SchemaError } from './persist';
-import type { FieldKind, FieldView, RelationshipView, TableView } from './types';
+import { emptyFieldOptions, type FieldKind, type FieldOptions, type FieldView, type RelationshipView, type TableView } from './types';
 
 type FieldMap = Record<number, FieldView[]>;
 
@@ -185,7 +185,14 @@ export class SchemaStore {
 
   // ── field draft mutations ───────────────────────────────────────────────
 
-  saveFieldDraft(tableId: number, id: number | null, name: string, kind: FieldKind, notes: string): FieldView | null {
+  saveFieldDraft(
+    tableId: number,
+    id: number | null,
+    name: string,
+    kind: FieldKind,
+    notes: string,
+    options: FieldOptions,
+  ): FieldView | null {
     const cleanName = name.trim();
     if (!cleanName) return this.fail('Field name is required.');
     const fields = this.fieldsByTable[tableId] ?? [];
@@ -199,8 +206,10 @@ export class SchemaStore {
         notes: notes.trim(),
         phys: '',
         kind,
+        options: emptyFieldOptions(),
         position: fields.length,
       };
+      field.options = options;
       this.fieldsByTable = { ...this.fieldsByTable, [tableId]: [...fields, field] };
       this.error = null;
       return field;
@@ -210,7 +219,7 @@ export class SchemaStore {
       ...this.fieldsByTable,
       [tableId]: fields.map((f) => {
         if (f.id !== id) return f;
-        updated = { ...f, name: cleanName, kind, notes: notes.trim() };
+        updated = { ...f, name: cleanName, kind, notes: notes.trim(), options };
         return updated;
       }),
     };
@@ -326,11 +335,11 @@ export class SchemaStore {
         for (const field of fields.filter((f) => f.id > 0)) {
           const base = this.baseFieldsByTable[sourceTableId]?.find((f) => f.id === field.id);
           if (base && !sameJson(field, base)) {
-            await api.updateField(targetTableId, field.id, field.name, field.kind, field.notes);
+            await api.updateField(targetTableId, field.id, field.name, field.kind, field.notes, field.options);
           }
         }
         for (const field of fields.filter((f) => f.id < 0)) {
-          const created = await api.createFieldWithNotes(targetTableId, field.name, field.kind, field.notes);
+          const created = await api.createFieldWithDetails(targetTableId, field.name, field.kind, field.notes, field.options);
           fieldIdMap.set(field.id, created.id);
         }
         if (fields.length > 0) {

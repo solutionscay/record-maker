@@ -27,6 +27,7 @@ use record_maker_engine::{
     ObjectKind, ObjectMeta, PartKind, PartMeta, RelationshipMeta, RestoreObject, RestoreResult,
     Solution, TableMeta,
 };
+use serde_json::{Map, Value};
 
 mod format;
 
@@ -1137,6 +1138,7 @@ struct FieldSchemaView {
     notes: String,
     phys: String,
     kind: String,
+    options: Value,
     position: i64,
 }
 
@@ -1169,6 +1171,7 @@ struct FieldBody {
     name: String,
     kind: String,
     notes: Option<String>,
+    options: Option<Value>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1182,6 +1185,7 @@ struct UpdateFieldBody {
     name: String,
     kind: String,
     notes: Option<String>,
+    options: Option<Value>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1215,12 +1219,14 @@ fn table_schema_view(t: TableMeta) -> TableSchemaView {
 }
 
 fn field_schema_view(f: FieldMeta) -> FieldSchemaView {
+    let options = field_options_value(&f);
     FieldSchemaView {
         id: f.id,
         name: f.name,
         notes: f.notes,
         phys: f.phys,
         kind: f.kind.as_str().to_string(),
+        options,
         position: f.position,
     }
 }
@@ -1241,6 +1247,21 @@ fn parse_new_field(f: FieldBody) -> Result<NewField, &'static str> {
         return Err("bad field kind");
     };
     Ok(NewField { name: f.name, kind })
+}
+
+fn field_options_value(f: &FieldMeta) -> Value {
+    if f.options.trim().is_empty() {
+        Value::Object(Map::new())
+    } else {
+        serde_json::from_str::<Value>(&f.options).unwrap_or_else(|_| Value::Object(Map::new()))
+    }
+}
+
+fn canonical_options(options: &Value) -> Result<String, &'static str> {
+    if !options.is_object() {
+        return Err("field options must be an object");
+    }
+    serde_json::to_string(options).map_err(|_| "field options must be valid JSON")
 }
 
 fn relationship_body(body: RelationshipBody) -> NewRelationship {
@@ -1354,6 +1375,10 @@ async fn create_schema_field(
     Json(body): Json<FieldBody>,
 ) -> impl IntoResponse {
     let notes = body.notes.clone().unwrap_or_default();
+    let options = match body.options.as_ref().map(canonical_options).transpose() {
+        Ok(options) => options,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
     let field = match parse_new_field(body) {
         Ok(field) => field,
         Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
@@ -1370,6 +1395,15 @@ async fn create_schema_field(
                     Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
                 }
             };
+            let field = if let Some(options) = options {
+                match sol.update_field_options(table_id, field.id, &options) {
+                    Ok(Some(field)) => field,
+                    Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+                    Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
+                }
+            } else {
+                field
+            };
             Json(field_schema_view(field)).into_response()
         }
         Err(e) if e.to_string().contains("no table") => StatusCode::NOT_FOUND.into_response(),
@@ -1385,6 +1419,10 @@ async fn update_schema_field(
     let Some(kind) = FieldKind::parse(&body.kind) else {
         return (StatusCode::BAD_REQUEST, "bad field kind").into_response();
     };
+    let options = match body.options.as_ref().map(canonical_options).transpose() {
+        Ok(options) => options,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
     let mut sol = st.sol.lock().unwrap();
     match sol.update_field(
         table_id,
@@ -1393,7 +1431,18 @@ async fn update_schema_field(
         kind,
         body.notes.as_deref().unwrap_or(""),
     ) {
-        Ok(Some(field)) => Json(field_schema_view(field)).into_response(),
+        Ok(Some(field)) => {
+            let field = if let Some(options) = options {
+                match sol.update_field_options(table_id, field.id, &options) {
+                    Ok(Some(field)) => field,
+                    Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+                    Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
+                }
+            } else {
+                field
+            };
+            Json(field_schema_view(field)).into_response()
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
     }
@@ -2430,6 +2479,9 @@ async fn create_record(
         if let Some((lay, table)) = layout_table(&sol, layout_id) {
             let fields = sol.fields(table.id).unwrap();
             let values = collect_values(&fields, &form);
+            if let Err(msg) = validate_record_values(&sol, &table, &fields, &values, None) {
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
             sol.insert_record(&table, &values).unwrap();
             // Land on the new record: it sorts last by id (record_ids is ORDER BY id).
             let total = sol.record_ids(&table).unwrap().len();
@@ -2437,7 +2489,7 @@ async fn create_record(
             target = format!("/browse/{layout_id}?view={view}&rec={total}");
         }
     }
-    Redirect::to(&target)
+    Redirect::to(&target).into_response()
 }
 
 /// Commit a record: write the buffered field values, release the edit lock, and
@@ -2454,6 +2506,9 @@ async fn save_record(
         if let Some((lay, table)) = layout_table(&sol, layout_id) {
             let fields = sol.fields(table.id).unwrap();
             let values = collect_values(&fields, &form);
+            if let Err(msg) = validate_record_values(&sol, &table, &fields, &values, Some(id)) {
+                return (StatusCode::BAD_REQUEST, msg).into_response();
+            }
             sol.update_record(&table, id, &values).unwrap();
             st.locks.lock().unwrap().remove(&(table.id, id));
             let view = view_param(&form, &lay.view);
@@ -2461,7 +2516,7 @@ async fn save_record(
             target = format!("/browse/{layout_id}?view={view}&rec={rec}");
         }
     }
-    Redirect::to(&target)
+    Redirect::to(&target).into_response()
 }
 
 /// Open a record for editing: acquire its in-process lock. 200 once held (the
@@ -2532,6 +2587,102 @@ fn collect_values<'a>(
         .iter()
         .filter_map(|f| form.get(&format!("f{}", f.id)).map(|v| (f, v.clone())))
         .collect()
+}
+
+fn validate_record_values(
+    sol: &Solution,
+    table: &TableMeta,
+    fields: &[FieldMeta],
+    values: &[(&FieldMeta, String)],
+    existing_id: Option<i64>,
+) -> Result<(), String> {
+    let submitted: HashMap<i64, &str> = values.iter().map(|(f, v)| (f.id, v.as_str())).collect();
+    for field in fields {
+        let options = field_options_value(field);
+        let validation = options.get("validation").unwrap_or(&Value::Null);
+        if !validation.is_object() {
+            continue;
+        }
+        let value = submitted.get(&field.id).copied();
+        let trimmed = value.unwrap_or("").trim();
+        let required = validation
+            .get("required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if required && (value.is_none() || trimmed.is_empty()) {
+            return Err(format!("Field \"{}\" is required.", field.name));
+        }
+
+        if value.is_none() || trimmed.is_empty() {
+            continue;
+        }
+
+        let unique = validation
+            .get("unique")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if unique
+            && sol
+                .field_value_exists(table, field, trimmed, existing_id)
+                .map_err(|e| e.to_string())?
+        {
+            return Err(format!("Field \"{}\" must be unique.", field.name));
+        }
+
+        if let Some(range) = validation.get("range").filter(|v| v.is_object()) {
+            validate_range(field, trimmed, range)?;
+        }
+    }
+    Ok(())
+}
+
+fn string_rule<'a>(rule: &'a Value, key: &str) -> Option<&'a str> {
+    rule.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn validate_range(field: &FieldMeta, value: &str, range: &Value) -> Result<(), String> {
+    let min = string_rule(range, "min");
+    let max = string_rule(range, "max");
+    if min.is_none() && max.is_none() {
+        return Ok(());
+    }
+    match field.kind {
+        FieldKind::Number => {
+            let parsed = value
+                .parse::<f64>()
+                .map_err(|_| format!("Field \"{}\" must be a number.", field.name))?;
+            if let Some(min) = min {
+                let min = min
+                    .parse::<f64>()
+                    .map_err(|_| format!("Field \"{}\" has an invalid minimum.", field.name))?;
+                if parsed < min {
+                    return Err(format!("Field \"{}\" must be at least {min}.", field.name));
+                }
+            }
+            if let Some(max) = max {
+                let max = max
+                    .parse::<f64>()
+                    .map_err(|_| format!("Field \"{}\" has an invalid maximum.", field.name))?;
+                if parsed > max {
+                    return Err(format!("Field \"{}\" must be at most {max}.", field.name));
+                }
+            }
+        }
+        FieldKind::Date | FieldKind::Time | FieldKind::Timestamp => {
+            if let Some(min) = min {
+                if value < min {
+                    return Err(format!("Field \"{}\" must be at least {min}.", field.name));
+                }
+            }
+            if let Some(max) = max {
+                if value > max {
+                    return Err(format!("Field \"{}\" must be at most {max}.", field.name));
+                }
+            }
+        }
+        FieldKind::Text | FieldKind::Bool => {}
+    }
+    Ok(())
 }
 
 /// Seed a demo "Customers" table on first run so there's something to browse.
@@ -3157,6 +3308,27 @@ mod tests {
         (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
+    async fn post_form_body(state: AppState, uri: &str, body: &str) -> (StatusCode, String) {
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let resp = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
     #[tokio::test]
     async fn schema_table_and_field_routes_manage_metadata_and_physical_table() {
         let state = state_for(Solution::open_in_memory().unwrap());
@@ -3213,11 +3385,31 @@ mod tests {
         let (status, resp) = post_json_body(
             state.clone(),
             &format!("/schema/tables/{table_id}/fields/{number_id}"),
-            r#"{"name":"Invoice Number","kind":"text","notes":"Shown on customer forms"}"#,
+            &serde_json::json!({
+                "name": "Invoice Number",
+                "kind": "text",
+                "notes": "Shown on customer forms",
+                "options": {
+                    "validation": {
+                        "required": true,
+                        "unique": true
+                    }
+                }
+            })
+            .to_string(),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{resp}");
         assert!(resp.contains(r#""notes":"Shown on customer forms""#));
+        let field: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(
+            field["options"]["validation"]["required"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            field["options"]["validation"]["unique"].as_bool(),
+            Some(true)
+        );
 
         let (status, resp) = post_json_body(
             state.clone(),
@@ -3261,6 +3453,86 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(columns, vec!["id".to_string(), fields[0].phys.clone()]);
+    }
+
+    #[tokio::test]
+    async fn record_commits_enforce_required_unique_and_range_constraints() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        let table_id = sol
+            .create_table(
+                "Invoices",
+                &[
+                    NewField {
+                        name: "Number".into(),
+                        kind: FieldKind::Text,
+                    },
+                    NewField {
+                        name: "Total".into(),
+                        kind: FieldKind::Number,
+                    },
+                ],
+            )
+            .unwrap();
+        let fields = sol.fields(table_id).unwrap();
+        let number = fields.iter().find(|f| f.name == "Number").unwrap().clone();
+        let total = fields.iter().find(|f| f.name == "Total").unwrap().clone();
+        sol.update_field_options(
+            table_id,
+            number.id,
+            r#"{"validation":{"required":true,"unique":true}}"#,
+        )
+        .unwrap();
+        sol.update_field_options(
+            table_id,
+            total.id,
+            r#"{"validation":{"range":{"min":"1","max":"10"}}}"#,
+        )
+        .unwrap();
+        let form_layout = sol
+            .layouts_for_table(table_id)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.view == "form")
+            .unwrap();
+        let state = state_for(sol);
+
+        let (status, body) = post_form_body(
+            state.clone(),
+            &format!("/browse/{}", form_layout.id),
+            &format!("f{}=&f{}=5", number.id, total.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("Number"));
+        assert!(body.contains("required"));
+
+        let (status, body) = post_form_body(
+            state.clone(),
+            &format!("/browse/{}", form_layout.id),
+            &format!("f{}=INV-1&f{}=15", number.id, total.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("Total"));
+        assert!(body.contains("at most 10"));
+
+        let (status, _body) = post_form_body(
+            state.clone(),
+            &format!("/browse/{}", form_layout.id),
+            &format!("f{}=INV-1&f{}=5", number.id, total.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+
+        let (status, body) = post_form_body(
+            state,
+            &format!("/browse/{}", form_layout.id),
+            &format!("f{}=INV-1&f{}=6", number.id, total.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("Number"));
+        assert!(body.contains("unique"));
     }
 
     #[tokio::test]

@@ -8,6 +8,8 @@
     id: number;
     name: string;
     kind: FieldKind;
+    required: boolean;
+    unique: boolean;
     fkNames: string[];
     keyNames: string[];
   }
@@ -66,6 +68,12 @@
           <Icon name={kindIcon(field.kind)} />
           <span class="tn-field-name" title={field.name}>{field.name}</span>
           <span class="tn-kind">{kindLabel(field.kind)}</span>
+          {#if field.required}
+            <span class="tn-badge tn-badge--required" title="Required">req</span>
+          {/if}
+          {#if field.unique}
+            <span class="tn-badge tn-badge--unique" title="Unique">uniq</span>
+          {/if}
           {#if field.keyNames.length > 0}
             <span class="tn-badge" title={`Referenced by ${field.keyNames.join(', ')}`}>key</span>
           {/if}
@@ -154,7 +162,7 @@
     width: 100%;
     height: 28px;
     display: grid;
-    grid-template-columns: 16px minmax(0, 1fr) auto auto auto;
+    grid-template-columns: 16px minmax(0, 1fr) auto auto auto auto auto;
     align-items: center;
     gap: 6px;
     padding: 0 10px 0 12px;
@@ -199,6 +207,14 @@
   .tn-badge--fk {
     background: rgba(52, 199, 89, 0.14);
     color: #247a38;
+  }
+  .tn-badge--required {
+    background: rgba(255, 69, 58, 0.12);
+    color: var(--rm-danger);
+  }
+  .tn-badge--unique {
+    background: rgba(175, 82, 222, 0.12);
+    color: #7a2fa0;
   }
   .tn-empty {
     height: 38px;

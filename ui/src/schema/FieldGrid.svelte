@@ -69,13 +69,13 @@
 
 {#if store.tables.length === 0}
   <div class="fg-blank">
-    <p class="fg-blank-title">No tables yet</p>
+    <p class="sc-empty-title">No tables yet</p>
     <p class="sc-hint">Create a table before defining fields.</p>
     <button type="button" class="sc-btn" onclick={onnotables}>Go to Tables</button>
   </div>
 {:else}
   <div class="fg">
-    <header class="fg-head">
+    <header class="sc-viewhead fg-head">
       <div class="fg-group">
         <label class="sc-micro" for="fg-table">Table</label>
         <select
@@ -108,7 +108,7 @@
 
     <div class="fg-scroll">
       <div class="fg-grid">
-        <div class="fg-colhead">
+        <div class="fg-colhead sc-colhead">
           <span class="fg-c-handle" aria-hidden="true"></span>
           <span class="sc-micro">Field name</span>
           <span class="sc-micro">Type</span>
@@ -117,9 +117,9 @@
         </div>
 
         {#if store.loading}
-          <p class="fg-note sc-hint">Loading fields...</p>
+          <p class="sc-note sc-hint">Loading fields...</p>
         {:else if store.fields.length === 0}
-          <p class="fg-note sc-hint">No fields yet.</p>
+          <p class="sc-note sc-hint">No fields yet.</p>
         {/if}
 
         {#each displayFields as field (field.id)}
@@ -149,16 +149,10 @@
     min-height: 0;
     height: 100%;
   }
+  /* Header bar / col-header / empty-note chrome comes from the shared .sc-*
+     classes (schema.css); this view adds only its gap and grid. */
   .fg-head {
-    flex: none;
-    height: var(--sc-head-h);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
     gap: 12px;
-    padding: 0 18px;
-    border-bottom: 0.5px solid var(--rm-border);
-    background: var(--rm-toolbar-bg);
   }
   .fg-group {
     display: inline-flex;
@@ -188,18 +182,6 @@
     gap: 12px;
     padding: 0 18px;
   }
-  .fg-colhead {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    height: var(--sc-head-h);
-    border-bottom: 0.5px solid var(--rm-border);
-    background: var(--rm-toolbar-bg);
-  }
-  .fg-note {
-    margin: 0;
-    padding: 16px 18px;
-  }
   .fg-blank {
     margin: auto;
     padding: 3rem;
@@ -208,12 +190,6 @@
     flex-direction: column;
     align-items: center;
     gap: 8px;
-  }
-  .fg-blank-title {
-    margin: 0;
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--rm-text);
   }
   .fg-blank .sc-btn {
     margin-top: 6px;

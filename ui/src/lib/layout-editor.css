@@ -1,0 +1,7 @@
+/* The Layout Mode entry stylesheet (#132): pulls the shared design-system layer
+ * into the layout-editor.css bundle via CSS @import so Vite inlines it here — a
+ * JS-side import would hoist the shared CSS into a common chunk whose stylesheet
+ * the fixed-name askama templates never link. Component styles stay in their
+ * .svelte files; only shared vocabulary lives here. */
+@import '../shared/tokens.css';
+@import '../shared/controls.css';

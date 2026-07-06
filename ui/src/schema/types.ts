@@ -2,30 +2,13 @@
 // `/schema/*` JSON contract exactly (server structs `TableSchemaView` /
 // `FieldSchemaView`, camelCase serde). Keep field names in sync with the server.
 
-/** The six logical field kinds the engine understands (`FieldKind`, model.rs).
- * The schema builder never exposes physical/SQL types — only these. */
-export type FieldKind = 'text' | 'number' | 'date' | 'time' | 'timestamp' | 'bool';
+// The field-kind vocabulary (FieldKind, FIELD_KINDS, kindLabel, kindIcon) moved
+// to the shared module both sub-apps use (#132); re-exported here so schema
+// components keep importing it from './types'.
+import type { FieldKind } from '../shared/field-kinds';
 
-/** Ordered kind choices for the type picker: `kind` is what we POST, `label` is
- * the human name, `icon` names the shared sprite symbol (`#icon-type-<kind>`). */
-export const FIELD_KINDS: { kind: FieldKind; label: string; icon: string }[] = [
-  { kind: 'text', label: 'Text', icon: 'type-text' },
-  { kind: 'number', label: 'Number', icon: 'type-number' },
-  { kind: 'date', label: 'Date', icon: 'type-date' },
-  { kind: 'time', label: 'Time', icon: 'type-time' },
-  { kind: 'timestamp', label: 'Timestamp', icon: 'type-timestamp' },
-  { kind: 'bool', label: 'Boolean', icon: 'type-bool' },
-];
-
-/** Human label for a kind string (falls back to the raw string if unknown). */
-export function kindLabel(kind: string): string {
-  return FIELD_KINDS.find((k) => k.kind === kind)?.label ?? kind;
-}
-
-/** Sprite symbol name for a kind string (falls back to the generic field icon). */
-export function kindIcon(kind: string): string {
-  return FIELD_KINDS.find((k) => k.kind === kind)?.icon ?? 'field';
-}
+export { FIELD_KINDS, kindIcon, kindLabel } from '../shared/field-kinds';
+export type { FieldKind } from '../shared/field-kinds';
 
 export interface FieldValidationOptions {
   primary?: boolean;

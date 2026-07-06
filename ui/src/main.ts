@@ -1,4 +1,5 @@
 import { mount } from 'svelte';
+import './lib/layout-editor.css';
 import App from './App.svelte';
 import RailTools from './lib/RailTools.svelte';
 import Inspector from './lib/Inspector.svelte';

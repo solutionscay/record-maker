@@ -121,7 +121,7 @@
 </script>
 
 <div class="rv">
-  <header class="rv-head">
+  <header class="sc-viewhead rv-head">
     <div class="rv-title">
       <span class="sc-micro">Relationships</span>
       <span class="sc-count">{store.relationships.length} defined</span>
@@ -133,10 +133,10 @@
 
   <div class="rv-graph">
     {#if store.loading}
-      <p class="rv-note sc-hint">Loading relationships...</p>
+      <p class="sc-note sc-hint">Loading relationships...</p>
     {:else if store.tables.length === 0}
-      <div class="rv-empty">
-        <p class="rv-empty-title">No tables yet</p>
+      <div class="sc-empty rv-empty">
+        <p class="sc-empty-title">No tables yet</p>
         <p class="sc-hint">Create tables and fields before viewing relationships.</p>
       </div>
     {:else if !canCreate}
@@ -156,8 +156,8 @@
         <Controls />
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
       </SvelteFlow>
-      <div class="rv-empty rv-empty--overlay">
-        <p class="rv-empty-title">No fields available</p>
+      <div class="sc-empty rv-empty rv-empty--overlay">
+        <p class="sc-empty-title">No fields available</p>
         <p class="sc-hint">Create fields before defining relationships.</p>
       </div>
     {:else if store.relationships.length === 0}
@@ -177,8 +177,8 @@
         <Controls />
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
       </SvelteFlow>
-      <div class="rv-empty rv-empty--overlay">
-        <p class="rv-empty-title">No relationships yet</p>
+      <div class="sc-empty rv-empty rv-empty--overlay">
+        <p class="sc-empty-title">No relationships yet</p>
         <p class="sc-hint">Connect a source field to a target field. The graph will show that edge here.</p>
         <button type="button" class="sc-btn sc-btn--primary" onclick={onnew}>
           <Icon name="plus" />New relationship
@@ -214,18 +214,12 @@
     display: flex;
     flex-direction: column;
   }
+  /* Header bar / empty-state chrome comes from the shared .sc-* classes
+     (schema.css); this view adds only its stickiness and overlay placement. */
   .rv-head {
     position: sticky;
     top: 0;
     z-index: 2;
-    flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    height: var(--sc-head-h);
-    padding: 0 18px;
-    border-bottom: 0.5px solid var(--rm-border);
-    background: var(--rm-toolbar-bg);
   }
   .rv-title {
     display: inline-flex;
@@ -239,19 +233,9 @@
     overflow: hidden;
     background: #f7f7f8;
   }
-  .rv-note {
-    margin: 0;
-    padding: 16px 18px;
-  }
   .rv-empty {
     position: relative;
     z-index: 2;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    padding: 48px 24px;
-    text-align: center;
   }
   .rv-empty--overlay {
     position: absolute;
@@ -264,12 +248,6 @@
     border-radius: 7px;
     background: color-mix(in srgb, var(--rm-control-bg) 92%, transparent);
     box-shadow: var(--sc-shadow);
-  }
-  .rv-empty-title {
-    margin: 0;
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--rm-text);
   }
   :global(.rv-graph .svelte-flow) {
     width: 100%;

@@ -1,0 +1,279 @@
+/* Shared control recipes (#132) — the ONE stylesheet both Vite entries import
+ * for the input/select/button vocabulary that used to live in three copies
+ * (schema.css, Inspector.svelte, RailTools.svelte), plus the chevron data-URI
+ * that appeared verbatim in four places. Class families keep their original
+ * names and their surfaces' CURRENT values, so nothing shifts a pixel:
+ *
+ *   .sc-*   schema builder   (28px controls, --sc-radius 7px, 0.05 shadow alpha)
+ *   .ctl-*  Layout inspector (padded controls, 7px radius, 0.04 shadow alpha)
+ *   .le-*   Layout rail      (7px radius, select 0.04 / icon-btn 0.05 alpha)
+ *
+ * NOTE (deliberate, pre-existing drift kept as-is): shadow alpha 0.04 vs 0.05
+ * and per-family padding/height differ between the surfaces; FieldSelect.svelte
+ * and the server shell template (.layout-select) still carry their own control
+ * styling. Unifying those is a future design decision, not a refactor.
+ *
+ * The rules are page-agnostic: a page that has no element with these classes
+ * (e.g. .sc-* on the Layout page) simply matches nothing. */
+
+/* The select chevron — one canonical copy. shell.html's .layout-select keeps an
+ * inline duplicate because Browse-mode pages load no Vite CSS. */
+body {
+  --rm-chevron: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath d='M1 1.5 5 5.5 9 1.5' fill='none' stroke='%238a8a8e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+/* ── Schema builder: buttons (.sc-btn, from schema.css) ───────────────────── */
+.sc-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: var(--sc-ctl-h);
+  padding: 0 12px;
+  border: 0.5px solid var(--rm-border);
+  border-radius: var(--sc-radius);
+  background: var(--rm-control-bg);
+  color: var(--rm-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--sc-shadow);
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    box-shadow 0.12s ease,
+    filter 0.12s ease;
+}
+.sc-btn:hover:not(:disabled) {
+  background: var(--sc-hover);
+}
+.sc-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.sc-btn .icon {
+  flex: none;
+}
+
+/* Primary (accent) — New / Add / Done. */
+.sc-btn--primary {
+  border-color: transparent;
+  background: var(--rm-accent);
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(10, 132, 255, 0.35);
+}
+.sc-btn--primary:hover:not(:disabled) {
+  background: var(--rm-accent);
+  filter: brightness(1.06);
+}
+.sc-btn--primary:disabled {
+  background: #c7c7cc;
+  box-shadow: none;
+}
+
+/* Square icon button. */
+.sc-btn--icon {
+  width: var(--sc-ctl-h);
+  padding: 0;
+}
+
+/* Quiet ghost — inline/row actions; no border/shadow until hover. */
+.sc-btn--ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--rm-text-dim);
+  box-shadow: none;
+}
+.sc-btn--ghost:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--rm-text);
+}
+
+/* Danger affordance — reddens on hover (pairs with --ghost/--icon). */
+.sc-btn--danger:hover:not(:disabled) {
+  background: var(--rm-danger);
+  color: #fff;
+  border-color: transparent;
+}
+
+/* ── Schema builder: fields (from schema.css) ─────────────────────────────── */
+.sc-input,
+.sc-select,
+.sc-textarea {
+  height: var(--sc-ctl-h);
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  color: var(--rm-text);
+  padding: 0 10px;
+  border: 0.5px solid var(--rm-border);
+  border-radius: var(--sc-radius);
+  background: var(--rm-control-bg);
+  box-shadow: var(--sc-shadow);
+  transition:
+    border-color 0.12s ease,
+    box-shadow 0.12s ease;
+}
+.sc-input:focus,
+.sc-select:focus,
+.sc-textarea:focus {
+  outline: none;
+  border-color: var(--rm-accent);
+  box-shadow: var(--sc-ring);
+}
+.sc-input:disabled,
+.sc-select:disabled,
+.sc-textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.sc-textarea {
+  height: auto;
+  min-height: 94px;
+  padding: 8px 10px;
+  line-height: 1.4;
+  resize: vertical;
+}
+.sc-select {
+  padding-right: 28px;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  background-image: var(--rm-chevron);
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+
+/* Borderless cell input — inline editing inside a grid row; shows its frame only
+   on hover/focus so a dense row stays calm. */
+.sc-cell {
+  height: 28px;
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  color: var(--rm-text);
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    box-shadow 0.12s ease;
+}
+.sc-cell:hover {
+  border-color: var(--rm-border);
+  background: var(--rm-control-bg);
+}
+.sc-cell:focus {
+  outline: none;
+  border-color: var(--rm-accent);
+  background: var(--rm-control-bg);
+  box-shadow: var(--sc-ring);
+}
+select.sc-cell {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  padding-right: 22px;
+  background-image: var(--rm-chevron);
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+}
+
+/* ── Layout Mode inspector controls (from Inspector.svelte) ───────────────── */
+.ctl-select,
+.ctl-input {
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  color: var(--rm-text);
+  padding: 8px 11px;
+  border: 0.5px solid var(--rm-border);
+  border-radius: 7px;
+  background: var(--rm-control-bg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.ctl-select {
+  padding-right: 28px;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: var(--rm-chevron);
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+.ctl-select-auto {
+  width: auto;
+  min-width: 120px;
+}
+.ctl-num {
+  width: 66px;
+  font: inherit;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--rm-text);
+  padding: 5px 8px;
+  border: 0.5px solid var(--rm-border);
+  border-radius: 7px;
+  background: var(--rm-control-bg);
+}
+.ctl-num:disabled {
+  opacity: 0.5;
+}
+/* A short character input (value formats, #77/#78). */
+.ctl-char {
+  width: 44px;
+  font: inherit;
+  font-size: 13px;
+  text-align: center;
+  color: var(--rm-text);
+  padding: 5px 6px;
+  border: 0.5px solid var(--rm-border);
+  border-radius: 7px;
+  background: var(--rm-control-bg);
+}
+
+/* ── Layout Mode rail controls (from RailTools.svelte) ────────────────────── */
+.le-select {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  color: var(--rm-text);
+  padding: 7px 26px 7px 10px;
+  border: 0.5px solid var(--rm-border);
+  border-radius: 7px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--rm-control-bg);
+  background-image: var(--rm-chevron);
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+.le-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  width: 100%;
+  padding: 0;
+  border: 0.5px solid var(--rm-border);
+  border-radius: 7px;
+  background: var(--rm-control-bg);
+  color: var(--rm-text);
+  cursor: pointer;
+  line-height: 1;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+.le-icon-btn:hover:not(:disabled) {
+  background: #f0f0f2;
+}
+.le-icon-btn:disabled {
+  color: #bbb;
+  cursor: not-allowed;
+  box-shadow: none;
+}

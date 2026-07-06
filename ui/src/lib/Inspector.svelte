@@ -1705,45 +1705,8 @@
     font-size: 12px;
     color: var(--rm-text-dim);
   }
-  /* Controls */
-  .ctl-select,
-  .ctl-input {
-    width: 100%;
-    font: inherit;
-    font-size: 13px;
-    color: var(--rm-text);
-    padding: 8px 11px;
-    border: 0.5px solid var(--rm-border);
-    border-radius: 7px;
-    background: var(--rm-control-bg);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-  }
-  .ctl-select {
-    padding-right: 28px;
-    appearance: none;
-    -webkit-appearance: none;
-    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath d='M1 1.5 5 5.5 9 1.5' fill='none' stroke='%238a8a8e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 10px center;
-  }
-  .ctl-select-auto {
-    width: auto;
-    min-width: 120px;
-  }
-  .ctl-num {
-    width: 66px;
-    font: inherit;
-    font-size: 13px;
-    font-variant-numeric: tabular-nums;
-    color: var(--rm-text);
-    padding: 5px 8px;
-    border: 0.5px solid var(--rm-border);
-    border-radius: 7px;
-    background: var(--rm-control-bg);
-  }
-  .ctl-num:disabled {
-    opacity: 0.5;
-  }
+  /* Controls: the .ctl-* input/select recipe is shared vocabulary now — see
+     ui/src/shared/controls.css (#132). */
   /* Band reorder buttons (Issue 4). */
   .ord-btn {
     width: 30px;
@@ -1952,19 +1915,8 @@
     font-size: 11px;
     color: var(--rm-text-dim);
   }
-  /* Value format (#77/#78). A short character input, a Timestamp sub-heading, the
-     custom-date component cards, and the Sample preview. */
-  .ctl-char {
-    width: 44px;
-    font: inherit;
-    font-size: 13px;
-    text-align: center;
-    color: var(--rm-text);
-    padding: 5px 6px;
-    border: 0.5px solid var(--rm-border);
-    border-radius: 7px;
-    background: var(--rm-control-bg);
-  }
+  /* Value format (#77/#78). A Timestamp sub-heading, the custom-date component
+     cards, and the Sample preview (the .ctl-char input lives in shared/controls.css). */
   .fmt-grow {
     width: 150px;
   }

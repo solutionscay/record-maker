@@ -1,11 +1,21 @@
-/* Shared control vocabulary for the schema builder (#113).
+/* The shared design-system layer (#132), pulled in via CSS @import so Vite
+ * inlines it into THIS entry's schema-builder.css — a JS-side import would hoist
+ * the shared CSS into a common chunk whose stylesheet the fixed-name askama
+ * templates never link. */
+@import '../shared/tokens.css';
+@import '../shared/controls.css';
+
+/* Shared vocabulary for the schema builder (#113).
  *
- * ONE source of truth for buttons, inputs, selects, labels, and the design scale,
- * so the four schema components can't drift the way they did before. Values match
- * Layout Mode (ui/src/lib/Inspector.svelte): 7px control radius, 0.5px hairlines,
- * the 0 1px 2px shadow, #f0f0f2 hover, accent focus ring, and the 18/20/12/10
- * spacing rhythm. Loaded once via main.ts (bundled into schema-builder.css), so
- * these are plain global classes scoped to the schema page only.
+ * ONE source of truth for the design scale, text roles, and list-view chrome,
+ * so the schema components can't drift the way they did before. The control
+ * recipes (.sc-btn / .sc-input / .sc-select / .sc-textarea / .sc-cell) moved to
+ * ui/src/shared/controls.css (#132), imported by main.ts alongside this file
+ * and the shared tokens. Values match Layout Mode: 7px control radius, 0.5px
+ * hairlines, the 0 1px 2px shadow, #f0f0f2 hover, accent focus ring, and the
+ * 18/20/12/10 spacing rhythm. Loaded once via main.ts (bundled into
+ * schema-builder.css), so these are plain global classes scoped to the schema
+ * page only.
  *
  * Canonical scale:
  *   type    15 title · 13 content · 12 control/secondary · 11.5 sub · 11 micro
@@ -22,168 +32,6 @@
   --sc-hover: #f0f0f2;
   --sc-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
   --sc-ring: 0 0 0 3px var(--rm-accent-soft);
-}
-
-/* ── Buttons ──────────────────────────────────────────────────────────────── */
-.sc-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  height: var(--sc-ctl-h);
-  padding: 0 12px;
-  border: 0.5px solid var(--rm-border);
-  border-radius: var(--sc-radius);
-  background: var(--rm-control-bg);
-  color: var(--rm-text);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1;
-  cursor: pointer;
-  box-shadow: var(--sc-shadow);
-  transition:
-    background 0.12s ease,
-    border-color 0.12s ease,
-    box-shadow 0.12s ease,
-    filter 0.12s ease;
-}
-.sc-btn:hover:not(:disabled) {
-  background: var(--sc-hover);
-}
-.sc-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.sc-btn .icon {
-  flex: none;
-}
-
-/* Primary (accent) — New / Add / Done. */
-.sc-btn--primary {
-  border-color: transparent;
-  background: var(--rm-accent);
-  color: #fff;
-  box-shadow: 0 1px 2px rgba(10, 132, 255, 0.35);
-}
-.sc-btn--primary:hover:not(:disabled) {
-  background: var(--rm-accent);
-  filter: brightness(1.06);
-}
-.sc-btn--primary:disabled {
-  background: #c7c7cc;
-  box-shadow: none;
-}
-
-/* Square icon button. */
-.sc-btn--icon {
-  width: var(--sc-ctl-h);
-  padding: 0;
-}
-
-/* Quiet ghost — inline/row actions; no border/shadow until hover. */
-.sc-btn--ghost {
-  border-color: transparent;
-  background: transparent;
-  color: var(--rm-text-dim);
-  box-shadow: none;
-}
-.sc-btn--ghost:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.06);
-  color: var(--rm-text);
-}
-
-/* Danger affordance — reddens on hover (pairs with --ghost/--icon). */
-.sc-btn--danger:hover:not(:disabled) {
-  background: var(--rm-danger);
-  color: #fff;
-  border-color: transparent;
-}
-
-/* ── Fields ───────────────────────────────────────────────────────────────── */
-.sc-input,
-.sc-select,
-.sc-textarea {
-  height: var(--sc-ctl-h);
-  width: 100%;
-  font: inherit;
-  font-size: 13px;
-  color: var(--rm-text);
-  padding: 0 10px;
-  border: 0.5px solid var(--rm-border);
-  border-radius: var(--sc-radius);
-  background: var(--rm-control-bg);
-  box-shadow: var(--sc-shadow);
-  transition:
-    border-color 0.12s ease,
-    box-shadow 0.12s ease;
-}
-.sc-input:focus,
-.sc-select:focus,
-.sc-textarea:focus {
-  outline: none;
-  border-color: var(--rm-accent);
-  box-shadow: var(--sc-ring);
-}
-.sc-input:disabled,
-.sc-select:disabled,
-.sc-textarea:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.sc-textarea {
-  height: auto;
-  min-height: 94px;
-  padding: 8px 10px;
-  line-height: 1.4;
-  resize: vertical;
-}
-.sc-select {
-  padding-right: 28px;
-  appearance: none;
-  -webkit-appearance: none;
-  cursor: pointer;
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath d='M1 1.5 5 5.5 9 1.5' fill='none' stroke='%238a8a8e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
-}
-
-/* Borderless cell input — inline editing inside a grid row; shows its frame only
-   on hover/focus so a dense row stays calm. */
-.sc-cell {
-  height: 28px;
-  width: 100%;
-  min-width: 0;
-  font: inherit;
-  font-size: 13px;
-  color: var(--rm-text);
-  padding: 0 8px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  transition:
-    background 0.12s ease,
-    border-color 0.12s ease,
-    box-shadow 0.12s ease;
-}
-.sc-cell:hover {
-  border-color: var(--rm-border);
-  background: var(--rm-control-bg);
-}
-.sc-cell:focus {
-  outline: none;
-  border-color: var(--rm-accent);
-  background: var(--rm-control-bg);
-  box-shadow: var(--sc-ring);
-}
-select.sc-cell {
-  appearance: none;
-  -webkit-appearance: none;
-  cursor: pointer;
-  padding-right: 22px;
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath d='M1 1.5 5 5.5 9 1.5' fill='none' stroke='%238a8a8e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 7px center;
 }
 
 /* ── Text roles ───────────────────────────────────────────────────────────── */
@@ -209,4 +57,52 @@ select.sc-cell {
   font-size: 11.5px;
   color: var(--rm-text-dim);
   font-variant-numeric: tabular-nums;
+}
+
+/* ── List-view chrome (shared by the Tables / Fields / Relationships tabs) ──
+   The common subset only: stickiness (Tables/Relationships headers), per-view
+   grids, and gaps stay local to each view. */
+
+/* Tab header bar — title/controls left, primary action right. */
+.sc-viewhead {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--sc-head-h);
+  padding: 0 18px;
+  border-bottom: 0.5px solid var(--rm-border);
+  background: var(--rm-toolbar-bg);
+}
+
+/* Column-header row above a grid list (each view supplies its own grid rule). */
+.sc-colhead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: var(--sc-head-h);
+  border-bottom: 0.5px solid var(--rm-border);
+  background: var(--rm-toolbar-bg);
+}
+
+/* Inline loading/empty note inside a list body. */
+.sc-note {
+  margin: 0;
+  padding: 16px 18px;
+}
+
+/* Centered empty state with a title + hint (+ optional action button). */
+.sc-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 48px 24px;
+  text-align: center;
+}
+.sc-empty-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--rm-text);
 }

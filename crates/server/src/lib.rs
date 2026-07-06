@@ -1142,6 +1142,13 @@ struct FieldSchemaView {
     position: i64,
 }
 
+#[derive(Clone, Debug)]
+struct ReferenceConstraint {
+    name: String,
+    to_table: i64,
+    to_field: i64,
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RelationshipSchemaView {
@@ -1218,8 +1225,7 @@ fn table_schema_view(t: TableMeta) -> TableSchemaView {
     }
 }
 
-fn field_schema_view(f: FieldMeta) -> FieldSchemaView {
-    let options = field_options_value(&f);
+fn field_schema_view_with_options(f: FieldMeta, options: Value) -> FieldSchemaView {
     FieldSchemaView {
         id: f.id,
         name: f.name,
@@ -1262,6 +1268,157 @@ fn canonical_options(options: &Value) -> Result<String, &'static str> {
         return Err("field options must be an object");
     }
     serde_json::to_string(options).map_err(|_| "field options must be valid JSON")
+}
+
+fn reference_constraint(options: &Value) -> Result<Option<ReferenceConstraint>, &'static str> {
+    let Some(reference) = options.get("reference") else {
+        return Ok(None);
+    };
+    if reference.is_null() {
+        return Ok(None);
+    }
+    let Some(obj) = reference.as_object() else {
+        return Err("field reference must be an object");
+    };
+    let name = obj
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or("field reference needs a name")?;
+    let to_table = obj
+        .get("toTable")
+        .and_then(Value::as_i64)
+        .ok_or("field reference needs a target table")?;
+    let to_field = obj
+        .get("toField")
+        .and_then(Value::as_i64)
+        .ok_or("field reference needs a target field")?;
+    Ok(Some(ReferenceConstraint {
+        name: name.to_string(),
+        to_table,
+        to_field,
+    }))
+}
+
+fn relationship_for_source_field(
+    sol: &Solution,
+    table_id: i64,
+    field_id: i64,
+) -> anyhow::Result<Option<RelationshipMeta>> {
+    Ok(sol
+        .relationships_from_table(table_id)?
+        .into_iter()
+        .find(|r| r.from_field == field_id))
+}
+
+fn options_with_relationship_reference(mut options: Value, rel: &RelationshipMeta) -> Value {
+    let Some(obj) = options.as_object_mut() else {
+        return options;
+    };
+    obj.insert(
+        "reference".to_string(),
+        serde_json::json!({
+            "name": rel.name,
+            "toTable": rel.to_table,
+            "toField": rel.to_field,
+        }),
+    );
+    options
+}
+
+fn options_without_reference(mut options: Value) -> Value {
+    if let Some(obj) = options.as_object_mut() {
+        obj.remove("reference");
+    }
+    options
+}
+
+fn field_options_for_schema(sol: &Solution, table_id: i64, field: &FieldMeta) -> Value {
+    let options = field_options_value(field);
+    match relationship_for_source_field(sol, table_id, field.id) {
+        Ok(Some(rel)) => options_with_relationship_reference(options, &rel),
+        _ => options,
+    }
+}
+
+fn field_schema_view_for_table(sol: &Solution, table_id: i64, field: FieldMeta) -> FieldSchemaView {
+    let options = field_options_for_schema(sol, table_id, &field);
+    field_schema_view_with_options(field, options)
+}
+
+fn update_field_reference_options(
+    sol: &Solution,
+    table_id: i64,
+    field_id: i64,
+    rel: Option<&RelationshipMeta>,
+) -> anyhow::Result<()> {
+    let Some(field) = sol.field_by_id(table_id, field_id)? else {
+        return Ok(());
+    };
+    let options = field_options_value(&field);
+    let options = match rel {
+        Some(rel) => options_with_relationship_reference(options, rel),
+        None => options_without_reference(options),
+    };
+    let options_json = serde_json::to_string(&options)?;
+    sol.update_field_options(table_id, field_id, &options_json)?;
+    Ok(())
+}
+
+fn sync_reference_constraint(
+    sol: &mut Solution,
+    table_id: i64,
+    field_id: i64,
+    options: &Value,
+) -> Result<Option<RelationshipMeta>, (StatusCode, String)> {
+    let reference =
+        reference_constraint(options).map_err(|msg| (StatusCode::BAD_REQUEST, msg.to_string()))?;
+    if sol
+        .field_by_id(table_id, field_id)
+        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?
+        .is_none()
+    {
+        return Err((StatusCode::NOT_FOUND, "source field not found".to_string()));
+    }
+    let existing = relationship_for_source_field(sol, table_id, field_id)
+        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+    let Some(reference) = reference else {
+        if let Some(rel) = existing {
+            sol.delete_relationship(rel.id)
+                .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+        }
+        return Ok(None);
+    };
+    if sol
+        .field_by_id(reference.to_table, reference.to_field)
+        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?
+        .is_none()
+    {
+        return Err((StatusCode::NOT_FOUND, "target field not found".to_string()));
+    }
+    let rel = NewRelationship {
+        name: reference.name,
+        from_table: table_id,
+        to_table: reference.to_table,
+        from_field: field_id,
+        to_field: reference.to_field,
+    };
+    let saved = match existing {
+        Some(existing) => sol
+            .update_relationship(existing.id, &rel)
+            .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?,
+        None => sol
+            .create_relationship(&rel)
+            .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?,
+    };
+    match saved {
+        Some(rel) => Ok(Some(rel)),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            "relationship fields not found".to_string(),
+        )),
+    }
 }
 
 fn relationship_body(body: RelationshipBody) -> NewRelationship {
@@ -1364,7 +1521,7 @@ async fn schema_fields(State(st): State<AppState>, Path(table_id): Path<i64>) ->
         .fields(table_id)
         .unwrap()
         .into_iter()
-        .map(field_schema_view)
+        .map(|field| field_schema_view_for_table(&sol, table_id, field))
         .collect();
     Json(views).into_response()
 }
@@ -1375,9 +1532,12 @@ async fn create_schema_field(
     Json(body): Json<FieldBody>,
 ) -> impl IntoResponse {
     let notes = body.notes.clone().unwrap_or_default();
-    let options = match body.options.as_ref().map(canonical_options).transpose() {
-        Ok(options) => options,
-        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    let options = match body.options.as_ref() {
+        Some(options) => match canonical_options(options) {
+            Ok(options_json) => Some((options.clone(), options_json)),
+            Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+        },
+        None => None,
     };
     let field = match parse_new_field(body) {
         Ok(field) => field,
@@ -1395,16 +1555,24 @@ async fn create_schema_field(
                     Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
                 }
             };
-            let field = if let Some(options) = options {
-                match sol.update_field_options(table_id, field.id, &options) {
+            if let Some((options_value, options_json)) = options {
+                let rel =
+                    match sync_reference_constraint(&mut sol, table_id, field.id, &options_value) {
+                        Ok(rel) => rel,
+                        Err((status, msg)) => return (status, msg).into_response(),
+                    };
+                let field = match sol.update_field_options(table_id, field.id, &options_json) {
                     Ok(Some(field)) => field,
                     Ok(None) => return StatusCode::NOT_FOUND.into_response(),
                     Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
-                }
-            } else {
-                field
-            };
-            Json(field_schema_view(field)).into_response()
+                };
+                let options = rel.as_ref().map_or_else(
+                    || field_options_for_schema(&sol, table_id, &field),
+                    |rel| options_with_relationship_reference(field_options_value(&field), rel),
+                );
+                return Json(field_schema_view_with_options(field, options)).into_response();
+            }
+            Json(field_schema_view_for_table(&sol, table_id, field)).into_response()
         }
         Err(e) if e.to_string().contains("no table") => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
@@ -1419,9 +1587,12 @@ async fn update_schema_field(
     let Some(kind) = FieldKind::parse(&body.kind) else {
         return (StatusCode::BAD_REQUEST, "bad field kind").into_response();
     };
-    let options = match body.options.as_ref().map(canonical_options).transpose() {
-        Ok(options) => options,
-        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    let options = match body.options.as_ref() {
+        Some(options) => match canonical_options(options) {
+            Ok(options_json) => Some((options.clone(), options_json)),
+            Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+        },
+        None => None,
     };
     let mut sol = st.sol.lock().unwrap();
     match sol.update_field(
@@ -1432,16 +1603,24 @@ async fn update_schema_field(
         body.notes.as_deref().unwrap_or(""),
     ) {
         Ok(Some(field)) => {
-            let field = if let Some(options) = options {
-                match sol.update_field_options(table_id, field.id, &options) {
+            if let Some((options_value, options_json)) = options {
+                let rel =
+                    match sync_reference_constraint(&mut sol, table_id, field.id, &options_value) {
+                        Ok(rel) => rel,
+                        Err((status, msg)) => return (status, msg).into_response(),
+                    };
+                let field = match sol.update_field_options(table_id, field.id, &options_json) {
                     Ok(Some(field)) => field,
                     Ok(None) => return StatusCode::NOT_FOUND.into_response(),
                     Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
-                }
-            } else {
-                field
-            };
-            Json(field_schema_view(field)).into_response()
+                };
+                let options = rel.as_ref().map_or_else(
+                    || field_options_for_schema(&sol, table_id, &field),
+                    |rel| options_with_relationship_reference(field_options_value(&field), rel),
+                );
+                return Json(field_schema_view_with_options(field, options)).into_response();
+            }
+            Json(field_schema_view_for_table(&sol, table_id, field)).into_response()
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
@@ -1455,7 +1634,7 @@ async fn rename_schema_field(
 ) -> impl IntoResponse {
     let mut sol = st.sol.lock().unwrap();
     match sol.rename_field(table_id, field_id, &body.name) {
-        Ok(Some(field)) => Json(field_schema_view(field)).into_response(),
+        Ok(Some(field)) => Json(field_schema_view_for_table(&sol, table_id, field)).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
     }
@@ -1471,7 +1650,7 @@ async fn retype_schema_field(
     };
     let mut sol = st.sol.lock().unwrap();
     match sol.retype_field(table_id, field_id, kind) {
-        Ok(Some(field)) => Json(field_schema_view(field)).into_response(),
+        Ok(Some(field)) => Json(field_schema_view_for_table(&sol, table_id, field)).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
     }
@@ -1490,7 +1669,7 @@ async fn reorder_schema_fields(
         Ok(fields) => Json(
             fields
                 .into_iter()
-                .map(field_schema_view)
+                .map(|field| field_schema_view_for_table(&sol, table_id, field))
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -1528,7 +1707,14 @@ async fn create_schema_relationship(
     let rel = relationship_body(body);
     let mut sol = st.sol.lock().unwrap();
     match sol.create_relationship(&rel) {
-        Ok(Some(rel)) => Json(relationship_schema_view(rel)).into_response(),
+        Ok(Some(rel)) => {
+            if let Err(e) =
+                update_field_reference_options(&sol, rel.from_table, rel.from_field, Some(&rel))
+            {
+                return (StatusCode::CONFLICT, e.to_string()).into_response();
+            }
+            Json(relationship_schema_view(rel)).into_response()
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
     }
@@ -1541,8 +1727,28 @@ async fn update_schema_relationship(
 ) -> impl IntoResponse {
     let rel = relationship_body(body);
     let mut sol = st.sol.lock().unwrap();
+    let old = match sol.relationship_by_id(id) {
+        Ok(old) => old,
+        Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
+    };
     match sol.update_relationship(id, &rel) {
-        Ok(Some(rel)) => Json(relationship_schema_view(rel)).into_response(),
+        Ok(Some(rel)) => {
+            if let Some(old) = old {
+                if old.from_table != rel.from_table || old.from_field != rel.from_field {
+                    if let Err(e) =
+                        update_field_reference_options(&sol, old.from_table, old.from_field, None)
+                    {
+                        return (StatusCode::CONFLICT, e.to_string()).into_response();
+                    }
+                }
+            }
+            if let Err(e) =
+                update_field_reference_options(&sol, rel.from_table, rel.from_field, Some(&rel))
+            {
+                return (StatusCode::CONFLICT, e.to_string()).into_response();
+            }
+            Json(relationship_schema_view(rel)).into_response()
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
     }
@@ -1553,9 +1759,22 @@ async fn delete_schema_relationship(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let sol = st.sol.lock().unwrap();
+    let old = match sol.relationship_by_id(id) {
+        Ok(old) => old,
+        Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
+    };
     match sol.delete_relationship(id) {
         Ok(0) => StatusCode::NOT_FOUND.into_response(),
-        Ok(_) => StatusCode::OK.into_response(),
+        Ok(_) => {
+            if let Some(old) = old {
+                if let Err(e) =
+                    update_field_reference_options(&sol, old.from_table, old.from_field, None)
+                {
+                    return (StatusCode::CONFLICT, e.to_string()).into_response();
+                }
+            }
+            StatusCode::OK.into_response()
+        }
         Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
     }
 }
@@ -2637,7 +2856,10 @@ fn validate_record_values(
 }
 
 fn string_rule<'a>(rule: &'a Value, key: &str) -> Option<&'a str> {
-    rule.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+    rule.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 fn validate_range(field: &FieldMeta, value: &str, range: &Value) -> Result<(), String> {
@@ -3536,6 +3758,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn field_reference_options_sync_relationship_edges() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        let customers = sol
+            .create_table(
+                "Customers",
+                &[NewField {
+                    name: "Id".into(),
+                    kind: FieldKind::Number,
+                }],
+            )
+            .unwrap();
+        let invoices = sol
+            .create_table(
+                "Invoices",
+                &[NewField {
+                    name: "Customer Id".into(),
+                    kind: FieldKind::Number,
+                }],
+            )
+            .unwrap();
+        let customer_id = sol.fields(customers).unwrap()[0].id;
+        let invoice_customer_id = sol.fields(invoices).unwrap()[0].id;
+        let state = state_for(sol);
+
+        let body = serde_json::json!({
+            "name": "Customer Id",
+            "kind": "number",
+            "options": {
+                "reference": {
+                    "name": "customer",
+                    "toTable": customers,
+                    "toField": customer_id
+                }
+            }
+        });
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/schema/tables/{invoices}/fields/{invoice_customer_id}"),
+            &body.to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        let field: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(
+            field["options"]["reference"]["name"].as_str(),
+            Some("customer")
+        );
+
+        let (status, resp) = get_body(state.clone(), "/schema/relationships").await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        let relationships: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(relationships.as_array().unwrap().len(), 1);
+        assert_eq!(relationships[0]["name"].as_str(), Some("customer"));
+        assert_eq!(
+            relationships[0]["fromField"].as_i64(),
+            Some(invoice_customer_id)
+        );
+
+        let body = serde_json::json!({
+            "name": "Customer Id",
+            "kind": "number",
+            "options": {}
+        });
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/schema/tables/{invoices}/fields/{invoice_customer_id}"),
+            &body.to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        let (status, resp) = get_body(state, "/schema/relationships").await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        let relationships: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert!(relationships.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn schema_relationship_routes_crud_and_validate_field_ownership() {
         let mut sol = Solution::open_in_memory().unwrap();
         let customers = sol
@@ -3583,6 +3882,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{resp}");
         let rel: serde_json::Value = serde_json::from_str(&resp).unwrap();
         let rel_id = rel["id"].as_i64().unwrap();
+        let (_, fields_body) =
+            get_body(state.clone(), &format!("/schema/tables/{invoices}/fields")).await;
+        let fields: serde_json::Value = serde_json::from_str(&fields_body).unwrap();
+        assert_eq!(
+            fields[0]["options"]["reference"]["name"].as_str(),
+            Some("customer")
+        );
 
         let update = serde_json::json!({
             "name": "bill_to",
@@ -3599,18 +3905,28 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{resp}");
         assert!(resp.contains(r#""name":"bill_to""#));
+        let (_, fields_body) =
+            get_body(state.clone(), &format!("/schema/tables/{invoices}/fields")).await;
+        let fields: serde_json::Value = serde_json::from_str(&fields_body).unwrap();
+        assert_eq!(
+            fields[0]["options"]["reference"]["name"].as_str(),
+            Some("bill_to")
+        );
 
         let (status, resp) = get_body(state.clone(), "/schema/relationships").await;
         assert_eq!(status, StatusCode::OK, "{resp}");
         assert!(resp.contains(r#""fromTable":"#));
 
         let (status, resp) = post_json_body(
-            state,
+            state.clone(),
             &format!("/schema/relationships/{rel_id}/delete"),
             "{}",
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{resp}");
+        let (_, fields_body) = get_body(state, &format!("/schema/tables/{invoices}/fields")).await;
+        let fields: serde_json::Value = serde_json::from_str(&fields_body).unwrap();
+        assert!(fields[0]["options"].get("reference").is_none());
     }
 
     /// #57: a table carries independent per-view layouts. The Browse view toggle

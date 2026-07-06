@@ -38,6 +38,12 @@ export interface FieldValidationOptions {
 
 export interface FieldOptions {
   validation?: FieldValidationOptions;
+  /** FK/reference constraint. Establishes a relationship edge from this field. */
+  reference?: {
+    name: string;
+    toTable: number;
+    toField: number;
+  };
 }
 
 export function emptyFieldOptions(): FieldOptions {

@@ -22,6 +22,12 @@ function sameJson(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+function withoutReference(options: FieldOptions): FieldOptions {
+  if (!options.reference) return options;
+  const { reference: _reference, ...rest } = options;
+  return rest;
+}
+
 export class SchemaStore {
   /** Draft tables, including unsaved negative-id tables. */
   tables = $state<TableView[]>([]);
@@ -199,6 +205,23 @@ export class SchemaStore {
     if (fields.some((f) => f.id !== id && normName(f.name) === normName(cleanName))) {
       return this.fail(`A field named "${cleanName}" already exists in this table.`);
     }
+    const reference = options.reference;
+    if (reference) {
+      if (!reference.name.trim()) return this.fail('Reference relationships need a name.');
+      if (!this.tableById(reference.toTable) || !this.fieldById(reference.toTable, reference.toField)) {
+        return this.fail('Choose a valid reference target.');
+      }
+      if (
+        this.relationships.some(
+          (r) =>
+            r.fromTable === tableId &&
+            r.fromField !== (id ?? Number.NaN) &&
+            normName(r.name) === normName(reference.name),
+        )
+      ) {
+        return this.fail('Relationship names must be unique for the source table.');
+      }
+    }
     if (id == null) {
       const field: FieldView = {
         id: this.nextId(),
@@ -335,15 +358,48 @@ export class SchemaStore {
         for (const field of fields.filter((f) => f.id > 0)) {
           const base = this.baseFieldsByTable[sourceTableId]?.find((f) => f.id === field.id);
           if (base && !sameJson(field, base)) {
-            await api.updateField(targetTableId, field.id, field.name, field.kind, field.notes, field.options);
+            await api.updateField(
+              targetTableId,
+              field.id,
+              field.name,
+              field.kind,
+              field.notes,
+              withoutReference(field.options),
+            );
           }
         }
         for (const field of fields.filter((f) => f.id < 0)) {
-          const created = await api.createFieldWithDetails(targetTableId, field.name, field.kind, field.notes, field.options);
+          const created = await api.createFieldWithDetails(
+            targetTableId,
+            field.name,
+            field.kind,
+            field.notes,
+            withoutReference(field.options),
+          );
           fieldIdMap.set(field.id, created.id);
         }
         if (fields.length > 0) {
           await api.reorderFields(targetTableId, fields.map((f) => resolveField(f.id)));
+        }
+      }
+
+      for (const table of this.tables) {
+        const sourceTableId = table.id;
+        const targetTableId = resolveTable(table.id);
+        const fields = this.fieldsByTable[sourceTableId] ?? [];
+        for (const field of fields) {
+          const finalOptions = this.resolvedFieldOptions(field.options, resolveTable, resolveField);
+          const baseOptions = this.baseFieldsByTable[sourceTableId]?.find((f) => f.id === field.id)?.options ?? {};
+          if (!sameJson(finalOptions, baseOptions)) {
+            await api.updateField(
+              targetTableId,
+              resolveField(field.id),
+              field.name,
+              field.kind,
+              field.notes,
+              finalOptions,
+            );
+          }
         }
       }
 
@@ -379,6 +435,22 @@ export class SchemaStore {
       toTable: tableId(rel.toTable),
       fromField: fieldId(rel.fromField),
       toField: fieldId(rel.toField),
+    };
+  }
+
+  private resolvedFieldOptions(
+    options: FieldOptions,
+    tableId: (id: number) => number,
+    fieldId: (id: number) => number,
+  ): FieldOptions {
+    if (!options.reference) return options;
+    return {
+      ...options,
+      reference: {
+        ...options.reference,
+        toTable: tableId(options.reference.toTable),
+        toField: fieldId(options.reference.toField),
+      },
     };
   }
 

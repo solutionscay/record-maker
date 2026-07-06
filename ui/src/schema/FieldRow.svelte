@@ -93,16 +93,7 @@
     <span>{kindLabel(field.kind)}</span>
   </span>
 
-  <code class="sc-phys fg-phys" title={field.phys || 'draft'}>{field.phys || 'draft'}</code>
-
-  <span class="fg-actions">
-    <button type="button" class="sc-btn sc-btn--icon sc-btn--ghost fg-gear" class:on={active} title="Field details" onclick={(e) => {
-      e.stopPropagation();
-      onedit();
-    }}>
-      <Icon name="settings" />
-    </button>
-  </span>
+  <span class="fg-notes" title={field.notes || 'No notes'}>{field.notes || 'No notes'}</span>
 </div>
 
 <style>
@@ -197,18 +188,12 @@
   .fg-type :global(.icon) {
     flex: none;
   }
-  .fg-phys {
+  .fg-notes {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .fg-actions {
-    display: inline-flex;
-    justify-content: flex-end;
-  }
-  .fg-gear.on {
-    color: var(--rm-accent);
-    background: var(--rm-accent-soft);
+    font-size: 12px;
+    color: var(--rm-text-dim);
   }
 </style>

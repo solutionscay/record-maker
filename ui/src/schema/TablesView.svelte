@@ -45,11 +45,8 @@
         <svg class="tv-ico" aria-hidden="true"><use href="#icon-app" /></svg>
         <span class="tv-main">
           <span class="tv-name">{table.name}</span>
-          {#if table.notes}
-            <span class="tv-notes">{table.notes}</span>
-          {/if}
+          <span class="tv-notes">{table.notes || 'No notes'}</span>
         </span>
-        <code class="sc-phys">{table.phys || 'draft'}</code>
         <span class="tv-actions">
           <button
             type="button"

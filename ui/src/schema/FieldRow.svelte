@@ -32,6 +32,7 @@
   } = $props();
 
   let rowEl: HTMLDivElement;
+  const isPrimary = $derived(field.options?.validation?.primary === true);
 
   function onDragStart(e: DragEvent) {
     if (!reorderable) return;
@@ -83,7 +84,10 @@
     <svg class="fg-handle-ico" viewBox="0 0 16 16"><circle cx="6" cy="4" r="1" /><circle cx="10" cy="4" r="1" /><circle cx="6" cy="8" r="1" /><circle cx="10" cy="8" r="1" /><circle cx="6" cy="12" r="1" /><circle cx="10" cy="12" r="1" /></svg>
   </span>
 
-  <span class="fg-name">{field.name}</span>
+  <span class="fg-name-cell">
+    <span class="fg-name">{field.name}</span>
+    {#if isPrimary}<span class="fg-badge" title="Primary ID">ID</span>{/if}
+  </span>
 
   <span class="fg-type">
     <Icon name={kindIcon(field.kind)} />
@@ -170,6 +174,12 @@
     fill: currentColor;
     opacity: 0.6;
   }
+  .fg-name-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
   .fg-name {
     min-width: 0;
     overflow: hidden;
@@ -178,6 +188,20 @@
     font-size: 13px;
     font-weight: 600;
     color: var(--rm-text);
+  }
+  .fg-badge {
+    flex: none;
+    height: 18px;
+    min-width: 22px;
+    padding: 0 5px;
+    border: 0.5px solid var(--rm-border);
+    border-radius: 5px;
+    background: var(--rm-segment-active-bg);
+    color: var(--rm-text);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 17px;
+    text-align: center;
   }
   .fg-type {
     display: inline-flex;

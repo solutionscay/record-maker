@@ -274,7 +274,7 @@
   :global(.rv-graph .svelte-flow__controls) {
     box-shadow: var(--sc-shadow);
     border: 0.5px solid var(--rm-border);
-    border-radius: 7px;
+    border-radius: 0;
     overflow: hidden;
   }
 </style>

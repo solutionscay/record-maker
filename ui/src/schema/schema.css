@@ -11,16 +11,16 @@
  * so the schema components can't drift the way they did before. The control
  * recipes (.sc-btn / .sc-input / .sc-select / .sc-textarea / .sc-cell) moved to
  * ui/src/shared/controls.css (#132), imported by main.ts alongside this file
- * and the shared tokens. Values match Layout Mode: 7px control radius, 0.5px
- * hairlines, the 0 1px 2px shadow, #f0f0f2 hover, accent focus ring, and the
- * 18/20/12/10 spacing rhythm. Loaded once via main.ts (bundled into
- * schema-builder.css), so these are plain global classes scoped to the schema
- * page only.
+ * and the shared tokens. Values match Layout Mode: square (0) control corners
+ * (#137), 0.5px hairlines, the 0 1px 2px shadow, #f0f0f2 hover, accent focus
+ * ring, and the 18/20/12/10 spacing rhythm. Loaded once via main.ts (bundled
+ * into schema-builder.css), so these are plain global classes scoped to the
+ * schema page only.
  *
  * Canonical scale:
  *   type    15 title · 13 content · 12 control/secondary · 11.5 sub · 11 micro
  *   heights 40 list row · 36 header · 28 control · 22 chip
- *   radius  7 control · 6 chip · 5 micro
+ *   radius  0 control (#137) · 6 chip · 5 micro
  *   space   18 pad · 20 section · 12 intra · 10 row · 8 tight
  */
 
@@ -28,7 +28,7 @@
   --sc-row-h: 40px;
   --sc-head-h: 36px;
   --sc-ctl-h: 28px;
-  --sc-radius: 7px;
+  --sc-radius: 0;
   --sc-hover: #f0f0f2;
   --sc-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
   --sc-ring: 0 0 0 3px var(--rm-accent-soft);

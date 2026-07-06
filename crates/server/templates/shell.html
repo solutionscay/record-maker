@@ -47,7 +47,7 @@
     .brand .icon { width: 18px; height: 18px; display: block; color: var(--rm-accent); }
     .actions { display: flex; gap: 8px; margin-left: auto; }
     .act { display: inline-flex; align-items: center; gap: .3em; font-size: 12px; font-weight: 500;
-           padding: 5px 11px; border-radius: 7px; border: .5px solid var(--rm-border);
+           padding: 5px 11px; border-radius: 0; border: .5px solid var(--rm-border);
            background: var(--rm-control-bg); color: var(--rm-text); box-shadow: 0 1px 2px rgba(0,0,0,.06); }
     .act:disabled { color: #b8b8bd; border-color: var(--rm-border); background: #f0f0f1; cursor: not-allowed; box-shadow: none; }
     /* Icon system (#72) — pixelarticons `<symbol>`s referenced by `<use>`, shared by
@@ -69,12 +69,12 @@
                   color: var(--rm-text-dim); display: block; }
     /* Browse / Layout mode toggle — a macOS segmented control. */
     .modes { display: inline-flex; gap: 2px; padding: 2px; border-radius: 7px; background: var(--rm-segment-track); }
-    .modes a, .modes .disabled { flex: 1; text-align: center; padding: 4px 8px; border-radius: 5px;
+    .modes a, .modes .disabled { flex: 1; text-align: center; padding: 4px 8px; border-radius: 0;
                   text-decoration: none; color: var(--rm-text-dim); font-size: 12px; font-weight: 500; }
     .modes a.active { background: var(--rm-segment-active-bg); color: var(--rm-text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.14); }
     .modes .disabled { color: #bcbcc1; }
     .layout-select { width: 100%; font: inherit; font-size: 13px; font-weight: 500; color: var(--rm-text);
-                     padding: 8px 28px 8px 11px; border: .5px solid var(--rm-border); border-radius: 8px;
+                     padding: 8px 28px 8px 11px; border: .5px solid var(--rm-border); border-radius: 0;
                      box-shadow: 0 1px 2px rgba(0,0,0,.05);
                      appearance: none; -webkit-appearance: none;
                      background-color: var(--rm-control-bg);
@@ -86,13 +86,13 @@
                background: var(--rm-control-bg); box-shadow: 0 1px 2px rgba(0,0,0,.05); }
     .step-row { display: flex; gap: 4px; justify-content: center; }
     .step { display: inline-flex; flex: 1; min-width: 0; justify-content: center; padding: 5px 0;
-            border: .5px solid var(--rm-border); border-radius: 6px; text-decoration: none;
+            border: .5px solid var(--rm-border); border-radius: 0; text-decoration: none;
             color: var(--rm-text); background: var(--rm-control-bg); font-size: 12px; }
     .step:hover { background: #f0f0f2; }
     .step.off { color: #c9c9cd; border-color: var(--rm-border); background: #f6f6f7; cursor: default; }
     .rec-jump { display: flex; flex-direction: column; align-items: center; margin: 0; gap: 2px; }
     .rec-num { width: 100%; text-align: center; font-variant-numeric: tabular-nums; font-size: 15px;
-               font-weight: 600; padding: 6px; border: .5px solid var(--rm-border); border-radius: 7px;
+               font-weight: 600; padding: 6px; border: .5px solid var(--rm-border); border-radius: 0;
                background: var(--rm-control-bg); color: var(--rm-text); }
     .rec-total { text-align: center; }
     .rec-tnum { font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
@@ -104,7 +104,7 @@
     /* View selector — a macOS segmented control. */
     .view-switch { display: inline-flex; gap: 2px; padding: 2px; border: 0; border-radius: 7px;
                    overflow: visible; background: var(--rm-segment-track); }
-    .view-switch a { padding: 4px 12px; border: 0; border-radius: 5px; text-decoration: none;
+    .view-switch a { padding: 4px 12px; border: 0; border-radius: 0; text-decoration: none;
                color: var(--rm-text-dim); font-size: 12px; font-weight: 500; line-height: 1.2; }
     .view-switch a.active { background: var(--rm-segment-active-bg); color: var(--rm-text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.14); }
     .content { grid-area: content; padding: 1rem 1.25rem; overflow: auto; }
@@ -125,7 +125,7 @@
     .statusbar { grid-area: status; border-top: .5px solid var(--rm-border); background: var(--rm-toolbar-bg);
                  padding: 6px 12px; font-size: 11.5px; color: var(--rm-text-dim);
                  display: flex; align-items: center; gap: 12px; }
-    .collapse { font-size: 11px; line-height: 1; padding: 3px 8px; border-radius: 6px;
+    .collapse { font-size: 11px; line-height: 1; padding: 3px 8px; border-radius: 0;
                 border: .5px solid var(--rm-border); background: var(--rm-control-bg); color: var(--rm-text); }
     .status-mode { font-weight: 600; color: var(--rm-text); }
     .status-edit { color: #b8860b; font-weight: 600; }
@@ -153,8 +153,8 @@
     .fm-tablefoot { flex: 0 0 auto; padding: 6px 12px; font-size: 11.5px; color: var(--rm-text-dim);
                     background: var(--rm-toolbar-bg); border-top: .5px solid var(--rm-border); }
     form.inline { margin: 0; }
-    input { font: inherit; padding: .35rem .5rem; border: 1px solid #888; border-radius: .3rem; }
-    button { font: inherit; padding: .4rem .8rem; border-radius: .4rem; border: 1px solid #888; cursor: pointer; background: #fff; }
+    input { font: inherit; padding: .35rem .5rem; border: 1px solid #888; border-radius: 0; }
+    button { font: inherit; padding: .4rem .8rem; border-radius: 0; border: 1px solid #888; cursor: pointer; background: #fff; }
     .placeholder { max-width: 46rem; color: #555; line-height: 1.5; background: #f7f9fc;
                    border: 1px dashed #cbd5e1; border-radius: .5rem; padding: 1rem 1.25rem; }
     /* Standard empty state — centered in the content pane, offers the primary
@@ -165,7 +165,7 @@
     .empty-sub { margin: 0 0 4px; font-size: 13px; color: var(--rm-text-dim); }
     .empty-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px;
                  font-size: 13px; font-weight: 600; line-height: 1;
-                 color: #fff; background: var(--rm-accent); border: .5px solid transparent; border-radius: 8px;
+                 color: #fff; background: var(--rm-accent); border: .5px solid transparent; border-radius: 0;
                  padding: 9px 16px; cursor: pointer; box-shadow: 0 1px 3px rgba(10,132,255,.4); }
     .empty-btn:hover { filter: brightness(1.05); }
     .empty-btn .icon { width: 15px; height: 15px; display: block; flex: none; vertical-align: 0; }
@@ -196,7 +196,7 @@
     .fm-obj { position: absolute; box-sizing: border-box; overflow: hidden; font-size: .8rem; color: #1b1b1f; }
     /* A field renders its value only (#60); its caption is a separate fm-text. */
     .fm-field { display: flex; align-items: stretch; border: 1px solid #b9c2cc;
-                border-radius: 3px; overflow: hidden; background: #fff; }
+                border-radius: 0; overflow: hidden; background: #fff; }
     .fm-fvalue { flex: 1 1 auto; display: flex; align-items: center; padding: .15rem .45rem;
                  color: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .fm-text { display: block; padding: .1rem .2rem; color: inherit; }
@@ -257,7 +257,7 @@
     .rm-context-title { padding: 5px 8px 6px; color: var(--rm-text-dim); font-size: 11px; font-weight: 600;
       text-transform: uppercase; letter-spacing: .04em; }
     .rm-context-item { width: 100%; min-height: 28px; display: flex; align-items: center; justify-content: space-between;
-      gap: 18px; padding: 5px 8px; border: 0; border-radius: 5px; background: transparent; color: inherit;
+      gap: 18px; padding: 5px 8px; border: 0; border-radius: 0; background: transparent; color: inherit;
       box-shadow: none; font: inherit; text-align: left; }
     .rm-context-item:hover:not(:disabled), .rm-context-item:focus-visible:not(:disabled) {
       outline: none; background: var(--rm-accent); color: #fff; }

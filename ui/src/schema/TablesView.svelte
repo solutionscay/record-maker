@@ -144,7 +144,7 @@
     align-items: center;
     justify-content: center;
     border: 0;
-    border-radius: 6px;
+    border-radius: 0;
     background: transparent;
     color: var(--rm-text-dim);
     cursor: pointer;

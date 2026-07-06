@@ -72,7 +72,7 @@
     height: 24px;
     padding: 0 8px;
     border: 0.5px solid var(--rm-border);
-    border-radius: 6px;
+    border-radius: 0;
     background: var(--rm-control-bg);
     color: var(--rm-text);
     box-shadow: var(--sc-shadow);

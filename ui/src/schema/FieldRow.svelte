@@ -1,6 +1,6 @@
 <script lang="ts">
-  // One field row in the grid (#113/#119). It is display-only except for the
-  // drag handle; clicking the row opens the drawer.
+  // One field row in the grid (#113/#119/#122). It is display-only except for
+  // the drag handle and explicit edit action.
   import type { FieldView } from './types';
   import { kindIcon, kindLabel } from './types';
   import Icon from '../lib/Icon.svelte';
@@ -57,15 +57,12 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_interactive_supports_focus -->
-<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   bind:this={rowEl}
   class="fg-row"
   class:active
   class:dragging
-  role="row"
-  onclick={onedit}
   ondragover={onDragOver}
   ondrop={onDrop}
 >
@@ -94,6 +91,12 @@
   </span>
 
   <span class="fg-notes" title={field.notes || 'No notes'}>{field.notes || 'No notes'}</span>
+
+  <span class="fg-actions">
+    <button type="button" class="sc-btn sc-btn--icon sc-btn--ghost" title="Edit field" onclick={onedit}>
+      <Icon name="edit" />
+    </button>
+  </span>
 </div>
 
 <style>
@@ -102,16 +105,15 @@
     height: var(--sc-row-h);
     border-top: 0.5px solid var(--rm-border);
     transition: background 0.12s ease;
-    cursor: pointer;
   }
   :global(.fg-row):first-of-type {
     border-top: 0;
   }
   :global(.fg-row:hover) {
-    background: var(--rm-accent-soft);
+    background: rgba(0, 0, 0, 0.02);
   }
   :global(.fg-row.active) {
-    background: var(--rm-accent-soft);
+    background: rgba(0, 0, 0, 0.04);
   }
   :global(.fg-row.dragging) {
     opacity: 0.35;
@@ -195,5 +197,9 @@
     white-space: nowrap;
     font-size: 12px;
     color: var(--rm-text-dim);
+  }
+  .fg-actions {
+    display: flex;
+    justify-content: center;
   }
 </style>

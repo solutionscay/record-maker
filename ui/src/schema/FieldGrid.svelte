@@ -113,6 +113,7 @@
           <span class="sc-micro">Field name</span>
           <span class="sc-micro">Type</span>
           <span class="sc-micro">Notes</span>
+          <span class="fg-c-actions" aria-hidden="true"></span>
         </div>
 
         {#if store.loading}
@@ -182,7 +183,7 @@
   .fg-colhead,
   :global(.fg-row) {
     display: grid;
-    grid-template-columns: 34px minmax(0, 1.4fr) 160px minmax(0, 1.8fr);
+    grid-template-columns: 34px minmax(0, 1.4fr) 160px minmax(0, 1.8fr) 34px;
     align-items: center;
     gap: 12px;
     padding: 0 18px;

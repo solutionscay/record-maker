@@ -168,12 +168,6 @@
   .tv-actions {
     display: flex;
     justify-content: center;
-    opacity: 0;
-    transition: opacity 0.12s ease;
-  }
-  .tv-row:hover .tv-actions,
-  .tv-actions:focus-within {
-    opacity: 1;
   }
   .tv-nav {
     width: 28px;

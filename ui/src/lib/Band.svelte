@@ -29,9 +29,11 @@
   }
 </script>
 
-<div class="fm-part" style={`height: ${part.height}px;${part.partStyle}`}>
+<!-- data-part-id / data-object-id mirror the askama macro: stable ids stamped
+     on the DOM so hit-testing never maps DOM index to paint order (#134). -->
+<div class="fm-part" style={`height: ${part.height}px;${part.partStyle}`} data-part-id={part.id}>
   {#each part.objects as o (o.id)}
-    <div class={objClass(o)} style={objStyle(o)}>
+    <div class={objClass(o)} style={objStyle(o)} data-object-id={o.id}>
       {#if o.field}
         <span class="fm-fvalue" style={o.textStyle || null}>{fieldText(o)}</span>
       {:else if o.shape}

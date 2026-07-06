@@ -1858,9 +1858,13 @@ export class CanvasInteraction {
   }
 
   #identitySnapshot(): IdentitySnapshot {
+    // Identity comes from the data-object-id both renderers stamp (#134), so
+    // element↔id pairing can never drift from paint-order assumptions. An
+    // element without the attribute maps to NaN, which matches no id.
+    const painted = this.#paintedElements();
     return {
-      painted: this.#paintedElements(),
-      ids: objectIdsInPaintOrder(this.#doc.renderModel),
+      painted,
+      ids: painted.map((el) => Number(el.dataset.objectId)),
     };
   }
 

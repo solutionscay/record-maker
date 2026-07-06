@@ -16,7 +16,6 @@
   import { CanvasInteraction } from './lib/interaction';
   import { setPartHeight as persistPartHeight } from './lib/persist';
   import { lerror, llog } from './lib/log';
-  import { objectIdsInPaintOrder } from './lib/canvas-edit';
   import LayoutPreview from './lib/LayoutPreview.svelte';
 
   let { doc, layoutId = '' }: { doc: EditorDoc; layoutId?: string } = $props();
@@ -147,12 +146,13 @@
     return !!el?.closest('input, textarea, select, [contenteditable="true"], .le-inline-text-editor');
   }
 
+  // Both renderers stamp data-object-id / data-part-id (#134), so identity is
+  // read straight off the element — no DOM-index-to-paint-order matching.
   function objectIdForElement(el: HTMLElement): number | null {
-    if (!stage) return null;
-    const objects = [...stage.querySelectorAll<HTMLElement>('.fm-canvas .fm-obj')];
-    const index = objects.indexOf(el);
-    if (index < 0) return null;
-    return objectIdsInPaintOrder(doc.renderModel)[index] ?? null;
+    const raw = el.dataset.objectId;
+    if (raw === undefined) return null;
+    const id = Number(raw);
+    return Number.isFinite(id) ? id : null;
   }
 
   function objectIdFromPoint(event: MouseEvent): number | null {
@@ -169,12 +169,11 @@
   }
 
   function partIdFromTarget(target: EventTarget | null): number | null {
-    if (!stage) return null;
-    const el = target instanceof Element ? target.closest('.fm-part') : null;
-    if (!el) return null;
-    const parts = [...stage.querySelectorAll<HTMLElement>('.fm-canvas .fm-part')];
-    const index = parts.indexOf(el as HTMLElement);
-    return index >= 0 ? (doc.renderModel.parts[index]?.id ?? null) : null;
+    const el = target instanceof Element ? (target.closest('.fm-part') as HTMLElement | null) : null;
+    const raw = el?.dataset.partId;
+    if (raw === undefined) return null;
+    const id = Number(raw);
+    return Number.isFinite(id) ? id : null;
   }
 
   function openContextMenu(event: MouseEvent, title: string, items: ContextMenuItem[]): void {

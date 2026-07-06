@@ -10,11 +10,15 @@
    object; a shape renders a styled box from its server-derived `shape_style`;
    any other object is static `text` rendered from its `content` slot. The Svelte
    `Band` component mirrors this branch-for-branch (the #44 parity contract). #}
+{# `data-part-id`/`data-object-id` carry each element's stable id so hit-testing
+   reads identity directly off the DOM instead of matching DOM index against
+   paint order (#134). Keep them stamped in BOTH renderers. #}
 {% macro band(p, editable) %}
-<div class="fm-part" style="height: {{ p.height }}px;{{ p.part_style }}">
+<div class="fm-part" style="height: {{ p.height }}px;{{ p.part_style }}" data-part-id="{{ p.id }}">
   {% for o in p.objects %}
   <div class="fm-obj{% if o.field %} fm-field{% endif %}{% if o.read_only %} fm-readonly{% endif %}"
-       style="left:{{ o.x }}px; top:{{ o.y }}px; width:{{ o.w }}px; height:{{ o.h }}px; z-index:{{ o.z }};{{ o.object_style }}">
+       style="left:{{ o.x }}px; top:{{ o.y }}px; width:{{ o.w }}px; height:{{ o.h }}px; z-index:{{ o.z }};{{ o.object_style }}"
+       data-object-id="{{ o.id }}">
     {% if o.field %}
     {% if editable && !o.read_only %}
       {% match o.field_id %}

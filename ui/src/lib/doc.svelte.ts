@@ -390,6 +390,14 @@ export class EditorDoc {
     return this.#objects.get(id);
   }
 
+  /** The server-resolved render projection for one object (session scope):
+   * the resolved `fieldId`, label/value, derived styles. This is what the
+   * inspector reads for field identity — the binding string is never re-parsed
+   * client-side (#134). */
+  getResolved(id: number): Readonly<ObjectResolved> | undefined {
+    return this.#resolved.get(id);
+  }
+
   /** The structural part record for one part. */
   getPart(id: number): Readonly<PartDoc> | undefined {
     return this.#parts.find((p) => p.id === id);

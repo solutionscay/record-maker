@@ -68,7 +68,11 @@
   // exactly one definition of "can this kind be filled / text-formatted".
   let canFillLine = $derived(!!selected && kindCanFillLine(selected.kind));
   let canTextFormat = $derived(!!selected && kindCanTextFormat(selected.kind));
-  let selectedBindingFieldId = $derived(selected?.kind === 'field' ? fieldIdForBinding(selected.binding) : null);
+  // Field identity comes from the render model's server-resolved fieldId —
+  // never re-derived from the binding string client-side (#134).
+  let selectedBindingFieldId = $derived(
+    selected?.kind === 'field' && selectedId !== null ? (doc.getResolved(selectedId)?.fieldId ?? null) : null,
+  );
 
   // ── Multi-select derived state (#82) ──────────────────────────────────────
   // A control appears only when EVERY selected object shares the capability (not
@@ -225,12 +229,6 @@
 
   function partKindLabel(kind: string): string {
     return PART_KINDS.find((p) => p.id === kind)?.label ?? kind;
-  }
-
-  function fieldIdForBinding(binding: string): number | null {
-    const fieldName = binding.split('.').at(-1)?.toLowerCase() ?? '';
-    const found = doc.fields.find((f) => f.name.toLowerCase() === fieldName);
-    return found?.id ?? null;
   }
 
   // Kind-based capability predicates — read the engine's per-kind capability

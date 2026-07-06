@@ -24,6 +24,7 @@
     "vite": "^6.0.0"
   },
   "dependencies": {
+    "@xyflow/svelte": "^1.6.2",
     "moveable": "^0.53.0",
     "selecto": "^1.26.3"
   }

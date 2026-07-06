@@ -66,10 +66,11 @@
     closeDrawers();
     fieldDrawer = { tableId, id: null };
   }
-  function editField(id: number) {
-    if (store.selectedTableId == null) return;
+  function editField(id: number, tableId = store.selectedTableId) {
+    if (tableId == null) return;
     closeDrawers();
-    fieldDrawer = { tableId: store.selectedTableId, id };
+    store.selectTable(tableId);
+    fieldDrawer = { tableId, id };
   }
   function newRelationship() {
     closeDrawers();
@@ -111,7 +112,7 @@
     {:else if tab === 'fields'}
       <FieldGrid {store} onswitch={openTable} onedit={editField} onnew={newField} onnotables={goTables} openFieldId={fieldDrawer?.id ?? null} />
     {:else}
-      <RelationshipsView {store} onnew={newRelationship} onedit={editRelationship} />
+      <RelationshipsView {store} onnew={newRelationship} onedit={editRelationship} ontable={editTable} onfield={editField} />
     {/if}
 
     {#if tableDrawerOpen}

@@ -155,6 +155,63 @@ impl ObjectKind {
             ObjectKind::Rect | ObjectKind::Line | ObjectKind::Ellipse
         )
     }
+
+    /// Every object kind, in declaration order — for building the per-kind
+    /// capability table the design model exports.
+    pub const ALL: [ObjectKind; 5] = [
+        ObjectKind::Field,
+        ObjectKind::Text,
+        ObjectKind::Rect,
+        ObjectKind::Line,
+        ObjectKind::Ellipse,
+    ];
+
+    /// The kind's capability record — see [`ObjectCapabilities`]. THE single
+    /// per-kind capability table: the server ships it to the editor through the
+    /// design model, so every "does this kind take a fill / text format /
+    /// content slot / binding?" gate reads this one definition. Adding a new
+    /// object kind means filling in one row here, not updating scattered
+    /// predicates.
+    pub fn capabilities(self) -> ObjectCapabilities {
+        match self {
+            ObjectKind::Field => ObjectCapabilities {
+                fill: true,
+                stroke: true,
+                text_format: true,
+                content_slot: false,
+                bindable: true,
+            },
+            ObjectKind::Text => ObjectCapabilities {
+                fill: false,
+                stroke: false,
+                text_format: true,
+                content_slot: true,
+                bindable: false,
+            },
+            ObjectKind::Rect | ObjectKind::Line | ObjectKind::Ellipse => ObjectCapabilities {
+                fill: true,
+                stroke: true,
+                text_format: false,
+                content_slot: false,
+                bindable: false,
+            },
+        }
+    }
+}
+
+/// What a layout object kind can do — the per-kind capability record returned
+/// by [`ObjectKind::capabilities`]. `fill`/`stroke` gate the inspector's
+/// fill-and-border controls, `text_format` its font/text controls,
+/// `content_slot` marks kinds carrying static text in their own `content` slot,
+/// and `bindable` marks data-bound kinds that resolve a `binding` to a live
+/// field value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectCapabilities {
+    pub fill: bool,
+    pub stroke: bool,
+    pub text_format: bool,
+    pub content_slot: bool,
+    pub bindable: bool,
 }
 
 /// A layout part (band): header|body|footer|subsummary|grandsummary. Parts stack

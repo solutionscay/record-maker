@@ -7,10 +7,7 @@
   // parity-checked canvas DOM. Styling follows the "modern Mac" design ref.
   import type { EditorDoc, ObjectDoc } from './doc.svelte';
   import {
-    deleteObject as persistDeleteObject,
-    deleteObjectGroup as persistDeleteObjectGroup,
     deletePart as persistDeletePart,
-    createObjectGroup as persistCreateObjectGroup,
     movePart as persistMovePart,
     setObjectBinding as persistBinding,
     setObjectContent as persistContent,
@@ -22,8 +19,16 @@
     setPartKind as persistPartKind,
     setPartProps as persistPartProps,
   } from './persist';
+  import {
+    canGroupSelection,
+    canUngroupSelection,
+    deleteSelected as deleteSelectedAction,
+    groupSelected as groupSelectedAction,
+    ungroupSelected as ungroupSelectedAction,
+  } from './actions';
+  import { canSetPartKind, partKindAllowedInView } from './part-rules';
   import { llog, lerror } from './log';
-  import { formatValue } from './format';
+  import { postJson } from '../shared/http';
   import Icon from './Icon.svelte';
   import FieldSelect from './FieldSelect.svelte';
   import {
@@ -86,9 +91,8 @@
   let canDistribute = $derived(selectedIds.length >= 3);
   let resizableCount = $derived(selectedObjects.filter((o) => o.kind !== 'line').length);
   let canResizeMatch = $derived(resizableCount >= 2);
-  let activeGroupId = $derived(doc.groupIdForSelection(selectedIds));
-  let canGroup = $derived(selectedIds.length >= 2 && activeGroupId === null);
-  let canUngroup = $derived(activeGroupId !== null);
+  let canGroup = $derived(canGroupSelection(doc));
+  let canUngroup = $derived(canUngroupSelection(doc));
 
   // Shared style/text attributes across the whole selection, each as {mixed, value}.
   let mFill = $derived(sharedValue((p) => colorValue(p.fill, '#f7f8fa')));
@@ -105,8 +109,8 @@
   // ── Value-format (#77 number/Boolean, #78 date/time) ──────────────────────
   // Contextual by the bound field's kind (resolved through the binding, #79/#76).
   // The controls write the `format` sub-bag of the object's props; the server owns
-  // the actual Browse/canvas render (crates/server/src/format.rs), so the panel's
-  // Sample uses the byte-compatible TS mirror in ./format.ts for live feedback.
+  // the actual Browse/canvas render (crates/server/src/format.rs), and the panel's
+  // Sample line asks that same formatter over `/design/format-sample` (below).
   let selectedFieldKind = $derived(
     selected?.kind === 'field' ? (doc.fields.find((f) => f.id === selectedBindingFieldId)?.kind ?? null) : null,
   );
@@ -143,19 +147,38 @@
             ? '2003-12-25T13:05:09'
             : '',
   );
-  let sample = $derived(formatValue(sampleRaw, formatBag, selectedFieldKind ?? 'text'));
+  // The Sample line is rendered by the SERVER's formatter (format.rs — the one
+  // definition of the format rules; there is no client-side mirror). Debounced so
+  // a burst of control edits costs one request; a stale response never overwrites
+  // a newer one because the effect's cleanup cancels the pending timer and the
+  // fetch result is dropped once superseded.
+  let sample = $state<{ text: string; color: string | null }>({ text: '', color: null });
+  let sampleRequest = 0;
+  $effect(() => {
+    const raw = sampleRaw;
+    const kind = selectedFieldKind;
+    const format = formatBag;
+    if (!kind || !hasValueFormat) {
+      sample = { text: '', color: null };
+      return;
+    }
+    const id = ++sampleRequest;
+    const timer = setTimeout(() => {
+      postJson<{ text: string; color: string | null }>('/design/format-sample', { raw, kind, format })
+        .then((f) => {
+          if (id === sampleRequest) sample = f;
+        })
+        .catch((e) => lerror('persist', 'format sample failed', e));
+    }, 120);
+    return () => clearTimeout(timer);
+  });
   let selectedPartId = $derived(doc.selectedPartId);
   let selectedPart = $derived(selectedPartId === null ? undefined : doc.getPart(selectedPartId));
   let selectedPartProps = $derived(parseProps(selectedPart?.props ?? ''));
   // A form offers header/body/footer only; summaries are List/Table (Issue 3). The
   // current kind stays listed so an existing band always shows its own value.
   let partKinds = $derived(
-    PART_KINDS.filter(
-      (p) =>
-        doc.view !== 'form' ||
-        (p.id !== 'subsummary' && p.id !== 'grandsummary') ||
-        p.id === selectedPart?.kind,
-    ),
+    PART_KINDS.filter((p) => partKindAllowedInView(doc.view, p.id) || p.id === selectedPart?.kind),
   );
   // Summary bands (sub/grand) are reorderable between the header and footer (Issue 4).
   let sortedParts = $derived([...doc.parts].sort((a, b) => a.position - b.position || a.id - b.id));
@@ -210,13 +233,16 @@
     return found?.id ?? null;
   }
 
-  // Kind-based capability predicates — the single source both the single-object
-  // (`canFillLine`/`canTextFormat`) and the whole-selection (`allCan*`) gates use.
+  // Kind-based capability predicates — read the engine's per-kind capability
+  // table (design_model `capabilities` via `doc.capsFor`), so "can this kind be
+  // filled / text-formatted" is defined exactly once, server-side. Both the
+  // single-object (`canFillLine`/`canTextFormat`) and whole-selection (`allCan*`)
+  // gates go through here.
   function kindCanFillLine(kind: string): boolean {
-    return kind === 'field' || kind === 'rect' || kind === 'ellipse' || kind === 'line';
+    return doc.capsFor(kind).fill;
   }
   function kindCanTextFormat(kind: string): boolean {
-    return kind === 'field' || kind === 'text';
+    return doc.capsFor(kind).textFormat;
   }
 
   /** Resolve one attribute across the whole selection into `{ mixed, value }`:
@@ -296,33 +322,10 @@
     }
   }
 
-  function isSingletonPartKind(kind: string): boolean {
-    return kind === 'header' || kind === 'body' || kind === 'footer';
-  }
-
+  // Band-kind legality lives in ./part-rules (shared with the rail's add-band
+  // gating) — this only binds it to the current selection.
   function canSetSelectedPartKind(kind: string): boolean {
-    if (!selectedPart) return false;
-    if (selectedPart.kind === kind) return true;
-    // A form allows only header/body/footer — summary bands are List/Table (Issue 3).
-    if (doc.view === 'form' && (kind === 'subsummary' || kind === 'grandsummary')) return false;
-    if (selectedPart.kind === 'body') return false;
-    // Header/footer are structural anchors (top/bottom) — they can't become summaries,
-    // which would strand a summary above the header or below the footer (mirrors move_part).
-    if (
-      (selectedPart.kind === 'header' || selectedPart.kind === 'footer') &&
-      (kind === 'subsummary' || kind === 'grandsummary')
-    )
-      return false;
-    if (isSingletonPartKind(kind) && doc.parts.some((p) => p.id !== selectedPart.id && p.kind === kind)) return false;
-    if (kind === 'grandsummary') {
-      const body = doc.parts.find((p) => p.kind === 'body');
-      if (!body) return false;
-      const wantsTrailing = selectedPart.position > body.position;
-      return !doc.parts.some(
-        (p) => p.id !== selectedPart.id && p.kind === 'grandsummary' && (p.position > body.position) === wantsTrailing,
-      );
-    }
-    return true;
+    return !!selectedPart && canSetPartKind(doc.view, doc.parts, selectedPart, kind);
   }
 
   // ── Object / Style / Text handlers ────────────────────────────────────────
@@ -528,33 +531,21 @@
     }
   }
 
+  // Group / ungroup / delete run through the shared command layer (./actions) so
+  // the Inspector buttons and the canvas keyboard/context menu share one
+  // implementation — including the post-delete canvas chrome cleanup.
   async function groupSelectedObjects(): Promise<void> {
-    if (!canGroup || busy) return;
+    if (busy) return;
     busy = true;
-    llog('persist', 'inspector: group objects', { ids: selectedIds });
-    try {
-      const group = await persistCreateObjectGroup(layoutId, selectedIds);
-      doc.setGroup(group);
-    } catch (e) {
-      reportPersistError('group objects', e);
-    } finally {
-      busy = false;
-    }
+    await groupSelectedAction(doc, layoutId);
+    busy = false;
   }
 
   async function ungroupSelectedObjects(): Promise<void> {
-    if (activeGroupId === null || busy) return;
-    const groupId = activeGroupId;
+    if (busy) return;
     busy = true;
-    llog('persist', 'inspector: ungroup objects', { groupId });
-    try {
-      await persistDeleteObjectGroup(layoutId, groupId);
-      doc.removeGroup(groupId);
-    } catch (e) {
-      reportPersistError('ungroup objects', e);
-    } finally {
-      busy = false;
-    }
+    await ungroupSelectedAction(doc, layoutId);
+    busy = false;
   }
 
   async function setLineAngle(value: number): Promise<void> {
@@ -617,19 +608,10 @@
   }
 
   async function deleteSelectedObjects(): Promise<void> {
-    const ids = selectedIds;
-    if (ids.length === 0 || busy) return;
+    if (busy) return;
     busy = true;
-    llog('persist', 'inspector: delete object(s)', { ids });
-    try {
-      await Promise.all(ids.map((id) => persistDeleteObject(layoutId, id)));
-      for (const id of ids) doc.removeObject(id);
-      doc.mark();
-    } catch (e) {
-      reportPersistError('delete object', e);
-    } finally {
-      busy = false;
-    }
+    await deleteSelectedAction(doc, layoutId);
+    busy = false;
   }
 
   // ── Value-format handlers ─────────────────────────────────────────────────

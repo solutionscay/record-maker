@@ -24,10 +24,7 @@ import { GRID, SNAP_THRESHOLD, clampOrigin, elementsToObjectIds, objectIdsInPain
 import { defaultBox, defaultProps, partAtY } from './create';
 import {
   createObject,
-  createObjectGroup,
   deleteObject,
-  deleteObjects,
-  deleteObjectGroup,
   setObjectContent,
   setObjectPart,
   setObjectProps as persistObjectProps,
@@ -36,6 +33,15 @@ import {
   setObjectsGeometry,
 } from './persist';
 import type { NewObjectRequest } from './persist';
+import {
+  canGroupSelection,
+  canUngroupSelection,
+  deleteSelected as deleteSelectedAction,
+  groupSelected as groupSelectedAction,
+  isDeleting,
+  registerCanvasCleanup,
+  ungroupSelected as ungroupSelectedAction,
+} from './actions';
 import { clipboard } from './clipboard.svelte';
 import type { ClipboardObject } from './clipboard.svelte';
 import { runUndo, runRedo } from './history';
@@ -95,10 +101,6 @@ export class CanvasInteraction {
   #zoom = 1;
   /** True while a placement POST is in flight, so a second click can't double-place. */
   #placing = false;
-  /** True while selected object deletion is in flight, so repeat keys do not fan out. */
-  #deleting = false;
-  /** True while group/ungroup persistence is in flight, so menu repeats do not race. */
-  #grouping = false;
   /** One-shot: swallow the native `click` the browser fires right after Selecto
    * commits selection. Without it, `#onClick` can run its empty-canvas deselect
    * path and wipe the marquee or modifier-click selection that just landed. A
@@ -136,6 +138,8 @@ export class CanvasInteraction {
    * per event. Gestures still pin their own start-of-gesture snapshot. */
   #identityCache: IdentitySnapshot | null = null;
   #pendingObjectClick: PendingObjectClick | null = null;
+  /** Unregisters this instance's canvas-cleanup callback from the command layer. */
+  #unregisterCleanup: () => void = () => {};
 
   constructor(stage: HTMLElement, doc: EditorDoc, layoutId: string) {
     this.#stage = stage;
@@ -375,6 +379,13 @@ export class CanvasInteraction {
     this.#stage.addEventListener('dragover', this.#onDragOver);
     this.#stage.addEventListener('dragleave', this.#onDragLeave);
     this.#stage.addEventListener('drop', this.#onDrop);
+    // The shared command layer (./actions) runs this after a delete — whichever
+    // surface issued it — so hover + moveable chrome never outlive the objects.
+    this.#unregisterCleanup = registerCanvasCleanup(() => {
+      this.#setHover(null);
+      this.#targetKey = '__force_empty__';
+      this.#updateTarget();
+    });
     llog('init', 'CanvasInteraction ready', { layoutId, painted: this.#paintedElements().length });
   }
 
@@ -764,6 +775,7 @@ export class CanvasInteraction {
     this.#textEditorCleanup?.();
     this.#textEditor?.remove();
     if (this.#rectFrame !== null) cancelAnimationFrame(this.#rectFrame);
+    this.#unregisterCleanup();
     this.#moveable.destroy();
     this.#selecto.destroy();
   }
@@ -909,7 +921,7 @@ export class CanvasInteraction {
       const k = e.key.toLowerCase();
       if (k === 'c' || k === 'x' || k === 'v') {
         if (inEditable) return; // let the browser copy/cut/paste text
-        if (this.#gesturing || this.#drawing || this.#deleting || this.#placing) return; // never mutate mid-gesture/async
+        if (this.#gesturing || this.#drawing || isDeleting() || this.#placing) return; // never mutate mid-gesture/async
         if (k === 'v') {
           if (!clipboard.hasContent) return; // nothing to paste → let event pass
           e.preventDefault();
@@ -932,7 +944,7 @@ export class CanvasInteraction {
       const isRedo = (k === 'z' && e.shiftKey) || k === 'y';
       if (isUndo || isRedo) {
         if (inEditable) return; // let native text-field undo win — return BEFORE preventDefault
-        if (this.#gesturing || this.#drawing || this.#deleting || this.#placing) return; // never pop mid-gesture / mid-draw / mid-async
+        if (this.#gesturing || this.#drawing || isDeleting() || this.#placing) return; // never pop mid-gesture / mid-draw / mid-async
         e.preventDefault();
         if (isRedo) runRedo(this.#doc, this.#layoutId);
         else runUndo(this.#doc, this.#layoutId);
@@ -956,9 +968,9 @@ export class CanvasInteraction {
     if (e.key !== 'Delete' && e.key !== 'Backspace') return;
     if (e.altKey || e.ctrlKey || e.metaKey) return;
     if (inEditable) return;
-    if (this.#doc.selection.size === 0 || this.#deleting) return;
+    if (this.#doc.selection.size === 0 || isDeleting()) return;
     e.preventDefault();
-    void this.#deleteSelectedObjects();
+    void deleteSelectedAction(this.#doc, this.#layoutId);
   };
 
   /** Select all canvas objects (Cmd/Ctrl+A). A no-op while a placement tool is
@@ -969,27 +981,6 @@ export class CanvasInteraction {
     this.#doc.selectAll();
     llog('select', 'select all (keyboard)', { count: this.#doc.selection.size });
     this.#updateTarget();
-  }
-
-  async #deleteSelectedObjects(): Promise<void> {
-    const ids = [...this.#doc.selection];
-    if (ids.length === 0 || this.#deleting) return;
-    this.#deleting = true;
-    llog('persist', 'delete selected object(s)', { ids });
-    try {
-      // One bulk POST (transactional server-side) instead of one per object.
-      await deleteObjects(this.#layoutId, ids);
-      for (const id of ids) this.#doc.removeObject(id);
-      this.#doc.mark();
-      this.#setHover(null);
-      this.#targetKey = '__force_empty__';
-      this.#updateTarget();
-    } catch (e) {
-      lerror('persist', 'failed to delete selected object(s)', e);
-      this.#reportError(e);
-    } finally {
-      this.#deleting = false;
-    }
   }
 
   // ── clipboard: cut / copy / paste (#85) ──
@@ -1028,88 +1019,133 @@ export class CanvasInteraction {
     return true;
   }
 
-  /** Cut = copy the selection, then run the existing delete+persist path. One
-   *  atomic undo step (the delete's single mark()). */
+  /** Cut = copy the selection, then run the shared delete command. One atomic
+   *  undo step (the delete's single mark()). */
   async #cutSelectedObjects(): Promise<void> {
-    if (this.#deleting) return;
+    if (isDeleting()) return;
     if (!this.#copySelectionToClipboard()) return; // capture BEFORE removal: after removeObject, fieldId is gone
-    await this.#deleteSelectedObjects(); // deleteObject×N → removeObject×N → ONE mark() → detach moveable
+    await deleteSelectedAction(this.#doc, this.#layoutId); // bulk delete → removeObject×N → ONE mark() → detach moveable
   }
 
-  /** Paste every clipboard object as a NEW server object into its source part,
-   *  at a cascade offset, preserving relative layout / z / readOnly. All-or-nothing:
-   *  either every object is created+added under one mark(), or none is and any
-   *  server rows created before a failure are rolled back. */
+  /** Paste every clipboard object as a NEW server object into its source part at
+   *  a cascade offset, preserving relative layout / z / readOnly (the clone flow's
+   *  paste policy). */
   async #pasteClipboard(): Promise<void> {
     const payload = clipboard.payload;
     if (!payload || payload.objects.length === 0) return;
-    if (this.#placing || this.#deleting || this.#gesturing || this.#drawing) return;
+    if (this.#placing || isDeleting() || this.#gesturing || this.#drawing) return;
 
-    this.#placing = true;
     const step = clipboard.nextPasteStep(); // 1,2,3…
-    const desired = step * GRID; // n * 8px down-right, before in-band capping
+    const newIds = await this.#materializeClones(payload.objects, {
+      offset: { mode: 'cascade', desired: step * GRID }, // n * 8px down-right, before in-band capping
+      restack: true, // pasted group lands ON TOP, readOnly restored
+      forcePointer: true, // a still-armed draw tool would clear moveable's target
+      label: 'paste',
+    });
+    if (newIds) llog('clipboard', 'pasted objects', { count: newIds.length, step, newIds });
+  }
+
+  /** Duplicate the current selection (#48) at a fixed one-step offset so the
+   * copies land visibly next to the originals rather than exactly on top of
+   * them, then select the copies (not the originals) — the usual "duplicate
+   * leaves you holding the new one" convention. Same clone flow as paste, minus
+   * the z-restack/readOnly pass: duplicates keep their server-assigned stacking
+   * and don't carry the per-object read-only flag (low-priority gap; nothing in
+   * the editor exposes setting that flag yet — field-editability-in-layout-mode). */
+  async #duplicateSelectedObjects(): Promise<void> {
+    const ids = new Set(this.#doc.selection);
+    if (ids.size === 0 || this.#placing) return;
+    // ObjectView (unlike the store's own ObjectDoc) carries the resolved fieldId
+    // a clone needs, but not which part it's in — that's implicit in which
+    // PartView it's nested under in renderModel, so pair the two here.
+    const clips: ClipboardObject[] = [];
+    for (const part of this.#doc.renderModel.parts) {
+      for (const view of part.objects) {
+        if (!ids.has(view.id)) continue;
+        clips.push({
+          kind: view.kind,
+          partId: part.id,
+          x: view.x,
+          y: view.y,
+          w: view.w,
+          h: view.h,
+          z: view.z,
+          readOnly: view.readOnly,
+          binding: view.binding,
+          content: view.content,
+          props: view.props,
+          fieldId: view.fieldId,
+        });
+      }
+    }
+    const newIds = await this.#materializeClones(clips, {
+      offset: { mode: 'fixed', dx: GRID * 2, dy: GRID * 2 },
+      restack: false,
+      forcePointer: false,
+      label: 'duplicate',
+    });
+    if (newIds) llog('create', 'duplicated object(s)', { from: [...ids], created: newIds });
+  }
+
+  /** Materialize `clips` as NEW server objects — the ONE clone-creation flow
+   *  behind both paste and duplicate, which differ only in policy: the offset
+   *  (per-part capped cascade vs fixed step), whether the clones are restacked on
+   *  top with readOnly restored, and whether the pointer tool is forced.
+   *  All-or-nothing: either every clone is created+added under one mark(), or
+   *  none is and any server rows created before a failure are rolled back.
+   *  Returns the new ids, or null when nothing was materialized. */
+  async #materializeClones(
+    clips: ClipboardObject[],
+    policy: {
+      offset: { mode: 'cascade'; desired: number } | { mode: 'fixed'; dx: number; dy: number };
+      restack: boolean;
+      forcePointer: boolean;
+      label: string;
+    },
+  ): Promise<number[] | null> {
+    if (clips.length === 0) return null;
+    this.#placing = true;
     const model = this.#doc.renderModel;
 
     // Create in ascending source-z order so server insert order tracks original
-    // stacking; a later z-normalization pass makes it exact.
-    const clips = [...payload.objects].sort((a, b) => a.z - b.z);
+    // stacking; the restack pass (paste) then makes it exact.
+    const ordered = [...clips].sort((a, b) => a.z - b.z);
 
     // Resolve each clip's target part (its source part, or the last band if that
-    // part is gone), then compute ONE (dx,dy) per target part: every object in a
-    // band shifts by the same delta, so relative layout is preserved exactly, and
-    // the delta is capped so the group's far edge stays in-band on BOTH axes (a
-    // per-object clamp would collapse offsets for objects near an edge).
-    const resolved = clips.map((c) => {
+    // part is gone), then one (dx,dy) per clip from the offset policy.
+    const resolved = ordered.map((c) => {
       const part = this.#doc.getPart(c.partId) ?? model.parts.at(-1);
       return { c, partId: part?.id ?? c.partId, partH: part?.height ?? Number.MAX_SAFE_INTEGER };
     });
-    const ext = new Map<number, { maxX: number; maxY: number; partH: number }>();
-    for (const { c, partId, partH } of resolved) {
-      const e = ext.get(partId) ?? { maxX: 0, maxY: 0, partH };
-      e.maxX = Math.max(e.maxX, c.x + c.w);
-      e.maxY = Math.max(e.maxY, c.y + c.h);
-      ext.set(partId, e);
-    }
-    // Floor each capped delta to a whole GRID step: keeps the paste grid-aligned
-    // and guarantees the group's far edge never snaps a few px past the in-band cap.
-    const capToGrid = (max: number) => Math.max(0, Math.floor(Math.min(desired, max) / GRID) * GRID);
-    const offset = new Map<number, { dx: number; dy: number }>();
-    for (const [partId, e] of ext) {
-      offset.set(partId, {
-        dx: capToGrid(model.width - e.maxX),
-        dy: capToGrid(e.partH - e.maxY),
-      });
-    }
+    const offset = this.#cloneOffsets(resolved, model.width, policy.offset);
 
     // Build one create request per clip, offset by its part's shared (dx,dy).
     const plans = resolved.map(({ c, partId }) => {
       const { dx, dy } = offset.get(partId) ?? { dx: 0, dy: 0 };
-      const x = clampOrigin(snapToGrid(c.x + dx));
-      const y = clampOrigin(snapToGrid(c.y + dy));
-      const isField = c.kind === 'field';
+      const caps = this.#doc.capsFor(c.kind);
       const req: NewObjectRequest = {
         partId,
         kind: c.kind,
-        x,
-        y,
+        x: clampOrigin(snapToGrid(c.x + dx)),
+        y: clampOrigin(snapToGrid(c.y + dy)),
         w: c.w,
         h: c.h,
         rec: this.#doc.rec,
-        fieldId: isField ? c.fieldId : null,
+        fieldId: caps.bindable ? c.fieldId : null,
         // The binding is what actually recreates the value object: send it so a
         // field whose fieldId is null (unresolved binding / empty table) still
-        // pastes instead of 400ing, and so the copy keeps its exact binding.
-        binding: isField ? c.binding : null,
-        createLabel: isField ? false : undefined, // NEVER auto-spawn a caption
-        content: c.kind === 'text' ? c.content : null,
+        // clones instead of 400ing, and so the copy keeps its exact binding.
+        binding: caps.bindable ? c.binding : null,
+        createLabel: caps.bindable ? false : undefined, // NEVER auto-spawn a caption
+        content: caps.contentSlot ? c.content : null,
         props: c.props ? parseProps(c.props) : null, // string → object for the wire
       };
       return { req, partId, clip: c };
     });
 
     const created: { view: ObjectView; partId: number; clip: ClipboardObject }[] = [];
-    const landedIds: number[] = []; // every server row created this paste — for rollback
-    let committed = false; // true once addObject + mark() fold the paste into store/undo
+    const landedIds: number[] = []; // every server row created this run — for rollback
+    let committed = false; // true once addObject + mark() fold the clones into store/undo
     try {
       // 1. Persist all (fresh ids). allSettled so a partial failure rolls back cleanly.
       const results = await Promise.allSettled(plans.map((p) => createObject(this.#layoutId, p.req)));
@@ -1119,7 +1155,7 @@ export class CanvasInteraction {
       //    whatever DID land so the server never keeps phantom rows.
       if (results.some((r) => r.status === 'rejected')) {
         const firstRej = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
-        throw firstRej?.reason ?? new Error('paste failed');
+        throw firstRej?.reason ?? new Error(`${policy.label} failed`);
       }
 
       // 3. All succeeded. Collect views (each field is length-1: createLabel:false).
@@ -1129,117 +1165,90 @@ export class CanvasInteraction {
         }
       });
 
-      // 4. z / readOnly fidelity: place the pasted group ON TOP of each target part
-      //    in preserved relative order, and restore readOnly. Persist first, then
-      //    mirror into the doc so store + server agree; all diffs fold into ONE step.
-      //    A failure here also unwinds through the catch (rows created in step 1 are
-      //    rolled back), so a network drop mid-paste never leaves phantom rows.
-      await this.#applyPasteZAndReadOnly(created);
+      // 4. Paste-only z / readOnly fidelity: place the cloned group ON TOP of each
+      //    target part in preserved relative order, and restore readOnly. Persist
+      //    first, then mirror into the doc so store + server agree; all diffs fold
+      //    into ONE step. A failure here also unwinds through the catch (rows
+      //    created in step 1 are rolled back), so a network drop mid-run never
+      //    leaves phantom rows.
+      const targetZ = policy.restack ? await this.#applyCloneZAndReadOnly(created) : null;
 
       // 5. Add every view (undoable life diffs) THEN a single mark() = one undo step.
       for (const { view, partId } of created) this.#doc.addObject(view, partId);
-      for (const { view, clip } of created) {
-        // mirror z/readOnly into the doc
-        if (clip._targetZ !== undefined && view.z !== clip._targetZ) this.#doc.setProp(view.id, 'z', clip._targetZ);
-        if (view.readOnly !== clip.readOnly) this.#doc.setProp(view.id, 'readOnly', clip.readOnly);
+      if (targetZ) {
+        for (const { view, clip } of created) {
+          // mirror z/readOnly into the doc
+          const z = targetZ.get(view.id);
+          if (z !== undefined && view.z !== z) this.#doc.setProp(view.id, 'z', z);
+          if (view.readOnly !== clip.readOnly) this.#doc.setProp(view.id, 'readOnly', clip.readOnly);
+        }
       }
       this.#doc.mark(); // ← ONE atomic undo step
-      committed = true; // past here the paste lives in store + undo; never roll back
+      committed = true; // past here the clones live in store + undo; never roll back
 
-      // 6. Force pointer mode (a still-armed draw tool clears moveable's target), then
-      //    select the pasted objects; rely on the reactive moveable sync (like #finishDraw).
-      this.#doc.setTool('pointer');
+      // 6. Optionally force pointer mode (a still-armed draw tool clears moveable's
+      //    target), then select the clones; rely on the reactive moveable sync
+      //    (like #finishDraw).
+      if (policy.forcePointer) this.#doc.setTool('pointer');
       const newIds = created.map((c) => c.view.id);
       this.#doc.selectOnly(newIds);
       this.#hoverId = newIds.at(-1) ?? null; // pin hover so #updateTarget resolves right
-      llog('clipboard', 'pasted objects', { count: newIds.length, step, newIds });
+      return newIds;
     } catch (e) {
-      // Roll back any rows that landed before the paste committed, so store and
+      // Roll back any rows that landed before the run committed, so store and
       // server never diverge (no phantom rows surfacing on the next reload).
       if (!committed && landedIds.length) {
         await Promise.allSettled(landedIds.map((id) => deleteObject(this.#layoutId, id)));
       }
-      lerror('clipboard', 'failed to paste', e);
+      lerror('clipboard', `failed to ${policy.label}`, e);
       this.#reportError(e);
+      return null;
     } finally {
       this.#placing = false;
     }
   }
 
-  /** Duplicate the current selection (#48), offset by one placement step so the
-   * copies land visibly next to the originals rather than exactly on top of
-   * them, then select the copies (not the originals) — the usual "duplicate
-   * leaves you holding the new one" convention. One create call per selected
-   * object, each an exact clone of its geometry/binding/content/appearance;
-   * `createLabel: false` throughout so duplicating a field VALUE never conjures
-   * an extra label that wasn't already there — duplicate what's selected, not
-   * more. NOTE: doesn't carry over a per-object read-only flag (there's no slot
-   * for it in the create request); low-priority gap since nothing in the editor
-   * exposes setting that flag yet (see field-editability-in-layout-mode). */
-  async #duplicateSelectedObjects(): Promise<void> {
-    const ids = new Set(this.#doc.selection);
-    if (ids.size === 0 || this.#placing) return;
-    // ObjectView (unlike the store's own ObjectDoc) carries the resolved
-    // fieldId a duplicate needs, but not which part it's in — that's implicit
-    // in which PartView it's nested under in renderModel, so pair the two here.
-    const found: { partId: number; view: ObjectView }[] = [];
-    for (const part of this.#doc.renderModel.parts) {
-      for (const view of part.objects) {
-        if (ids.has(view.id)) found.push({ partId: part.id, view });
-      }
+  /** One (dx,dy) per target part for a clone run. `fixed` shifts every clip by
+   *  the same delta (duplicate). `cascade` computes ONE capped delta per part:
+   *  every object in a band shifts together, so relative layout is preserved
+   *  exactly, and the delta is capped so the group's far edge stays in-band on
+   *  BOTH axes (a per-object clamp would collapse offsets near an edge). Each
+   *  capped delta is floored to a whole GRID step: keeps the paste grid-aligned
+   *  and guarantees the far edge never snaps a few px past the in-band cap. */
+  #cloneOffsets(
+    resolved: { c: ClipboardObject; partId: number; partH: number }[],
+    canvasWidth: number,
+    policy: { mode: 'cascade'; desired: number } | { mode: 'fixed'; dx: number; dy: number },
+  ): Map<number, { dx: number; dy: number }> {
+    const offset = new Map<number, { dx: number; dy: number }>();
+    if (policy.mode === 'fixed') {
+      for (const { partId } of resolved) offset.set(partId, { dx: policy.dx, dy: policy.dy });
+      return offset;
     }
-    if (found.length === 0) return;
-    this.#placing = true;
-    const offset = GRID * 2;
-    try {
-      const created = await Promise.all(
-        found.map(async ({ partId, view }) => {
-          const views = await createObject(this.#layoutId, {
-            partId,
-            kind: view.kind,
-            x: clampOrigin(snapToGrid(view.x + offset)),
-            y: clampOrigin(snapToGrid(view.y + offset)),
-            w: view.w,
-            h: view.h,
-            rec: this.#doc.rec,
-            fieldId: view.fieldId,
-            // Carry the source binding so a field whose fieldId is null (empty
-            // table, or an unresolved relationship path) still duplicates — the
-            // server recreates the value from the binding when fieldId is absent.
-            binding: view.kind === 'field' ? view.binding : null,
-            createLabel: false,
-            content: view.kind === 'text' ? view.content : null,
-            props: view.props ? parseProps(view.props) : null,
-          });
-          return { partId, views };
-        }),
-      );
-      llog('create', 'duplicated object(s)', {
-        from: [...ids],
-        created: created.flatMap((c) => c.views.map((v) => v.id)),
+    const ext = new Map<number, { maxX: number; maxY: number; partH: number }>();
+    for (const { c, partId, partH } of resolved) {
+      const e = ext.get(partId) ?? { maxX: 0, maxY: 0, partH };
+      e.maxX = Math.max(e.maxX, c.x + c.w);
+      e.maxY = Math.max(e.maxY, c.y + c.h);
+      ext.set(partId, e);
+    }
+    const capToGrid = (max: number) =>
+      Math.max(0, Math.floor(Math.min(policy.desired, max) / GRID) * GRID);
+    for (const [partId, e] of ext) {
+      offset.set(partId, {
+        dx: capToGrid(canvasWidth - e.maxX),
+        dy: capToGrid(e.partH - e.maxY),
       });
-      for (const { partId, views } of created) {
-        for (const v of views) this.#doc.addObject(v, partId);
-      }
-      this.#doc.mark();
-      const newIds = created.flatMap((c) => c.views.map((v) => v.id));
-      this.#doc.selectOnly(newIds);
-      const placed = newIds.at(-1);
-      if (placed !== undefined) this.#hoverId = placed;
-    } catch (e) {
-      lerror('persist', 'failed to duplicate selected object(s)', e);
-      this.#reportError(e);
-    } finally {
-      this.#placing = false;
     }
+    return offset;
   }
 
-  /** Assign each pasted object a z that stacks the whole paste group on top of
-   *  its target part in preserved relative order, and persist z + readOnly. Stamps
-   *  the chosen z onto each clip as `_targetZ` for the doc-mirror step. */
-  async #applyPasteZAndReadOnly(
+  /** Assign each pasted clone a z that stacks the whole group on top of its
+   *  target part in preserved relative order, and persist z + readOnly. Returns
+   *  the chosen z per created view id for the doc-mirror step. */
+  async #applyCloneZAndReadOnly(
     created: { view: ObjectView; partId: number; clip: ClipboardObject }[],
-  ): Promise<void> {
+  ): Promise<Map<number, number>> {
     // Next free z per target part = 1 + max z currently in that part.
     const nextZ = new Map<number, number>();
     const model = this.#doc.renderModel;
@@ -1247,6 +1256,7 @@ export class CanvasInteraction {
       const maxZ = p.objects.reduce((m, o) => Math.max(m, o.z), -1);
       nextZ.set(p.id, maxZ + 1);
     }
+    const targetZ = new Map<number, number>();
     const zItems: { id: number; z: number }[] = [];
     const roItems: { id: number; readOnly: boolean }[] = [];
     // created is already in ascending source-z order (creation order), so ranking
@@ -1254,7 +1264,7 @@ export class CanvasInteraction {
     for (const c of created) {
       const z = nextZ.get(c.partId) ?? c.view.z;
       nextZ.set(c.partId, z + 1);
-      c.clip._targetZ = z;
+      targetZ.set(c.view.id, z);
       if (z !== c.view.z) zItems.push({ id: c.view.id, z });
       if (c.clip.readOnly !== c.view.readOnly) roItems.push({ id: c.view.id, readOnly: c.clip.readOnly });
     }
@@ -1262,6 +1272,7 @@ export class CanvasInteraction {
     // Read-only flags are independent per object — persist them in parallel
     // instead of a sequential await loop.
     await Promise.all(roItems.map((r) => setObjectReadOnly(this.#layoutId, r.id, r.readOnly, this.#doc.rec)));
+    return targetZ;
   }
 
   // ── public clipboard surface (for a future menu / rail; zero-refactor add) ──
@@ -1281,52 +1292,22 @@ export class CanvasInteraction {
   duplicate(): void {
     void this.#duplicateSelectedObjects();
   }
+  // Delete / group / ungroup run through the shared command layer (./actions),
+  // the same implementation the Inspector buttons invoke.
   deleteSelected(): void {
-    void this.#deleteSelectedObjects();
+    void deleteSelectedAction(this.#doc, this.#layoutId);
   }
   canGroup(): boolean {
-    return this.#doc.selection.size >= 2 && this.#doc.groupIdForSelection() === null;
+    return canGroupSelection(this.#doc);
   }
   canUngroup(): boolean {
-    return this.#doc.groupIdForSelection() !== null;
+    return canUngroupSelection(this.#doc);
   }
   group(): void {
-    void this.#groupSelectedObjects();
+    void groupSelectedAction(this.#doc, this.#layoutId);
   }
   ungroup(): void {
-    void this.#ungroupSelectedObjects();
-  }
-
-  async #groupSelectedObjects(): Promise<void> {
-    if (!this.canGroup() || this.#grouping) return;
-    const ids = [...this.#doc.selection];
-    this.#grouping = true;
-    llog('persist', 'context menu: group objects', { ids });
-    try {
-      const group = await createObjectGroup(this.#layoutId, ids);
-      this.#doc.setGroup(group);
-    } catch (e) {
-      lerror('persist', 'failed to group selected object(s)', e);
-      this.#reportError(e);
-    } finally {
-      this.#grouping = false;
-    }
-  }
-
-  async #ungroupSelectedObjects(): Promise<void> {
-    const groupId = this.#doc.groupIdForSelection();
-    if (groupId === null || this.#grouping) return;
-    this.#grouping = true;
-    llog('persist', 'context menu: ungroup objects', { groupId });
-    try {
-      await deleteObjectGroup(this.#layoutId, groupId);
-      this.#doc.removeGroup(groupId);
-    } catch (e) {
-      lerror('persist', 'failed to ungroup selected object(s)', e);
-      this.#reportError(e);
-    } finally {
-      this.#grouping = false;
-    }
+    void ungroupSelectedAction(this.#doc, this.#layoutId);
   }
 
   /** Choose moveable's target from the real selection only. Hover uses a separate

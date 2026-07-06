@@ -120,8 +120,10 @@ pub(crate) fn part_style(props: Option<&str>) -> String {
 
 /// Text-level style for field and text objects. Alignment includes flex
 /// justification because field display values are vertically-centered flex spans.
+/// The kind gate reads the engine's per-kind capability table so "takes text
+/// formatting" has exactly one definition.
 pub(crate) fn text_style(kind: ObjectKind, props: Option<&str>) -> String {
-    if !matches!(kind, ObjectKind::Field | ObjectKind::Text) {
+    if !kind.capabilities().text_format {
         return String::new();
     }
     let Some(v) = parse_props(props) else {

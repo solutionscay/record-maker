@@ -22,9 +22,6 @@ export interface ClipboardObject {
   content: string;         // text slot; caption string for a label, '' otherwise
   props: string;           // opaque appearance JSON string ('' when unset)
   fieldId: number | null;  // field identity (#60); null for text/shapes
-  /** Transient: the z the paste pass assigns this clip in its target part, stamped
-   *  during the create pass so the doc mirror can match it. Never persisted. */
-  _targetZ?: number;
 }
 
 export interface ClipboardPayload {

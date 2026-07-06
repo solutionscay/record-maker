@@ -8,6 +8,7 @@
   // parity-checked canvas DOM.
   import type { EditorDoc, ToolKind } from './doc.svelte';
   import { createPart } from './persist';
+  import { canAddPartKind as canAddPartKindRule, partKindAllowedInView } from './part-rules';
   import { runUndo, runRedo } from './history';
   import { llog, lerror } from './log';
   import Icon from './Icon.svelte';
@@ -40,12 +41,9 @@
   let partKind = $state('body');
   let busy = $state(false);
 
-  let usedPartKinds = $derived(new Set(doc.parts.map((p) => p.kind)));
   // A form is a single-record view: sub/grand summaries are report-only, so a form
   // layout offers header/body/footer only (Issue 3). List/Table keep all five.
-  let partKinds = $derived(
-    PART_KINDS.filter((p) => doc.view !== 'form' || (p.id !== 'subsummary' && p.id !== 'grandsummary')),
-  );
+  let partKinds = $derived(PART_KINDS.filter((p) => partKindAllowedInView(doc.view, p.id)));
 
   // A placement (or leaving the Field tool some other way) drops `doc.activeTool`
   // back to 'pointer', but this component's own `fieldIds` is a separate copy that
@@ -122,22 +120,10 @@
     }
   }
 
-  function isSingletonPartKind(kind: string): boolean {
-    return kind === 'header' || kind === 'body' || kind === 'footer';
-  }
-
+  // Band legality lives in ./part-rules (shared with the Band inspector's kind
+  // select) — this only binds it to the current layout.
   function canAddPartKind(kind: string): boolean {
-    // A form allows only header/body/footer — summary bands are List/Table (Issue 3).
-    if (doc.view === 'form' && (kind === 'subsummary' || kind === 'grandsummary')) return false;
-    if (isSingletonPartKind(kind) && usedPartKinds.has(kind)) return false;
-    if (kind === 'grandsummary') {
-      const body = doc.parts.find((p) => p.kind === 'body');
-      if (!body) return false;
-      const leading = doc.parts.some((p) => p.kind === 'grandsummary' && p.position < body.position);
-      const trailing = doc.parts.some((p) => p.kind === 'grandsummary' && p.position > body.position);
-      return !(leading && trailing);
-    }
-    return true;
+    return canAddPartKindRule(doc.view, doc.parts, kind);
   }
 
   // ── Zoom zone ────────────────────────────────────────────────────────────

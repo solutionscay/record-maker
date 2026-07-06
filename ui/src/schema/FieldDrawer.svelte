@@ -5,6 +5,7 @@
   import type { FieldKind, FieldOptions, FieldView } from './types';
   import { FIELD_KINDS, kindIcon, kindLabel } from './types';
   import Icon from '../lib/Icon.svelte';
+  import { untrack } from 'svelte';
 
   let {
     store,
@@ -31,6 +32,7 @@
   let referenceName = $state('');
   let referenceToTable = $state<number | null>(null);
   let referenceToField = $state<number | null>(null);
+  let hydrationKey = '';
 
   const hasRange = $derived(kind === 'number' || kind === 'date' || kind === 'time' || kind === 'timestamp');
   const rangeInputType = $derived(kind === 'number' ? 'number' : kind === 'date' ? 'date' : kind === 'time' ? 'time' : 'datetime-local');
@@ -47,21 +49,28 @@
   );
 
   $effect(() => {
-    name = field?.name ?? '';
-    kind = field?.kind ?? 'text';
-    notes = field?.notes ?? '';
-    required = field?.options?.validation?.required ?? false;
-    unique = field?.options?.validation?.unique ?? false;
-    memberOfValueList = field?.options?.validation?.memberOfValueList ?? store.valueLists[0]?.id ?? null;
-    memberOfEnabled = field?.options?.validation?.memberOfValueList != null;
-    rangeMin = field?.options?.validation?.range?.min ?? '';
-    rangeMax = field?.options?.validation?.range?.max ?? '';
-    referenceEnabled = field?.options?.reference != null;
-    referenceName = field?.options?.reference?.name ?? '';
-    referenceToTable = field?.options?.reference?.toTable ?? store.tables[0]?.id ?? null;
-    referenceToField =
-      field?.options?.reference?.toField ??
-      (referenceToTable == null ? null : (store.fieldsByTable[referenceToTable]?.[0]?.id ?? null));
+    const nextHydrationKey = `${tableId}:${field?.id ?? 'new'}`;
+    if (nextHydrationKey === hydrationKey) return;
+    hydrationKey = nextHydrationKey;
+
+    untrack(() => {
+      const nextReferenceToTable = field?.options?.reference?.toTable ?? store.tables[0]?.id ?? null;
+      name = field?.name ?? '';
+      kind = field?.kind ?? 'text';
+      notes = field?.notes ?? '';
+      required = field?.options?.validation?.required ?? false;
+      unique = field?.options?.validation?.unique ?? false;
+      memberOfValueList = field?.options?.validation?.memberOfValueList ?? store.valueLists[0]?.id ?? null;
+      memberOfEnabled = field?.options?.validation?.memberOfValueList != null;
+      rangeMin = field?.options?.validation?.range?.min ?? '';
+      rangeMax = field?.options?.validation?.range?.max ?? '';
+      referenceEnabled = field?.options?.reference != null;
+      referenceName = field?.options?.reference?.name ?? '';
+      referenceToTable = nextReferenceToTable;
+      referenceToField =
+        field?.options?.reference?.toField ??
+        (nextReferenceToTable == null ? null : (store.fieldsByTable[nextReferenceToTable]?.[0]?.id ?? null));
+    });
   });
 
   $effect(() => {

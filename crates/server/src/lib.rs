@@ -404,6 +404,24 @@ struct FieldChoice {
     kind: String,
 }
 
+/// A relationship route the layout can choose for related data. These are
+/// derived from declared FK constraints, not authored by portal/layout UI.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelatedRouteChoice {
+    relationship_id: i64,
+    name: String,
+    direction: &'static str,
+    cardinality: &'static str,
+    path: String,
+    table_id: i64,
+    table_name: String,
+    from_table: i64,
+    from_field: i64,
+    to_table: i64,
+    to_field: i64,
+}
+
 #[derive(Template)]
 #[template(path = "view_list.html")]
 struct ListTemplate {
@@ -779,6 +797,48 @@ fn object_view_for_rec(
     Some(object_view(&object, &by_name))
 }
 
+fn related_route_choices(sol: &Solution, table: &TableMeta) -> Vec<RelatedRouteChoice> {
+    sol.relationships()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|rel| {
+            if rel.from_table == table.id {
+                let target = sol.table_by_id(rel.to_table).ok().flatten()?;
+                Some(RelatedRouteChoice {
+                    relationship_id: rel.id,
+                    name: rel.name.clone(),
+                    direction: "forward",
+                    cardinality: "toOne",
+                    path: rel.name.clone(),
+                    table_id: target.id,
+                    table_name: target.name,
+                    from_table: rel.from_table,
+                    from_field: rel.from_field,
+                    to_table: rel.to_table,
+                    to_field: rel.to_field,
+                })
+            } else if rel.to_table == table.id {
+                let target = sol.table_by_id(rel.from_table).ok().flatten()?;
+                Some(RelatedRouteChoice {
+                    relationship_id: rel.id,
+                    name: rel.name.clone(),
+                    direction: "reverse",
+                    cardinality: "toMany",
+                    path: rel.name.clone(),
+                    table_id: target.id,
+                    table_name: target.name,
+                    from_table: rel.from_table,
+                    from_field: rel.from_field,
+                    to_table: rel.to_table,
+                    to_field: rel.to_field,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Render one part's objects, positioned and bound against `by_name` (an empty
 /// map leaves field values blank — used for header/footer with no record).
 fn render_part(
@@ -1101,6 +1161,9 @@ struct DesignModel {
     /// The primary table's fields — what the Create zone's Field tool offers
     /// (#48/#62). Geometry-independent, so the same list rides every record.
     fields: Vec<FieldChoice>,
+    /// Constraint-derived related routes from this layout's base table. Portal
+    /// authoring selects from this list rather than creating relationships inline.
+    related_routes: Vec<RelatedRouteChoice>,
     parts: Vec<PartView>,
     /// Durable object groups (#75). Objects remain rendered under their parts;
     /// these ids only drive Layout-mode selection/move behaviour.
@@ -1825,6 +1888,7 @@ async fn design_model(
         width: layout_canvas_width(&sol, layout_id),
         view: lay.view.clone(),
         fields: field_choices,
+        related_routes: related_route_choices(&sol, &table),
         parts,
         groups: sol
             .object_groups(layout_id)
@@ -5314,6 +5378,131 @@ mod tests {
             assert!(body.contains(needle), "model JSON missing {needle}\n{body}");
         }
         assert_or_regen("canvas.fixture.json", &body);
+    }
+
+    #[tokio::test]
+    async fn design_model_related_routes_are_derived_from_fk_constraints() {
+        let mut sol = Solution::open_in_memory().unwrap();
+        let customers = sol
+            .create_table(
+                "Customers",
+                &[
+                    NewField {
+                        name: "Name".into(),
+                        kind: FieldKind::Text,
+                    },
+                    NewField {
+                        name: "RegionId".into(),
+                        kind: FieldKind::Number,
+                    },
+                ],
+            )
+            .unwrap();
+        let orders = sol
+            .create_table(
+                "Orders",
+                &[
+                    NewField {
+                        name: "CustomerId".into(),
+                        kind: FieldKind::Number,
+                    },
+                    NewField {
+                        name: "Total".into(),
+                        kind: FieldKind::Number,
+                    },
+                ],
+            )
+            .unwrap();
+        let regions = sol
+            .create_table(
+                "Regions",
+                &[NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                }],
+            )
+            .unwrap();
+        let payments = sol
+            .create_table(
+                "Payments",
+                &[NewField {
+                    name: "OrderId".into(),
+                    kind: FieldKind::Number,
+                }],
+            )
+            .unwrap();
+
+        let customer_fields = sol.fields(customers).unwrap();
+        let order_fields = sol.fields(orders).unwrap();
+        let region_fields = sol.fields(regions).unwrap();
+        let payment_fields = sol.fields(payments).unwrap();
+
+        sol.create_relationship(&NewRelationship {
+            name: "orders".into(),
+            from_table: orders,
+            to_table: customers,
+            from_field: order_fields[0].id,
+            to_field: customer_fields[0].id,
+        })
+        .unwrap()
+        .unwrap();
+        sol.create_relationship(&NewRelationship {
+            name: "region".into(),
+            from_table: customers,
+            to_table: regions,
+            from_field: customer_fields[1].id,
+            to_field: region_fields[0].id,
+        })
+        .unwrap()
+        .unwrap();
+        sol.create_relationship(&NewRelationship {
+            name: "payments".into(),
+            from_table: payments,
+            to_table: orders,
+            from_field: payment_fields[0].id,
+            to_field: order_fields[0].id,
+        })
+        .unwrap()
+        .unwrap();
+
+        let layout_id = sol
+            .layouts_for_table(customers)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.view == "form")
+            .unwrap()
+            .id;
+        let (status, body) =
+            get_body(state_for(sol), &format!("/design/{layout_id}/model?rec=1")).await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let routes = json["relatedRoutes"].as_array().unwrap();
+        assert_eq!(routes.len(), 2, "{routes:#?}");
+
+        let orders_route = routes
+            .iter()
+            .find(|route| route["name"] == "orders")
+            .expect("reverse orders route");
+        assert_eq!(orders_route["direction"], "reverse");
+        assert_eq!(orders_route["cardinality"], "toMany");
+        assert_eq!(orders_route["tableId"], orders);
+        assert_eq!(orders_route["tableName"], "Orders");
+        assert_eq!(orders_route["fromTable"], orders);
+        assert_eq!(orders_route["toTable"], customers);
+
+        let region_route = routes
+            .iter()
+            .find(|route| route["name"] == "region")
+            .expect("forward region route");
+        assert_eq!(region_route["direction"], "forward");
+        assert_eq!(region_route["cardinality"], "toOne");
+        assert_eq!(region_route["tableId"], regions);
+        assert_eq!(region_route["tableName"], "Regions");
+
+        assert!(
+            routes.iter().all(|route| route["name"] != "payments"),
+            "routes from unrelated tables must not be offered"
+        );
     }
 
     /// Browse renders the parity fixture's canvas; this is the canonical band DOM

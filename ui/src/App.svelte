@@ -550,7 +550,7 @@
     gap: 18px;
     padding: 5px 8px;
     border: 0;
-    border-radius: 5px;
+    border-radius: 0;
     background: transparent;
     color: inherit;
     box-shadow: none;

@@ -300,7 +300,7 @@
     text-align: left;
     padding: 7px 10px;
     border: 0.5px solid var(--rm-border);
-    border-radius: 7px;
+    border-radius: 0;
     background: var(--rm-control-bg);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
     cursor: pointer;
@@ -354,7 +354,7 @@
     padding: 6px 9px;
     margin-bottom: 5px;
     border: 0.5px solid var(--rm-border);
-    border-radius: 6px;
+    border-radius: 0;
     background: var(--rm-control-bg);
   }
   .fs-input:focus {
@@ -374,7 +374,7 @@
     align-items: center;
     gap: 7px;
     padding: 6px 8px;
-    border-radius: 6px;
+    border-radius: 0;
     font-size: 13px;
     color: var(--rm-text);
     cursor: pointer;
@@ -419,7 +419,7 @@
     font-size: 12px;
     padding: 4px 8px;
     border: 0.5px solid var(--rm-border);
-    border-radius: 6px;
+    border-radius: 0;
     background: var(--rm-control-bg);
     color: var(--rm-text);
     cursor: pointer;

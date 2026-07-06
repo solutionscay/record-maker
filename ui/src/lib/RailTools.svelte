@@ -236,7 +236,7 @@
     height: 36px;
     padding: 0;
     border: 0.5px solid var(--rm-border);
-    border-radius: 8px;
+    border-radius: 0;
     background: var(--rm-control-bg);
     color: var(--rm-text);
     cursor: pointer;

@@ -184,7 +184,7 @@
     font-weight: 500;
     padding: 5px 16px;
     border: 0;
-    border-radius: 6px;
+    border-radius: 0;
     background: transparent;
     color: var(--rm-text-dim);
     cursor: pointer;
@@ -256,7 +256,7 @@
     margin-left: 4px;
     padding: 2px;
     border: 0;
-    border-radius: 6px;
+    border-radius: 0;
     background: rgba(255, 255, 255, 0.18);
     color: #fff;
     line-height: 0;

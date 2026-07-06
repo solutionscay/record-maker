@@ -22,6 +22,7 @@
   let name = $state('');
   let kind = $state<FieldKind>('text');
   let notes = $state('');
+  let primary = $state(false);
   let required = $state(false);
   let unique = $state(false);
   let memberOfEnabled = $state(false);
@@ -58,6 +59,7 @@
       name = field?.name ?? '';
       kind = field?.kind ?? 'text';
       notes = field?.notes ?? '';
+      primary = field?.options?.validation?.primary ?? false;
       required = field?.options?.validation?.required ?? false;
       unique = field?.options?.validation?.unique ?? false;
       memberOfValueList = field?.options?.validation?.memberOfValueList ?? store.valueLists[0]?.id ?? null;
@@ -102,8 +104,9 @@
 
   function optionsDraft(): FieldOptions {
     const validation: NonNullable<FieldOptions['validation']> = {};
-    if (required) validation.required = true;
-    if (unique) validation.unique = true;
+    if (primary) validation.primary = true;
+    if (primary || required) validation.required = true;
+    if (primary || unique) validation.unique = true;
     if (memberOfEnabled && memberOfValueList != null) validation.memberOfValueList = memberOfValueList;
     if (hasRange && (rangeMin.trim() || rangeMax.trim())) {
       validation.range = {};
@@ -161,11 +164,15 @@
     <section class="fd-section" aria-labelledby="fd-validation">
       <span id="fd-validation" class="sc-micro fd-label">Validation</span>
       <label class="fd-check">
-        <input type="checkbox" bind:checked={required} />
+        <input type="checkbox" bind:checked={primary} />
+        <span>Primary ID</span>
+      </label>
+      <label class="fd-check">
+        <input type="checkbox" checked={primary || required} disabled={primary} onchange={(e) => (required = e.currentTarget.checked)} />
         <span>Required</span>
       </label>
       <label class="fd-check">
-        <input type="checkbox" bind:checked={unique} />
+        <input type="checkbox" checked={primary || unique} disabled={primary} onchange={(e) => (unique = e.currentTarget.checked)} />
         <span>Unique</span>
       </label>
       <label class="fd-check">

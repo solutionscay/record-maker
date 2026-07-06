@@ -3029,11 +3029,15 @@ fn validate_record_values(
         }
         let value = submitted.get(&field.id).copied();
         let trimmed = value.unwrap_or("").trim();
+        let primary = validation
+            .get("primary")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let required = validation
             .get("required")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if required && (value.is_none() || trimmed.is_empty()) {
+        if (primary || required) && (value.is_none() || trimmed.is_empty()) {
             return Err(format!("Field \"{}\" is required.", field.name));
         }
 
@@ -3045,7 +3049,7 @@ fn validate_record_values(
             .get("unique")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if unique
+        if (primary || unique)
             && sol
                 .field_value_exists(table, field, trimmed, existing_id)
                 .map_err(|e| e.to_string())?
@@ -4009,7 +4013,7 @@ mod tests {
         sol.update_field_options(
             table_id,
             number.id,
-            r#"{"validation":{"required":true,"unique":true}}"#,
+            r#"{"validation":{"primary":true}}"#,
         )
         .unwrap();
         sol.update_field_options(

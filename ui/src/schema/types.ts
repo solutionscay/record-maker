@@ -28,6 +28,7 @@ export function kindIcon(kind: string): string {
 }
 
 export interface FieldValidationOptions {
+  primary?: boolean;
   required?: boolean;
   unique?: boolean;
   memberOfValueList?: number | null;

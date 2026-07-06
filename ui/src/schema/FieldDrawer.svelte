@@ -23,6 +23,8 @@
   let notes = $state('');
   let required = $state(false);
   let unique = $state(false);
+  let memberOfEnabled = $state(false);
+  let memberOfValueList = $state<number | null>(null);
   let rangeMin = $state('');
   let rangeMax = $state('');
   let referenceEnabled = $state(false);
@@ -33,6 +35,9 @@
   const hasRange = $derived(kind === 'number' || kind === 'date' || kind === 'time' || kind === 'timestamp');
   const rangeInputType = $derived(kind === 'number' ? 'number' : kind === 'date' ? 'date' : kind === 'time' ? 'time' : 'datetime-local');
   const referenceFields = $derived(referenceToTable == null ? [] : (store.fieldsByTable[referenceToTable] ?? []));
+  const memberOfValid = $derived(
+    !memberOfEnabled || (memberOfValueList != null && store.valueLists.some((list) => list.id === memberOfValueList)),
+  );
   const referenceValid = $derived(
     !referenceEnabled ||
       (referenceName.trim().length > 0 &&
@@ -47,6 +52,8 @@
     notes = field?.notes ?? '';
     required = field?.options?.validation?.required ?? false;
     unique = field?.options?.validation?.unique ?? false;
+    memberOfValueList = field?.options?.validation?.memberOfValueList ?? store.valueLists[0]?.id ?? null;
+    memberOfEnabled = field?.options?.validation?.memberOfValueList != null;
     rangeMin = field?.options?.validation?.range?.min ?? '';
     rangeMax = field?.options?.validation?.range?.max ?? '';
     referenceEnabled = field?.options?.reference != null;
@@ -55,6 +62,13 @@
     referenceToField =
       field?.options?.reference?.toField ??
       (referenceToTable == null ? null : (store.fieldsByTable[referenceToTable]?.[0]?.id ?? null));
+  });
+
+  $effect(() => {
+    if (!memberOfEnabled) return;
+    if (memberOfValueList == null || !store.valueLists.some((list) => list.id === memberOfValueList)) {
+      memberOfValueList = store.valueLists[0]?.id ?? null;
+    }
   });
 
   $effect(() => {
@@ -81,6 +95,7 @@
     const validation: NonNullable<FieldOptions['validation']> = {};
     if (required) validation.required = true;
     if (unique) validation.unique = true;
+    if (memberOfEnabled && memberOfValueList != null) validation.memberOfValueList = memberOfValueList;
     if (hasRange && (rangeMin.trim() || rangeMax.trim())) {
       validation.range = {};
       if (rangeMin.trim()) validation.range.min = rangeMin.trim();
@@ -144,6 +159,25 @@
         <input type="checkbox" bind:checked={unique} />
         <span>Unique</span>
       </label>
+      <label class="fd-check">
+        <input type="checkbox" bind:checked={memberOfEnabled} disabled={store.valueLists.length === 0} />
+        <span>Member of value list</span>
+      </label>
+      {#if memberOfEnabled}
+        <label>
+          <span class="sc-hint">Value list</span>
+          <select
+            class="sc-select"
+            value={memberOfValueList ?? ''}
+            onchange={(e) => (memberOfValueList = Number(e.currentTarget.value))}
+            disabled={store.valueLists.length === 0}
+          >
+            {#each store.valueLists as list (list.id)}
+              <option value={list.id}>{list.name}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
       {#if hasRange}
         <div class="fd-range">
           <label>
@@ -227,7 +261,7 @@
     {/if}
     <span class="fd-spacer"></span>
     <button type="button" class="sc-btn" onclick={onclose}>Cancel</button>
-    <button type="button" class="sc-btn sc-btn--primary" onclick={save} disabled={name.trim().length === 0 || !referenceValid}>Save</button>
+    <button type="button" class="sc-btn sc-btn--primary" onclick={save} disabled={name.trim().length === 0 || !memberOfValid || !referenceValid}>Save</button>
   </footer>
 </aside>
 

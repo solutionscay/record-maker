@@ -8,3 +8,4 @@ description = "Metadata-driven core — two-database solution storage + versione
 # bundled = compile SQLite from source (no system libsqlite3 dependency).
 rusqlite = { version = "0.32", features = ["bundled"] }
 anyhow = "1"
+serde_json = "1"

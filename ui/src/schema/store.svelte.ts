@@ -4,13 +4,22 @@
 
 import * as api from './persist';
 import { SchemaError } from './persist';
-import { emptyFieldOptions, type FieldKind, type FieldOptions, type FieldView, type RelationshipView, type TableView } from './types';
+import {
+  emptyFieldOptions,
+  type FieldKind,
+  type FieldOptions,
+  type FieldView,
+  type RelationshipView,
+  type TableView,
+  type ValueListView,
+} from './types';
 
 type FieldMap = Record<number, FieldView[]>;
 
 const cloneTable = (t: TableView): TableView => ({ ...t });
 const cloneField = (f: FieldView): FieldView => ({ ...f });
 const cloneRelationship = (r: RelationshipView): RelationshipView => ({ ...r });
+const cloneValueList = (v: ValueListView): ValueListView => ({ ...v });
 const cloneFields = (fields: FieldMap): FieldMap =>
   Object.fromEntries(Object.entries(fields).map(([id, fs]) => [id, fs.map(cloneField)]));
 
@@ -39,6 +48,8 @@ export class SchemaStore {
   relationships = $state<RelationshipView[]>([]);
   /** Existing relationships deleted in the draft. */
   deletedRelationshipIds = $state<number[]>([]);
+  /** Value lists available for member-of-list field validation. */
+  valueLists = $state<ValueListView[]>([]);
   /** True during the initial full schema load. */
   loading = $state(true);
   /** True while the top-level schema save is applying the draft. */
@@ -49,6 +60,7 @@ export class SchemaStore {
   private baseTables: TableView[] = [];
   private baseFieldsByTable: FieldMap = {};
   private baseRelationships: RelationshipView[] = [];
+  private baseValueLists: ValueListView[] = [];
   private tempId = -1;
 
   /** The selected table object (derived), or null. */
@@ -120,15 +132,18 @@ export class SchemaStore {
         }),
       );
       const relationships = await api.listRelationships();
-      return { tables, fieldsByTable, relationships };
+      const valueLists = await api.listValueLists();
+      return { tables, fieldsByTable, relationships, valueLists };
     });
     if (loaded) {
       this.baseTables = loaded.tables.map(cloneTable);
       this.baseFieldsByTable = cloneFields(loaded.fieldsByTable);
       this.baseRelationships = loaded.relationships.map(cloneRelationship);
+      this.baseValueLists = loaded.valueLists.map(cloneValueList);
       this.tables = loaded.tables.map(cloneTable);
       this.fieldsByTable = cloneFields(loaded.fieldsByTable);
       this.relationships = loaded.relationships.map(cloneRelationship);
+      this.valueLists = loaded.valueLists.map(cloneValueList);
       this.deletedRelationshipIds = [];
       if (this.selectedTableId != null && !this.tables.some((t) => t.id === this.selectedTableId)) {
         this.selectedTableId = null;
@@ -141,6 +156,7 @@ export class SchemaStore {
     this.tables = this.baseTables.map(cloneTable);
     this.fieldsByTable = cloneFields(this.baseFieldsByTable);
     this.relationships = this.baseRelationships.map(cloneRelationship);
+    this.valueLists = this.baseValueLists.map(cloneValueList);
     this.deletedRelationshipIds = [];
     this.error = null;
   }
@@ -206,6 +222,10 @@ export class SchemaStore {
       return this.fail(`A field named "${cleanName}" already exists in this table.`);
     }
     const reference = options.reference;
+    const memberOfValueList = options.validation?.memberOfValueList;
+    if (memberOfValueList != null && !this.valueLists.some((list) => list.id === memberOfValueList)) {
+      return this.fail('Choose a valid value list.');
+    }
     if (reference) {
       if (!reference.name.trim()) return this.fail('Reference relationships need a name.');
       if (!this.tableById(reference.toTable) || !this.fieldById(reference.toTable, reference.toField)) {
@@ -469,6 +489,10 @@ export class SchemaStore {
         const name = normName(field.name);
         if (!name) return this.fail(`Every field in ${table.name} needs a name.`) !== null;
         if (fieldNames.has(name)) return this.fail(`Duplicate field name in ${table.name}: ${field.name}`) !== null;
+        const memberOfValueList = field.options.validation?.memberOfValueList;
+        if (memberOfValueList != null && !this.valueLists.some((list) => list.id === memberOfValueList)) {
+          return this.fail(`Field "${field.name}" references a missing value list.`) !== null;
+        }
         fieldNames.add(name);
       }
     }

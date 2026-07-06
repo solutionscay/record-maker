@@ -5,3 +5,4 @@
  * .svelte files; only shared vocabulary lives here. */
 @import '../shared/tokens.css';
 @import '../shared/controls.css';
+@import './inspector/inspector.css';

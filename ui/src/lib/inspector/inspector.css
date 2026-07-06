@@ -1,0 +1,356 @@
+/* Format inspector styles — mirrors the design ref's right panel. Reuses the
+ * global `.side-label` and the shared --rm-* palette (defined on body). Plain
+ * (unscoped) classes because the panel is composed from several section
+ * components (#135) that share this vocabulary; pulled into the bundle by
+ * lib/layout-editor.css. Only the Inspector island uses `.insp-*`/`.fmt-*`. */
+.insp-head {
+  padding: 16px 18px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 0.5px solid var(--rm-border);
+}
+.insp-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--rm-text);
+}
+.insp-sub {
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--rm-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.insp-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.insp-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.insp-div {
+  height: 0.5px;
+  background: var(--rm-border);
+}
+.insp-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--rm-text);
+}
+.insp-ctls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.insp-empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--rm-text-dim);
+}
+/* Controls: the .ctl-* input/select recipe is shared vocabulary now — see
+   ui/src/shared/controls.css (#132). */
+/* Band reorder buttons (Issue 4). */
+.ord-btn {
+  width: 30px;
+  height: 26px;
+  padding: 0;
+  border: 0.5px solid var(--rm-border);
+  border-radius: 7px;
+  background: var(--rm-control-bg);
+  color: var(--rm-text);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+.ord-btn:hover:not(:disabled) {
+  background: #f0f0f2;
+}
+.ord-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* Arrange panel (#83): wrapping grids of icon buttons for align / distribute /
+   resize-to-match / z-order. */
+.arr-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.arr-btn {
+  width: 34px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0.5px solid var(--rm-border);
+  border-radius: 7px;
+  background: var(--rm-control-bg);
+  color: var(--rm-text);
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+.arr-btn:hover:not(:disabled) {
+  background: #f0f0f2;
+}
+.arr-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.group-row {
+  display: flex;
+  gap: 8px;
+}
+.grp-btn {
+  height: 28px;
+  padding: 0 10px;
+  border: 0.5px solid var(--rm-border);
+  border-radius: 7px;
+  background: var(--rm-control-bg);
+  color: var(--rm-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+.grp-btn:hover:not(:disabled) {
+  background: #f0f0f2;
+}
+.grp-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* Color swatch — a 26px rounded chip. */
+.swatch {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--rm-border-strong);
+  border-radius: 7px;
+  background: var(--rm-control-bg);
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.swatch::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+.swatch::-webkit-color-swatch {
+  border: 0;
+  border-radius: 6px;
+}
+.swatch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* iOS-style toggle. */
+.toggle {
+  position: relative;
+  display: inline-flex;
+  cursor: pointer;
+}
+.toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.toggle-track {
+  width: 36px;
+  height: 21px;
+  border-radius: 21px;
+  background: var(--rm-segment-track);
+  transition: background 0.15s ease;
+}
+.toggle-knob {
+  position: absolute;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #fff;
+  top: 2px;
+  left: 2px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: left 0.15s ease;
+}
+.toggle input:checked + .toggle-track {
+  background: var(--rm-accent);
+}
+.toggle input:checked + .toggle-track .toggle-knob {
+  left: 17px;
+}
+/* Segmented controls (B/I/U, L/C/R). */
+.seg-row {
+  display: flex;
+  gap: 10px;
+}
+.seg {
+  flex: 1;
+  display: inline-flex;
+  background: var(--rm-segment-track);
+  border-radius: 7px;
+  padding: 2px;
+}
+.seg-btn {
+  flex: 1;
+  text-align: center;
+  padding: 5px 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--rm-text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+}
+.seg-btn.active {
+  background: var(--rm-segment-active-bg);
+  color: var(--rm-text);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.14);
+}
+/* A mixed toggle across a multi-selection (#82): neither on nor off — a dashed
+   outline signals the indeterminate state without claiming a value. */
+.seg-btn.mixed {
+  outline: 1px dashed var(--rm-border-strong);
+  outline-offset: -3px;
+}
+/* "Mixed" pill shown beside a control when the selection's values disagree (#82). */
+.mixed-tag {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--rm-text-dim);
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--rm-segment-track);
+}
+/* Pinned delete footer. */
+.insp-foot {
+  margin-top: auto;
+  padding: 14px 18px;
+  border-top: 0.5px solid var(--rm-border);
+}
+.insp-delete {
+  width: 100%;
+  text-align: center;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--rm-danger);
+  padding: 8px;
+  border-radius: 8px;
+  border: 0.5px solid var(--rm-border);
+  background: var(--rm-control-bg);
+  cursor: pointer;
+}
+.insp-delete:hover:not(:disabled) {
+  background: #fff5f5;
+}
+.insp-delete:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.le-hint {
+  font-size: 11px;
+  color: var(--rm-text-dim);
+}
+/* Value format (#77/#78). A Timestamp sub-heading, the custom-date component
+   cards, and the Sample preview (the .ctl-char input lives in shared/controls.css). */
+.fmt-grow {
+  width: 150px;
+}
+.fmt-sub {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--rm-text-dim);
+  margin-top: 4px;
+}
+.fmt-comps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.fmt-comp {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 0.5px solid var(--rm-border);
+  border-radius: 8px;
+  background: var(--rm-control-bg);
+}
+.fmt-comp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.fmt-comp-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--rm-text);
+}
+.fmt-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.fmt-add-btn {
+  font: inherit;
+  font-size: 12px;
+  color: var(--rm-text);
+  padding: 5px 9px;
+  border: 0.5px solid var(--rm-border);
+  border-radius: 7px;
+  background: var(--rm-control-bg);
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+.fmt-add-btn:hover {
+  background: #f0f0f2;
+}
+.fmt-sample {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 0.5px solid var(--rm-border);
+  border-radius: 8px;
+  background: var(--rm-segment-track);
+}
+.fmt-sample-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--rm-text-dim);
+}
+.fmt-sample-val {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--rm-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

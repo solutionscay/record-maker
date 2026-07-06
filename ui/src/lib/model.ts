@@ -107,6 +107,23 @@ export interface ObjectGroupView {
   objectIds: number[];
 }
 
+/** What one object kind can do — the engine's per-kind capability record
+ * (`ObjectKind::capabilities`), shipped through the design model so the editor's
+ * gates ("can this kind be filled / text-formatted / bound?") read the single
+ * server-side table instead of transcribing it. */
+export interface ObjectCapabilities {
+  /** Fill/background colour controls apply. */
+  fill: boolean;
+  /** Stroke/border colour + width controls apply. */
+  stroke: boolean;
+  /** Font/text-format controls apply. */
+  textFormat: boolean;
+  /** Carries static text in its own `content` slot. */
+  contentSlot: boolean;
+  /** Data-bound: resolves a `binding` to a live field value. */
+  bindable: boolean;
+}
+
 /** The full design read model for one layout/record. */
 export interface DesignModel {
   /** Layout id. */
@@ -127,4 +144,6 @@ export interface DesignModel {
   parts: PartView[];
   /** Durable object groups. */
   groups: ObjectGroupView[];
+  /** Per-object-kind capability records, keyed by kind string. */
+  capabilities: Record<string, ObjectCapabilities>;
 }

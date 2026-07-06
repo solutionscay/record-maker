@@ -31,6 +31,7 @@ import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import type {
   DesignModel,
   FieldChoice,
+  ObjectCapabilities,
   ObjectGroupView,
   ObjectView,
   PartView,
@@ -107,6 +108,15 @@ export interface ObjectResolved {
   textStyle: string;
   shapeStyle: string;
 }
+
+/** Fallback for [`EditorDoc.capsFor`] on unknown kinds: every gate closed. */
+const NO_CAPABILITIES: ObjectCapabilities = {
+  fill: false,
+  stroke: false,
+  textFormat: false,
+  contentSlot: false,
+  bindable: false,
+};
 
 const EMPTY_RESOLVED: ObjectResolved = {
   field: false,
@@ -238,6 +248,9 @@ export class EditorDoc {
   #fields = $state<FieldChoice[]>([]);
   /** Constraint-derived related routes for portal/related-data authoring. */
   #relatedRoutes = $state<RelatedRouteChoice[]>([]);
+  /** Per-object-kind capability records — the engine's single capability table,
+   * hydrated from the design model. UI-only, never edited, never undoable. */
+  #capabilities = $state<Record<string, ObjectCapabilities>>({});
   /** Active Create-zone tool (#62). `pointer` is select/drag; any other value arms
    * the canvas to place that kind on the next click. */
   #activeTool = $state<ToolKind>('pointer');
@@ -277,6 +290,7 @@ export class EditorDoc {
     this.#total = model.total;
     this.#fields = model.fields.slice();
     this.#relatedRoutes = (model.relatedRoutes ?? []).slice();
+    this.#capabilities = model.capabilities ?? {};
 
     this.#objects.clear();
     this.#resolved.clear();
@@ -422,6 +436,7 @@ export class EditorDoc {
       groups: [...this.#groups.entries()]
         .sort(([a], [b]) => a - b)
         .map(([id, objectIds]) => ({ id, objectIds: objectIds.slice() })),
+      capabilities: this.#capabilities,
     };
   });
 
@@ -860,6 +875,13 @@ export class EditorDoc {
 
   get relatedRoutes(): readonly RelatedRouteChoice[] {
     return this.#relatedRoutes;
+  }
+
+  /** The capability record for an object kind — the engine's per-kind table
+   * (design_model `capabilities`). All-false for an unknown kind (or before
+   * hydration), so capability gates fail closed. */
+  capsFor(kind: string): ObjectCapabilities {
+    return this.#capabilities[kind] ?? NO_CAPABILITIES;
   }
 
   get activeTool(): ToolKind {

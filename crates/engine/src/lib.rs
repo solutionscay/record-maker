@@ -16,8 +16,8 @@ pub mod schema;
 pub use data::Record;
 pub use db::Solution;
 pub use layout::{
-    LayoutMeta, NewObject, ObjectGroup, ObjectKind, ObjectMeta, PartKind, PartMeta, RestoreObject,
-    RestoreResult,
+    LayoutMeta, NewObject, ObjectCapabilities, ObjectGroup, ObjectKind, ObjectMeta, PartKind,
+    PartMeta, RestoreObject, RestoreResult,
 };
 pub use model::{
     FieldKind, FieldMeta, NewField, NewRelationship, NewValueList, RelationshipMeta, TableMeta,

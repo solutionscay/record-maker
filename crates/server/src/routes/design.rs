@@ -2,7 +2,7 @@
 //! plus the object/part/group mutation handlers the Svelte editor commits
 //! through.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use axum::{
     extract::{Path, Query, State},
@@ -11,7 +11,7 @@ use axum::{
     Json,
 };
 use record_maker_engine::{
-    NewObject, ObjectGroup, ObjectKind, PartKind, RestoreObject, RestoreResult, Solution,
+    FieldKind, NewObject, ObjectGroup, ObjectKind, PartKind, RestoreObject, RestoreResult, Solution,
 };
 
 use crate::style::{object_style, shape_style, text_style};
@@ -51,6 +51,43 @@ struct DesignModel {
     /// Durable object groups (#75). Objects remain rendered under their parts;
     /// these ids only drive Layout-mode selection/move behaviour.
     groups: Vec<ObjectGroupView>,
+    /// Per-object-kind capability records, keyed by kind string — the engine's
+    /// single capability table ([`ObjectKind::capabilities`]), so the editor's
+    /// "can this kind be filled / text-formatted / bound?" gates read one
+    /// definition instead of transcribing it.
+    capabilities: BTreeMap<&'static str, ObjectCapabilitiesView>,
+}
+
+/// One [`record_maker_engine::ObjectCapabilities`] record on the wire.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ObjectCapabilitiesView {
+    fill: bool,
+    stroke: bool,
+    text_format: bool,
+    content_slot: bool,
+    bindable: bool,
+}
+
+/// The full per-kind capability table for the design model, keyed by the kind's
+/// wire string (`field`/`text`/`rect`/`line`/`ellipse`).
+fn kind_capabilities() -> BTreeMap<&'static str, ObjectCapabilitiesView> {
+    ObjectKind::ALL
+        .iter()
+        .map(|k| {
+            let c = k.capabilities();
+            (
+                k.as_str(),
+                ObjectCapabilitiesView {
+                    fill: c.fill,
+                    stroke: c.stroke,
+                    text_format: c.text_format,
+                    content_slot: c.content_slot,
+                    bindable: c.bindable,
+                },
+            )
+        })
+        .collect()
 }
 
 #[derive(serde::Serialize)]
@@ -122,8 +159,41 @@ pub(crate) async fn design_model(
             .into_iter()
             .map(object_group_view)
             .collect(),
+        capabilities: kind_capabilities(),
     };
     axum::Json(model).into_response()
+}
+
+/// One value + format spec for the inspector's "Sample" preview (#77/#78).
+#[derive(serde::Deserialize)]
+pub(crate) struct FormatSampleBody {
+    raw: String,
+    kind: String,
+    format: Option<serde_json::Value>,
+}
+
+/// The rendered sample: display text plus an optional colour override (e.g. a
+/// negative number's `negativeColor`). Mirrors [`crate::format::Formatted`].
+#[derive(serde::Serialize)]
+pub(crate) struct FormatSampleView {
+    text: String,
+    color: Option<String>,
+}
+
+/// `POST /design/format-sample` — render one raw value through the REAL
+/// formatter (`crates/server/src/format.rs`) for the inspector's live Sample
+/// line, so the format rules exist exactly once (no client-side mirror to keep
+/// in step). Stateless: pure function of the request body.
+pub(crate) async fn format_sample(
+    Json(body): Json<FormatSampleBody>,
+) -> AppResult<Json<FormatSampleView>> {
+    let kind = FieldKind::parse(&body.kind)
+        .ok_or_else(|| AppError::bad_request(format!("unknown field kind: {}", body.kind)))?;
+    let f = crate::format::format_value(&body.raw, body.format.as_ref(), kind);
+    Ok(Json(FormatSampleView {
+        text: f.text,
+        color: f.color,
+    }))
 }
 
 /// The geometry a Layout-canvas drag/resize commits for one object (#15) —

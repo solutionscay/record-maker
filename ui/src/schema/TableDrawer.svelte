@@ -57,11 +57,6 @@
   <label class="sc-micro td-label" for="td-notes">Notes</label>
   <textarea id="td-notes" class="sc-textarea" rows="5" bind:value={notes}></textarea>
 
-  {#if table}
-    <span class="sc-micro td-label">Physical name</span>
-    <code class="td-code">{table.phys || 'Created when schema is saved'}</code>
-  {/if}
-
   <p class="sc-hint td-note">Drawer Save updates the draft. The schema is not applied until the window Save.</p>
 </SchemaDrawer>
 
@@ -72,15 +67,6 @@
   }
   .td-label:not(:first-child) {
     margin-top: 16px;
-  }
-  .td-code {
-    display: block;
-    font-size: 12px;
-    padding: 8px 10px;
-    border-radius: 7px;
-    background: rgba(0, 0, 0, 0.05);
-    color: var(--rm-text);
-    word-break: break-all;
   }
   .td-note {
     margin: 14px 0 0;

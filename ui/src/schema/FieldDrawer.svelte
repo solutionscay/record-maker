@@ -263,11 +263,6 @@
   <label class="sc-micro fd-label" for="fd-notes">Notes</label>
   <textarea id="fd-notes" class="sc-textarea" rows="5" bind:value={notes}></textarea>
 
-  {#if field}
-    <span class="sc-micro fd-label">Physical name</span>
-    <code class="fd-code">{field.phys || 'Created when schema is saved'}</code>
-  {/if}
-
   <p class="sc-hint fd-note">Drawer Save updates the draft. The schema is not applied until the window Save.</p>
 </SchemaDrawer>
 
@@ -307,15 +302,6 @@
   }
   .fd-label:not(:first-child) {
     margin-top: 16px;
-  }
-  .fd-code {
-    display: block;
-    font-size: 12px;
-    padding: 8px 10px;
-    border-radius: 7px;
-    background: rgba(0, 0, 0, 0.05);
-    color: var(--rm-text);
-    word-break: break-all;
   }
   .fd-section {
     margin-top: 16px;

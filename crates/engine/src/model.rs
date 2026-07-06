@@ -65,6 +65,7 @@ pub struct NewField {
 pub struct TableMeta {
     pub id: i64,
     pub name: String,
+    pub notes: String,
     /// Physical table name in data.db (always `t_<id>` — a safe identifier).
     pub phys: String,
 }
@@ -74,6 +75,7 @@ pub struct TableMeta {
 pub struct FieldMeta {
     pub id: i64,
     pub name: String,
+    pub notes: String,
     /// Physical column name in data.db (always `f_<id>` — a safe identifier).
     pub phys: String,
     pub kind: FieldKind,
@@ -196,6 +198,7 @@ impl Solution {
         Ok(FieldMeta {
             id: fid,
             name: f.name.clone(),
+            notes: String::new(),
             phys: fphys,
             kind: f.kind,
             position,
@@ -209,23 +212,39 @@ impl Solution {
         let Some(table) = self.table_by_id(table_id)? else {
             return Ok(None);
         };
+        self.update_table(table_id, name, &table.notes)
+    }
+
+    /// Update a user table's editable metadata. Renaming rewrites direct layout
+    /// bindings rooted at the old logical table name.
+    pub fn update_table(
+        &mut self,
+        table_id: i64,
+        name: &str,
+        notes: &str,
+    ) -> Result<Option<TableMeta>> {
+        let Some(table) = self.table_by_id(table_id)? else {
+            return Ok(None);
+        };
         let old_name = table.name;
         let tx = self.app.transaction()?;
         tx.execute(
-            "UPDATE meta_table SET name=?1 WHERE id=?2",
-            params![name, table_id],
+            "UPDATE meta_table SET name=?1, notes=?2 WHERE id=?3",
+            params![name, notes, table_id],
         )?;
-        tx.execute(
-            "UPDATE meta_layout SET name=?1 WHERE table_id=?2",
-            params![name, table_id],
-        )?;
-        let prefix_len = old_name.len() as i64 + 1;
-        let old_prefix = format!("{old_name}.");
-        tx.execute(
-            "UPDATE meta_object SET binding=?1 || substr(binding, ?2) \
-             WHERE binding=?3 OR substr(binding, 1, ?2)=?4",
-            params![name, prefix_len, old_name, old_prefix],
-        )?;
+        if old_name != name {
+            tx.execute(
+                "UPDATE meta_layout SET name=?1 WHERE table_id=?2",
+                params![name, table_id],
+            )?;
+            let prefix_len = old_name.len() as i64 + 1;
+            let old_prefix = format!("{old_name}.");
+            tx.execute(
+                "UPDATE meta_object SET binding=?1 || substr(binding, ?2) \
+                 WHERE binding=?3 OR substr(binding, 1, ?2)=?4",
+                params![name, prefix_len, old_name, old_prefix],
+            )?;
+        }
         tx.commit()?;
         self.table_by_id(table_id)
     }
@@ -252,23 +271,51 @@ impl Solution {
         field_id: i64,
         name: &str,
     ) -> Result<Option<FieldMeta>> {
+        let Some(field) = self.field_by_id(table_id, field_id)? else {
+            return Ok(None);
+        };
+        self.update_field(table_id, field_id, name, field.kind, &field.notes)
+    }
+
+    /// Update a field's editable metadata. Retyping rebuilds the physical table;
+    /// renaming rewrites direct `<Table>.<Field>` bindings.
+    pub fn update_field(
+        &mut self,
+        table_id: i64,
+        field_id: i64,
+        name: &str,
+        kind: FieldKind,
+        notes: &str,
+    ) -> Result<Option<FieldMeta>> {
         let Some(table) = self.table_by_id(table_id)? else {
             return Ok(None);
         };
         let Some(field) = self.field_by_id(table_id, field_id)? else {
             return Ok(None);
         };
-        let old_binding = format!("{}.{}", table.name, field.name);
-        let new_binding = format!("{}.{}", table.name, name);
+        if field.kind != kind {
+            let mut fields = self.fields(table_id)?;
+            for f in &mut fields {
+                if f.id == field_id {
+                    f.kind = kind;
+                }
+            }
+            self.rebuild_physical_table(&table, &fields)
+                .context("rebuild physical table for field retype")?;
+        }
         let tx = self.app.transaction()?;
         tx.execute(
-            "UPDATE meta_field SET name=?1 WHERE id=?2 AND table_id=?3",
-            params![name, field_id, table_id],
+            "UPDATE meta_field SET name=?1, kind=?2, notes=?3 WHERE id=?4 AND table_id=?5",
+            params![name, kind.as_str(), notes, field_id, table_id],
         )?;
-        tx.execute(
-            "UPDATE meta_object SET binding=?1 WHERE binding=?2",
-            params![new_binding, old_binding],
-        )?;
+        if field.name != name {
+            let old_binding = format!("{}.{}", table.name, field.name);
+            let new_binding = format!("{}.{}", table.name, name);
+            tx.execute(
+                "UPDATE meta_object SET binding=?1 WHERE binding=?2",
+                params![new_binding, old_binding],
+            )?;
+        }
         tx.commit()?;
         self.field_by_id(table_id, field_id)
     }
@@ -377,12 +424,13 @@ impl Solution {
     pub fn tables(&self) -> Result<Vec<TableMeta>> {
         let mut stmt = self
             .app
-            .prepare("SELECT id, name, phys_name FROM meta_table ORDER BY name")?;
+            .prepare("SELECT id, name, notes, phys_name FROM meta_table ORDER BY name")?;
         let rows = stmt.query_map([], |r| {
             Ok(TableMeta {
                 id: r.get(0)?,
                 name: r.get(1)?,
-                phys: r.get(2)?,
+                notes: r.get(2)?,
+                phys: r.get(3)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -392,12 +440,13 @@ impl Solution {
     pub fn table_by_name(&self, name: &str) -> Result<Option<TableMeta>> {
         let mut stmt = self
             .app
-            .prepare("SELECT id, name, phys_name FROM meta_table WHERE name=?1")?;
+            .prepare("SELECT id, name, notes, phys_name FROM meta_table WHERE name=?1")?;
         let mut rows = stmt.query_map(params![name], |r| {
             Ok(TableMeta {
                 id: r.get(0)?,
                 name: r.get(1)?,
-                phys: r.get(2)?,
+                notes: r.get(2)?,
+                phys: r.get(3)?,
             })
         })?;
         match rows.next() {
@@ -410,12 +459,13 @@ impl Solution {
     pub fn table_by_id(&self, id: i64) -> Result<Option<TableMeta>> {
         let mut stmt = self
             .app
-            .prepare("SELECT id, name, phys_name FROM meta_table WHERE id=?1")?;
+            .prepare("SELECT id, name, notes, phys_name FROM meta_table WHERE id=?1")?;
         let mut rows = stmt.query_map(params![id], |r| {
             Ok(TableMeta {
                 id: r.get(0)?,
                 name: r.get(1)?,
-                phys: r.get(2)?,
+                notes: r.get(2)?,
+                phys: r.get(3)?,
             })
         })?;
         match rows.next() {
@@ -427,17 +477,18 @@ impl Solution {
     /// Look up a field by id, scoped to its table.
     pub fn field_by_id(&self, table_id: i64, field_id: i64) -> Result<Option<FieldMeta>> {
         let mut stmt = self.app.prepare(
-            "SELECT id, name, phys_name, kind, position FROM meta_field \
+            "SELECT id, name, notes, phys_name, kind, position FROM meta_field \
              WHERE table_id=?1 AND id=?2",
         )?;
         let mut rows = stmt.query_map(params![table_id, field_id], |r| {
-            let kind_s: String = r.get(3)?;
+            let kind_s: String = r.get(4)?;
             Ok(FieldMeta {
                 id: r.get(0)?,
                 name: r.get(1)?,
-                phys: r.get(2)?,
+                notes: r.get(2)?,
+                phys: r.get(3)?,
                 kind: FieldKind::parse(&kind_s).unwrap_or(FieldKind::Text),
-                position: r.get(4)?,
+                position: r.get(5)?,
             })
         })?;
         match rows.next() {
@@ -449,17 +500,18 @@ impl Solution {
     /// Fields of a table, in display order.
     pub fn fields(&self, table_id: i64) -> Result<Vec<FieldMeta>> {
         let mut stmt = self.app.prepare(
-            "SELECT id, name, phys_name, kind, position FROM meta_field \
+            "SELECT id, name, notes, phys_name, kind, position FROM meta_field \
              WHERE table_id=?1 ORDER BY position, id",
         )?;
         let rows = stmt.query_map(params![table_id], |r| {
-            let kind_s: String = r.get(3)?;
+            let kind_s: String = r.get(4)?;
             Ok(FieldMeta {
                 id: r.get(0)?,
                 name: r.get(1)?,
-                phys: r.get(2)?,
+                notes: r.get(2)?,
+                phys: r.get(3)?,
                 kind: FieldKind::parse(&kind_s).unwrap_or(FieldKind::Text),
-                position: r.get(4)?,
+                position: r.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

@@ -109,6 +109,13 @@
     .app.has-inspector .content { padding: 0; overflow: hidden; background-color: var(--rm-workspace-bg);
                  background-image: repeating-linear-gradient(0deg, rgba(127,127,127,.06) 0 1px, transparent 1px 6px); }
     .app.has-inspector .content > #layout-editor { height: 100%; }
+    /* Schema builder (#113): a full-width, sidebar-less window (no rail) — the
+       island owns its own tabbed navigation, so the pane is edge-to-edge and
+       fills the height like the editor canvas does. */
+    .app.is-schema { grid-template-columns: 1fr;
+           grid-template-areas: "topbar" "content" "status"; }
+    .app.is-schema .content { padding: 0; overflow: hidden; background: var(--rm-workspace-bg); }
+    .app.is-schema .content > #schema-root { height: 100%; }
     /* Bottom status strip — collapse toggle + mode + per-view detail. */
     .statusbar { grid-area: status; border-top: .5px solid var(--rm-border); background: var(--rm-toolbar-bg);
                  padding: 6px 12px; font-size: 11.5px; color: var(--rm-text-dim);
@@ -262,7 +269,7 @@
      below and the Svelte islands (mounted into this same document) can reference
      its `<symbol>`s via `<use href="#icon-…">`. No CDN, no runtime fetch. #}
   {% include "_icons.svg" %}
-  <div class="app {% if chrome.mode == "design" %}has-inspector{% endif %}">
+  <div class="app {% if chrome.mode == "design" %}has-inspector{% endif %}{% if chrome.mode == "schema" %}is-schema{% endif %}">
     <header class="topbar">
       <span class="brand"><svg class="icon"><use href="#icon-app"></use></svg>Record Maker</span>
       {% if !chrome.view_tabs.is_empty() %}
@@ -299,14 +306,18 @@
           <button type="button" class="act" disabled title="Open a layout to add records"><svg class="icon"><use href="#icon-delete"></use></svg>Delete</button>
           <button type="button" class="act" disabled title="Find — coming soon"><svg class="icon"><use href="#icon-find"></use></svg>Find</button>
         {% endmatch %}
-        {% else %}
+        {% else if chrome.mode == "design" %}
           <button type="button" class="act" disabled title="Records are managed in Browse mode"><svg class="icon"><use href="#icon-plus"></use></svg>New</button>
           <button type="button" class="act" disabled title="Records are managed in Browse mode"><svg class="icon"><use href="#icon-delete"></use></svg>Delete</button>
           <button type="button" class="act" disabled title="Find — coming soon"><svg class="icon"><use href="#icon-find"></use></svg>Find</button>
         {% endif %}
+        {# Schema mode shows no record actions — the island's own tabs/buttons own it. #}
       </div>
     </header>
 
+    {# Schema mode is a full-width, sidebar-less window — the island owns its own
+       tabbed navigation, so no rail is rendered at all. #}
+    {% if chrome.mode != "schema" %}
     <aside class="sidebar">
       <nav class="modes">
         {% match chrome.current_layout %}
@@ -377,6 +388,7 @@
       <div id="layout-tools" class="tool-rail"></div>
       {% endif %}
     </aside>
+    {% endif %}
 
     <main class="content">
       {% block content %}{% endblock %}
@@ -391,6 +403,9 @@
     </aside>
     {% endif %}
 
+    {# Schema mode has its own in-window footer (the Done button); the shared
+       status strip (collapse toggle / mode) would be redundant there. #}
+    {% if chrome.mode != "schema" %}
     <footer class="statusbar">
       <button type="button" class="collapse" title="Collapse / expand the sidebar"
               onclick="document.querySelector('.app').classList.toggle('rail-collapsed')"><svg class="icon"><use href="#icon-collapse"></use></svg></button>
@@ -398,6 +413,7 @@
       {% if chrome.editing %}<span class="status-edit" title="Record open for editing">&#9679; Editing</span>{% endif %}
       <span class="status-detail">{% block statusbar %}{% endblock %}</span>
     </footer>
+    {% endif %}
   </div>
   {# Standard app dialog. One native <dialog> shared by the whole app; opened
      via window.appConfirm() or declaratively by any form with `data-confirm`. The
@@ -650,6 +666,14 @@
     {% when None %}
     {% endmatch %}
     document.addEventListener('keydown', function (e) {
+      // Ctrl/⌘ Shift D — open the schema builder. Global entry for now; a proper
+      // menu entry replaces it later (#113). Handled before the no-shift guard
+      // below because this binding intentionally uses Shift.
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'd') {
+        e.preventDefault();
+        if (MODE !== 'schema') window.location.href = '/schema';
+        return;
+      }
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
       var k = e.key.toLowerCase();
       // Ctrl/⌘ A must never invoke the browser's page select-all. In Layout Mode

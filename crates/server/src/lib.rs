@@ -72,7 +72,7 @@ impl AppState {
 
 /// Persistent shell context shared by every page (the chrome).
 struct Chrome {
-    mode: &'static str, // "browse" | "design"
+    mode: &'static str, // "browse" | "design" | "schema"
     layouts: Vec<LayoutLink>,
     current_layout: Option<i64>,
     /// Form/List/Table tabs for the Browse view toggle; empty in Layout mode.
@@ -455,6 +455,16 @@ struct DesignTemplate {
     /// Which view this layout designs (`Form`/`List`/`Table`) — shown in the
     /// status bar so the designer knows which surface they're editing (#57).
     view: &'static str,
+}
+
+/// The schema-builder surface (#113): a sibling to Layout Mode that manages
+/// tables / fields (and, later, relationships) over the #107 `/schema/*` API.
+/// App-global rather than per-layout, so it carries no current layout — the
+/// Svelte island fetches the schema itself and owns the whole surface.
+#[derive(Template)]
+#[template(path = "schema.html")]
+struct SchemaTemplate {
+    chrome: Chrome,
 }
 
 /// Home → the first table's Form Browse view (the Form layout is the canonical
@@ -1061,6 +1071,14 @@ async fn design(State(st): State<AppState>, Path(layout_id): Path<i64>) -> impl 
     Html(tmpl.render().unwrap()).into_response()
 }
 
+/// The schema-builder page (#113). Renders the shell in `schema` mode with a
+/// single mount node; the Svelte island drives everything over `/schema/*`.
+async fn schema_page(State(st): State<AppState>) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let chrome = Chrome::build(&sol, "schema", None);
+    Html(SchemaTemplate { chrome }.render().unwrap()).into_response()
+}
+
 /// The Layout-Mode read model (#44): the layout's parts/objects with resolved
 /// labels + live values for record `?rec=N` (1-based; defaults to the first
 /// record, blank values when the table is empty — geometry is record-independent,
@@ -1107,6 +1125,7 @@ fn object_group_view(g: ObjectGroup) -> ObjectGroupView {
 struct TableSchemaView {
     id: i64,
     name: String,
+    notes: String,
     phys: String,
 }
 
@@ -1115,6 +1134,7 @@ struct TableSchemaView {
 struct FieldSchemaView {
     id: i64,
     name: String,
+    notes: String,
     phys: String,
     kind: String,
     position: i64,
@@ -1135,6 +1155,7 @@ struct RelationshipSchemaView {
 #[serde(rename_all = "camelCase")]
 struct CreateTableBody {
     name: String,
+    notes: Option<String>,
     fields: Option<Vec<FieldBody>>,
 }
 
@@ -1147,6 +1168,20 @@ struct RenameBody {
 struct FieldBody {
     name: String,
     kind: String,
+    notes: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateTableBody {
+    name: String,
+    notes: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateFieldBody {
+    name: String,
+    kind: String,
+    notes: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1174,6 +1209,7 @@ fn table_schema_view(t: TableMeta) -> TableSchemaView {
     TableSchemaView {
         id: t.id,
         name: t.name,
+        notes: t.notes,
         phys: t.phys,
     }
 }
@@ -1182,6 +1218,7 @@ fn field_schema_view(f: FieldMeta) -> FieldSchemaView {
     FieldSchemaView {
         id: f.id,
         name: f.name,
+        notes: f.notes,
         phys: f.phys,
         kind: f.kind.as_str().to_string(),
         position: f.position,
@@ -1231,6 +1268,7 @@ async fn create_schema_table(
     State(st): State<AppState>,
     Json(body): Json<CreateTableBody>,
 ) -> impl IntoResponse {
+    let notes = body.notes.unwrap_or_default();
     let fields = match body
         .fields
         .unwrap_or_default()
@@ -1246,8 +1284,29 @@ async fn create_schema_table(
         Ok(id) => id,
         Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
     };
-    let table = sol.table_by_id(table_id).unwrap().unwrap();
+    let table = if notes.is_empty() {
+        sol.table_by_id(table_id).unwrap().unwrap()
+    } else {
+        match sol.update_table(table_id, &body.name, &notes) {
+            Ok(Some(table)) => table,
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
+        }
+    };
     Json(table_schema_view(table)).into_response()
+}
+
+async fn update_schema_table(
+    State(st): State<AppState>,
+    Path(table_id): Path<i64>,
+    Json(body): Json<UpdateTableBody>,
+) -> impl IntoResponse {
+    let mut sol = st.sol.lock().unwrap();
+    match sol.update_table(table_id, &body.name, body.notes.as_deref().unwrap_or("")) {
+        Ok(Some(table)) => Json(table_schema_view(table)).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
 }
 
 async fn rename_schema_table(
@@ -1294,14 +1353,48 @@ async fn create_schema_field(
     Path(table_id): Path<i64>,
     Json(body): Json<FieldBody>,
 ) -> impl IntoResponse {
+    let notes = body.notes.clone().unwrap_or_default();
     let field = match parse_new_field(body) {
         Ok(field) => field,
         Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
     };
     let mut sol = st.sol.lock().unwrap();
     match sol.add_field(table_id, &field) {
-        Ok(field) => Json(field_schema_view(field)).into_response(),
+        Ok(field) => {
+            let field = if notes.is_empty() {
+                field
+            } else {
+                match sol.update_field(table_id, field.id, &field.name, field.kind, &notes) {
+                    Ok(Some(field)) => field,
+                    Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+                    Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
+                }
+            };
+            Json(field_schema_view(field)).into_response()
+        }
         Err(e) if e.to_string().contains("no table") => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn update_schema_field(
+    State(st): State<AppState>,
+    Path((table_id, field_id)): Path<(i64, i64)>,
+    Json(body): Json<UpdateFieldBody>,
+) -> impl IntoResponse {
+    let Some(kind) = FieldKind::parse(&body.kind) else {
+        return (StatusCode::BAD_REQUEST, "bad field kind").into_response();
+    };
+    let mut sol = st.sol.lock().unwrap();
+    match sol.update_field(
+        table_id,
+        field_id,
+        &body.name,
+        kind,
+        body.notes.as_deref().unwrap_or(""),
+    ) {
+        Ok(Some(field)) => Json(field_schema_view(field)).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
     }
 }
@@ -2527,6 +2620,7 @@ pub fn app(state: AppState) -> Router {
             "/schema/tables",
             get(schema_tables).post(create_schema_table),
         )
+        .route("/schema/tables/:table_id", post(update_schema_table))
         .route("/schema/tables/:table_id/rename", post(rename_schema_table))
         .route("/schema/tables/:table_id/delete", post(delete_schema_table))
         .route(
@@ -2540,6 +2634,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/schema/tables/:table_id/fields/:field_id/rename",
             post(rename_schema_field),
+        )
+        .route(
+            "/schema/tables/:table_id/fields/:field_id",
+            post(update_schema_field),
         )
         .route(
             "/schema/tables/:table_id/fields/:field_id/retype",
@@ -2561,6 +2659,7 @@ pub fn app(state: AppState) -> Router {
             "/schema/relationships/:id/delete",
             post(delete_schema_relationship),
         )
+        .route("/schema", get(schema_page))
         .route("/design/:layout", get(design))
         .route("/design/:layout/model", get(design_model))
         .route("/design/:layout/object", post(create_design_object))
@@ -3063,6 +3162,7 @@ mod tests {
         let state = state_for(Solution::open_in_memory().unwrap());
         let body = serde_json::json!({
             "name": "Invoices",
+            "notes": "Billing data",
             "fields": [
                 {"name": "Number", "kind": "text"},
                 {"name": "Total", "kind": "number"}
@@ -3074,6 +3174,7 @@ mod tests {
         let table: serde_json::Value = serde_json::from_str(&resp).unwrap();
         let table_id = table["id"].as_i64().unwrap();
         let table_phys = table["phys"].as_str().unwrap().to_string();
+        assert_eq!(table["notes"].as_str(), Some("Billing data"));
 
         let (status, fields_body) =
             get_body(state.clone(), &format!("/schema/tables/{table_id}/fields")).await;
@@ -3090,6 +3191,16 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{resp}");
         assert!(resp.contains(r#""name":"Bills""#));
+        assert!(resp.contains(r#""notes":"Billing data""#));
+
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/schema/tables/{table_id}"),
+            r#"{"name":"Bills","notes":"Paid and open invoices"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        assert!(resp.contains(r#""notes":"Paid and open invoices""#));
 
         let (status, resp) = post_json_body(
             state.clone(),
@@ -3098,6 +3209,15 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{resp}");
+
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/schema/tables/{table_id}/fields/{number_id}"),
+            r#"{"name":"Invoice Number","kind":"text","notes":"Shown on customer forms"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        assert!(resp.contains(r#""notes":"Shown on customer forms""#));
 
         let (status, resp) = post_json_body(
             state.clone(),
@@ -3589,6 +3709,33 @@ mod tests {
         assert!(
             !browse.contains(r#"id="layout-tools""#),
             "browse has no tool rail"
+        );
+    }
+
+    /// #113: the schema-builder surface renders in `schema` mode with the single
+    /// island mount node and the global Schema nav marked active. It's app-global,
+    /// so it renders even with no tables/layouts.
+    #[tokio::test]
+    async fn schema_page_renders_builder_mount_node() {
+        let sol = Solution::open_in_memory().unwrap();
+        let state = state_for(sol);
+
+        let (status, html) = get_body(state.clone(), "/schema").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            html.contains(r#"id="schema-root""#),
+            "schema page mounts the builder island"
+        );
+        assert!(
+            html.contains(r#"src="/ui/schema-builder.js""#),
+            "schema page loads the schema-builder bundle"
+        );
+
+        // The builder node never appears on other surfaces.
+        let (_, browse) = get_body(state, "/").await;
+        assert!(
+            !browse.contains(r#"id="schema-root""#),
+            "the schema island is scoped to /schema"
         );
     }
 

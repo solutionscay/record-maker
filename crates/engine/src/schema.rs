@@ -38,6 +38,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0007_object_groups",
         include_str!("migrations/0007_object_groups.sql"),
     ),
+    (
+        "0008_schema_notes",
+        include_str!("migrations/0008_schema_notes.sql"),
+    ),
 ];
 
 /// Schema version this build targets (the number of migrations defined).

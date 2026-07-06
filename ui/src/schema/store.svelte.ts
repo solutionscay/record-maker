@@ -221,6 +221,9 @@ export class SchemaStore {
     if (fields.some((f) => f.id !== id && normName(f.name) === normName(cleanName))) {
       return this.fail(`A field named "${cleanName}" already exists in this table.`);
     }
+    if (options.validation?.primary && fields.some((f) => f.id !== id && f.options.validation?.primary)) {
+      return this.fail('A table can only have one Primary ID field.');
+    }
     const reference = options.reference;
     const memberOfValueList = options.validation?.memberOfValueList;
     if (memberOfValueList != null && !this.valueLists.some((list) => list.id === memberOfValueList)) {
@@ -485,10 +488,17 @@ export class SchemaStore {
 
     for (const table of this.tables) {
       const fieldNames = new Set<string>();
+      let primaryField: string | null = null;
       for (const field of this.fieldsByTable[table.id] ?? []) {
         const name = normName(field.name);
         if (!name) return this.fail(`Every field in ${table.name} needs a name.`) !== null;
         if (fieldNames.has(name)) return this.fail(`Duplicate field name in ${table.name}: ${field.name}`) !== null;
+        if (field.options.validation?.primary) {
+          if (primaryField != null) {
+            return this.fail(`Table "${table.name}" can only have one Primary ID field.`) !== null;
+          }
+          primaryField = field.name;
+        }
         const memberOfValueList = field.options.validation?.memberOfValueList;
         if (memberOfValueList != null && !this.valueLists.some((list) => list.id === memberOfValueList)) {
           return this.fail(`Field "${field.name}" references a missing value list.`) !== null;

@@ -8,6 +8,7 @@
     id: number;
     name: string;
     kind: FieldKind;
+    primary: boolean;
     required: boolean;
     unique: boolean;
     fkNames: string[];
@@ -68,6 +69,9 @@
           <Icon name={kindIcon(field.kind)} />
           <span class="tn-field-name" title={field.name}>{field.name}</span>
           <span class="tn-kind">{kindLabel(field.kind)}</span>
+          {#if field.primary}
+            <span class="tn-badge tn-badge--primary" title="Primary ID">id</span>
+          {/if}
           {#if field.required}
             <span class="tn-badge tn-badge--required" title="Required">req</span>
           {/if}
@@ -207,6 +211,10 @@
   .tn-badge--fk {
     background: rgba(52, 199, 89, 0.14);
     color: #247a38;
+  }
+  .tn-badge--primary {
+    background: rgba(255, 159, 10, 0.16);
+    color: #8a5a00;
   }
   .tn-badge--required {
     background: rgba(255, 69, 58, 0.12);

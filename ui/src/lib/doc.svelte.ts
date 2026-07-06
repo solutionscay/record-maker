@@ -28,7 +28,14 @@
 // drag bind onto it without reshaping the store.
 
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
-import type { DesignModel, FieldChoice, ObjectGroupView, ObjectView, PartView } from './model';
+import type {
+  DesignModel,
+  FieldChoice,
+  ObjectGroupView,
+  ObjectView,
+  PartView,
+  RelatedRouteChoice,
+} from './model';
 import { llog } from './log';
 
 // ── document types ──────────────────────────────────────────────────────────
@@ -229,6 +236,8 @@ export class EditorDoc {
   /** The primary table's fields, for the Create zone's Field tool (#62). Refreshed
    * on hydrate; UI-only, never undoable. */
   #fields = $state<FieldChoice[]>([]);
+  /** Constraint-derived related routes for portal/related-data authoring. */
+  #relatedRoutes = $state<RelatedRouteChoice[]>([]);
   /** Active Create-zone tool (#62). `pointer` is select/drag; any other value arms
    * the canvas to place that kind on the next click. */
   #activeTool = $state<ToolKind>('pointer');
@@ -263,6 +272,7 @@ export class EditorDoc {
     this.#rec = model.rec;
     this.#total = model.total;
     this.#fields = model.fields.slice();
+    this.#relatedRoutes = (model.relatedRoutes ?? []).slice();
 
     this.#objects.clear();
     this.#resolved.clear();
@@ -392,6 +402,7 @@ export class EditorDoc {
       width: this.#width,
       view: this.#view,
       fields: this.#fields,
+      relatedRoutes: this.#relatedRoutes,
       parts,
       groups: [...this.#groups.entries()]
         .sort(([a], [b]) => a - b)
@@ -812,6 +823,10 @@ export class EditorDoc {
 
   get fields(): readonly FieldChoice[] {
     return this.#fields;
+  }
+
+  get relatedRoutes(): readonly RelatedRouteChoice[] {
+    return this.#relatedRoutes;
   }
 
   get activeTool(): ToolKind {

@@ -64,6 +64,22 @@ export interface FieldChoice {
   kind: string;
 }
 
+/** A related-data route available from the layout's base table. Routes are
+ * derived from FK/reference constraints, not authored by layout/portal UI. */
+export interface RelatedRouteChoice {
+  relationshipId: number;
+  name: string;
+  direction: 'forward' | 'reverse';
+  cardinality: 'toOne' | 'toMany';
+  path: string;
+  tableId: number;
+  tableName: string;
+  fromTable: number;
+  fromField: number;
+  toTable: number;
+  toField: number;
+}
+
 /** One layout part (band) and the objects it contains, ordered back→front. */
 export interface PartView {
   /** Stable part id; used as the keyed-each key. */
@@ -105,6 +121,8 @@ export interface DesignModel {
   view: string;
   /** The primary table's fields — what the Create zone's Field tool offers. */
   fields: FieldChoice[];
+  /** FK/reference-backed routes available for related-data tools such as portals. */
+  relatedRoutes: RelatedRouteChoice[];
   /** Layout parts, rendered top→bottom in array order. */
   parts: PartView[];
   /** Durable object groups. */

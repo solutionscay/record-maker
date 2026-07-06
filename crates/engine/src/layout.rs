@@ -1036,6 +1036,30 @@ impl Solution {
         Ok(n)
     }
 
+    /// Delete several objects atomically (#48 multi-delete/cut) — the bulk
+    /// sibling of [`Solution::delete_object`], mirroring
+    /// [`Solution::set_objects_geometry`]: one transaction, each DELETE
+    /// **layout-scoped** so foreign/unknown ids are no-ops. Returns the total
+    /// number of rows removed; degenerate groups are pruned once at the end.
+    pub fn delete_objects(&mut self, layout_id: i64, object_ids: &[i64]) -> Result<usize> {
+        let tx = self.app.transaction()?;
+        let mut removed = 0usize;
+        {
+            let mut stmt = tx.prepare(
+                "DELETE FROM meta_object \
+                 WHERE id=?1 AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?2)",
+            )?;
+            for &id in object_ids {
+                removed += stmt.execute(params![id, layout_id])?;
+            }
+        }
+        tx.commit()?;
+        if removed > 0 {
+            self.delete_degenerate_object_groups(layout_id)?;
+        }
+        Ok(removed)
+    }
+
     /// Persist an object's appearance bag (#49) — the Style zone commits the
     /// opaque `props` JSON through this. **Layout-scoped** like the geometry
     /// commands; returns the rows updated (`0` ⇒ no such object in that layout).

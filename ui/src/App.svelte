@@ -87,16 +87,18 @@
   });
 
   // Keep moveable's control box in sync with the store: re-run on any selection,
-  // geometry, or active-tool change (arming a tool drops the target so a press
-  // places instead of grabs). The controller ignores syncs during a live gesture.
+  // document-content, or active-tool change (arming a tool drops the target so a
+  // press places instead of grabs). The controller ignores syncs during a live
+  // gesture. `doc.version` is the narrow signal for "the render model changed" —
+  // tracking the model itself would walk every part/object on each flush.
   $effect(() => {
     void [...doc.selection];
-    void doc.renderModel;
+    void doc.version;
     void doc.activeTool;
     interaction?.refresh();
-    // Reading renderModel above tracks each object's server-derived `textStyle`, so
-    // when the inspector changes the selected text's size/style this re-applies it
-    // to an open inline editor LIVE — without committing/closing it (#5).
+    // doc.version above bumps on each object's server-derived `textStyle` refresh,
+    // so when the inspector changes the selected text's size/style this re-applies
+    // it to an open inline editor LIVE — without committing/closing it (#5).
     interaction?.syncOpenTextEditor();
   });
 

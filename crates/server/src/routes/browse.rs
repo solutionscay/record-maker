@@ -11,9 +11,9 @@ use axum::{
 
 use crate::viewmodel::{
     build_bands, build_form_record, build_list, canonical_view, clamp_rec, flipbook,
-    layout_field_formats, layout_stepper, layout_table, view_label, CellView, Chrome,
-    DesignTemplate, FieldView, FormTemplate, ListTemplate, RecordView, SchemaTemplate,
-    TableTemplate,
+    layout_field_formats, layout_parts_with_objects, layout_stepper, layout_table, view_label,
+    CellView, Chrome, DesignTemplate, FieldView, FormTemplate, ListTemplate, RecordView,
+    SchemaTemplate, TableTemplate,
 };
 use crate::{format, not_found, AppState};
 
@@ -77,7 +77,7 @@ pub(crate) async fn browse(
         }
         "list" => {
             let fields = sol.fields(table.id).unwrap();
-            let (header, rows, footer) = build_list(&sol, layout_id, &table, &fields, &ids, rec);
+            let (header, rows, footer) = build_list(&sol, layout_id, &table, &fields, rec);
             Html(
                 ListTemplate {
                     chrome,
@@ -94,8 +94,10 @@ pub(crate) async fn browse(
         _ => {
             let fields = sol.fields(table.id).unwrap();
             let records = sol.list_records(&table, &fields).unwrap();
-            let formats = layout_field_formats(&sol, layout_id, &fields);
-            let (header, footer) = build_bands(&sol, layout_id);
+            // One parts+objects fetch feeds both the column formats and the bands.
+            let parts = layout_parts_with_objects(&sol, layout_id);
+            let formats = layout_field_formats(&parts, &fields);
+            let (header, footer) = build_bands(&parts);
             let tmpl = TableTemplate {
                 chrome,
                 layout_id,
@@ -157,9 +159,11 @@ pub(crate) async fn design(
     let Some((lay, _table)) = layout_table(&sol, layout_id) else {
         return not_found("layout", layout_id);
     };
-    let mut chrome = Chrome::build(&sol, "design", Some(&lay));
+    // One layouts() fetch feeds both the chrome and the stepper.
+    let layouts = sol.layouts().unwrap_or_default();
+    let mut chrome = Chrome::build_with_layouts(&layouts, "design", Some(&lay));
     // Keep the pagination control in Layout mode — repurposed to step layouts.
-    chrome.nav = layout_stepper(&sol, &lay);
+    chrome.nav = layout_stepper(&layouts, &lay);
     let tmpl = DesignTemplate {
         chrome,
         layout_id,

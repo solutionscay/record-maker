@@ -188,6 +188,19 @@ export async function deleteObject(layoutId: string, id: number): Promise<void> 
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
 }
 
+/** Batch-delete objects in one transaction (multi-delete / cut) — the bulk
+ * sibling of `deleteObject`, mirroring `setObjectsGeometry`: the server scopes
+ * each id to the layout and skips unknown ids, returning a count the store
+ * doesn't consume. */
+export async function deleteObjects(layoutId: string, ids: number[]): Promise<void> {
+  const r = await fetch(`/design/${layoutId}/objects/delete`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(ids),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+}
+
 /** Commit a props bag (#49); returns the server-derived shape style for the
  * canvas (empty for a non-shape object). */
 export async function setObjectProps(

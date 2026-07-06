@@ -54,6 +54,35 @@ impl Solution {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The found-set size of `table` — `record_ids().len()` without loading the
+    /// ids. Pairs with [`Solution::record_id_at`] so a single-record lookup
+    /// (clamp + index) never materialises the whole found set.
+    pub fn record_count(&self, table: &TableMeta) -> Result<i64> {
+        let n = self.data.query_row(
+            &format!("SELECT COUNT(*) FROM {}", table.phys),
+            [],
+            |r| r.get::<_, i64>(0),
+        )?;
+        Ok(n)
+    }
+
+    /// The physical id at 1-based found-set position `pos` (id order — the same
+    /// ordering as [`Solution::record_ids`]), or `None` when out of range.
+    pub fn record_id_at(&self, table: &TableMeta, pos: i64) -> Result<Option<i64>> {
+        if pos < 1 {
+            return Ok(None);
+        }
+        let mut stmt = self.data.prepare(&format!(
+            "SELECT id FROM {} ORDER BY id LIMIT 1 OFFSET ?1",
+            table.phys
+        ))?;
+        let mut rows = stmt.query_map(params![pos - 1], |r| r.get::<_, i64>(0))?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
     /// Insert a row. `values` are `(field, string-value)` pairs; SQLite type
     /// affinity converts the strings into each column's type.
     pub fn insert_record(&self, table: &TableMeta, values: &[(&FieldMeta, String)]) -> Result<i64> {

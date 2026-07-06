@@ -73,17 +73,20 @@ export class SchemaStore {
     return this.selectedTableId == null ? [] : (this.fieldsByTable[this.selectedTableId] ?? []);
   }
 
-  get hasChanges(): boolean {
-    return (
+  /** Memoized draft-vs-baseline dirty check. A `$derived.by` class field so the
+   * whole-draft JSON serialization runs once per draft change instead of on
+   * every reactive read of `hasChanges`/`changeSummary`. */
+  readonly #hasChanges: boolean = $derived.by(
+    () =>
       !sameJson(this.tables, this.baseTables) ||
       !sameJson(this.fieldsByTable, this.baseFieldsByTable) ||
       !sameJson(this.relationships, this.baseRelationships) ||
-      this.deletedRelationshipIds.length > 0
-    );
-  }
+      this.deletedRelationshipIds.length > 0,
+  );
 
-  get changeSummary(): string {
-    if (!this.hasChanges) return 'No unsaved schema changes';
+  /** Memoized change summary — same caching rationale as `#hasChanges`. */
+  readonly #changeSummary: string = $derived.by(() => {
+    if (!this.#hasChanges) return 'No unsaved schema changes';
     const tableDelta = this.tables.filter((t) => !sameJson(t, this.baseTables.find((b) => b.id === t.id))).length;
     const fieldDelta = Object.values(this.fieldsByTable)
       .flat()
@@ -102,6 +105,14 @@ export class SchemaStore {
       relDelta > 0 ? `${relDelta} relationship${relDelta === 1 ? '' : 's'}` : '',
     ].filter(Boolean);
     return `Unsaved: ${parts.join(', ')}`;
+  });
+
+  get hasChanges(): boolean {
+    return this.#hasChanges;
+  }
+
+  get changeSummary(): string {
+    return this.#changeSummary;
   }
 
   /** Run `op`, routing any failure into `error` so the UI can show it. */
@@ -359,83 +370,112 @@ export class SchemaStore {
       const fieldIdMap = new Map<number, number>();
       const resolveTable = (id: number) => tableIdMap.get(id) ?? id;
       const resolveField = (id: number) => fieldIdMap.get(id) ?? id;
+      // Field ids already persisted (updated or created) in the structural pass,
+      // so the options pass never re-sends an identical update.
+      const persisted = new Set<number>();
 
-      for (const id of this.deletedRelationshipIds) {
-        await api.deleteRelationship(id);
-      }
+      // Independent deletes/updates run in parallel; each ordered group below
+      // still completes before the next (renames land before creates, creates
+      // fill the id maps before anything resolves through them).
+      await Promise.all(this.deletedRelationshipIds.map((id) => api.deleteRelationship(id)));
 
-      for (const table of this.tables.filter((t) => t.id > 0)) {
-        const base = this.baseTables.find((t) => t.id === table.id);
-        if (base && !sameJson(table, base)) await api.updateTable(table.id, table.name, table.notes);
-      }
+      await Promise.all(
+        this.tables
+          .filter((t) => t.id > 0)
+          .filter((t) => {
+            const base = this.baseTables.find((b) => b.id === t.id);
+            return base && !sameJson(t, base);
+          })
+          .map((t) => api.updateTable(t.id, t.name, t.notes)),
+      );
 
-      for (const table of this.tables.filter((t) => t.id < 0)) {
-        const created = await api.createTableWithNotes(table.name, table.notes);
-        tableIdMap.set(table.id, created.id);
-      }
+      const newTables = this.tables.filter((t) => t.id < 0);
+      const createdTables = await Promise.all(
+        newTables.map((t) => api.createTableWithNotes(t.name, t.notes)),
+      );
+      newTables.forEach((t, i) => tableIdMap.set(t.id, createdTables[i].id));
 
-      for (const table of this.tables) {
-        const sourceTableId = table.id;
-        const targetTableId = resolveTable(table.id);
-        const fields = this.fieldsByTable[sourceTableId] ?? [];
-        for (const field of fields.filter((f) => f.id > 0)) {
-          const base = this.baseFieldsByTable[sourceTableId]?.find((f) => f.id === field.id);
-          if (base && !sameJson(field, base)) {
-            await api.updateField(
-              targetTableId,
-              field.id,
-              field.name,
-              field.kind,
-              field.notes,
-              withoutReference(field.options),
-            );
-          }
-        }
-        for (const field of fields.filter((f) => f.id < 0)) {
-          const created = await api.createFieldWithDetails(
-            targetTableId,
-            field.name,
-            field.kind,
-            field.notes,
-            withoutReference(field.options),
+      // Structural field pass, tables in parallel: update existing fields
+      // (references stripped — their targets may not exist yet), then create new
+      // fields (filling the field id map), then persist the order.
+      await Promise.all(
+        this.tables.map(async (table) => {
+          const targetTableId = resolveTable(table.id);
+          const fields = this.fieldsByTable[table.id] ?? [];
+          const changed = fields.filter((f) => {
+            if (f.id < 0) return false;
+            const base = this.baseFieldsByTable[table.id]?.find((b) => b.id === f.id);
+            return base && !sameJson(f, base);
+          });
+          await Promise.all(
+            changed.map((f) =>
+              api
+                .updateField(targetTableId, f.id, f.name, f.kind, f.notes, withoutReference(f.options))
+                .then(() => {
+                  persisted.add(f.id);
+                }),
+            ),
           );
-          fieldIdMap.set(field.id, created.id);
-        }
-        if (fields.length > 0) {
-          await api.reorderFields(targetTableId, fields.map((f) => resolveField(f.id)));
-        }
-      }
-
-      for (const table of this.tables) {
-        const sourceTableId = table.id;
-        const targetTableId = resolveTable(table.id);
-        const fields = this.fieldsByTable[sourceTableId] ?? [];
-        for (const field of fields) {
-          const finalOptions = this.resolvedFieldOptions(field.options, resolveTable, resolveField);
-          const baseOptions = this.baseFieldsByTable[sourceTableId]?.find((f) => f.id === field.id)?.options ?? {};
-          if (!sameJson(finalOptions, baseOptions)) {
-            await api.updateField(
-              targetTableId,
-              resolveField(field.id),
-              field.name,
-              field.kind,
-              field.notes,
-              finalOptions,
-            );
+          const newFields = fields.filter((f) => f.id < 0);
+          const createdFields = await Promise.all(
+            newFields.map((f) =>
+              api.createFieldWithDetails(targetTableId, f.name, f.kind, f.notes, withoutReference(f.options)),
+            ),
+          );
+          newFields.forEach((f, i) => {
+            fieldIdMap.set(f.id, createdFields[i].id);
+            persisted.add(f.id);
+          });
+          if (fields.length > 0) {
+            await api.reorderFields(targetTableId, fields.map((f) => resolveField(f.id)));
           }
-        }
-      }
+        }),
+      );
 
-      for (const rel of this.relationships.filter((r) => r.id > 0)) {
-        const base = this.baseRelationships.find((r) => r.id === rel.id);
-        const body = this.relationshipBody(rel, resolveTable, resolveField);
-        const baseBody = base ? this.relationshipBody(base, (id) => id, (id) => id) : null;
-        if (!baseBody || !sameJson(body, baseBody)) await api.updateRelationship(rel.id, body);
-      }
-      for (const rel of this.relationships.filter((r) => r.id < 0)) {
-        await api.createRelationship(this.relationshipBody(rel, resolveTable, resolveField));
-      }
+      // Options pass, now that every table/field id resolves: re-send only the
+      // fields whose resolved options differ from BOTH the baseline and what the
+      // structural pass just persisted (i.e. reference-carrying options).
+      await Promise.all(
+        this.tables.flatMap((table) => {
+          const targetTableId = resolveTable(table.id);
+          return (this.fieldsByTable[table.id] ?? []).flatMap((field) => {
+            const finalOptions = this.resolvedFieldOptions(field.options, resolveTable, resolveField);
+            const baseOptions = this.baseFieldsByTable[table.id]?.find((f) => f.id === field.id)?.options ?? {};
+            if (sameJson(finalOptions, baseOptions)) return [];
+            if (persisted.has(field.id) && sameJson(finalOptions, withoutReference(field.options))) return [];
+            return [
+              api.updateField(
+                targetTableId,
+                resolveField(field.id),
+                field.name,
+                field.kind,
+                field.notes,
+                finalOptions,
+              ),
+            ];
+          });
+        }),
+      );
 
+      await Promise.all(
+        this.relationships
+          .filter((r) => r.id > 0)
+          .flatMap((rel) => {
+            const base = this.baseRelationships.find((r) => r.id === rel.id);
+            const body = this.relationshipBody(rel, resolveTable, resolveField);
+            const baseBody = base ? this.relationshipBody(base, (id) => id, (id) => id) : null;
+            return !baseBody || !sameJson(body, baseBody) ? [api.updateRelationship(rel.id, body)] : [];
+          }),
+      );
+      await Promise.all(
+        this.relationships
+          .filter((r) => r.id < 0)
+          .map((rel) => api.createRelationship(this.relationshipBody(rel, resolveTable, resolveField))),
+      );
+
+      // Reload rather than patching the baseline from responses: on any failure
+      // above the draft must stay intact and the baseline must stay the server's
+      // truth, and the reload is what guarantees that equivalence.
       await this.load();
       this.error = null;
       return true;

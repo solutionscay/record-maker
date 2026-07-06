@@ -257,6 +257,20 @@ fn relationship_for_source_field(
         .find(|r| r.from_field == field_id))
 }
 
+/// A table's relationships indexed by source field (first match wins, matching
+/// [`relationship_for_source_field`]'s `find`), so the whole-table field
+/// listing runs one relationships query instead of one per field.
+fn relationships_by_source_field(
+    sol: &Solution,
+    table_id: i64,
+) -> std::collections::HashMap<i64, RelationshipMeta> {
+    let mut map = std::collections::HashMap::new();
+    for rel in sol.relationships_from_table(table_id).unwrap_or_default() {
+        map.entry(rel.from_field).or_insert(rel);
+    }
+    map
+}
+
 fn options_with_relationship_reference(mut options: Value, rel: &RelationshipMeta) -> Value {
     let Some(obj) = options.as_object_mut() else {
         return options;
@@ -453,11 +467,19 @@ pub(crate) async fn schema_fields(
     if sol.table_by_id(table_id).unwrap().is_none() {
         return Err(AppError::not_found());
     }
+    let rels = relationships_by_source_field(&sol, table_id);
     let views: Vec<FieldSchemaView> = sol
         .fields(table_id)
         .unwrap()
         .into_iter()
-        .map(|field| field_schema_view_for_table(&sol, table_id, field))
+        .map(|field| {
+            let options = field_options_value(&field);
+            let options = match rels.get(&field.id) {
+                Some(rel) => options_with_relationship_reference(options, rel),
+                None => options,
+            };
+            field_schema_view_with_options(field, options)
+        })
         .collect();
     Ok(Json(views))
 }

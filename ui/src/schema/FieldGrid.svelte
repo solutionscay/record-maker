@@ -112,8 +112,7 @@
           <span class="fg-c-handle" aria-hidden="true"></span>
           <span class="sc-micro">Field name</span>
           <span class="sc-micro">Type</span>
-          <span class="sc-micro">Physical name</span>
-          <span class="fg-c-actions" aria-hidden="true"></span>
+          <span class="sc-micro">Notes</span>
         </div>
 
         {#if store.loading}
@@ -157,6 +156,7 @@
     gap: 12px;
     padding: 12px 18px;
     border-bottom: 0.5px solid var(--rm-border);
+    background: var(--rm-toolbar-bg);
   }
   .fg-group {
     display: inline-flex;
@@ -181,7 +181,7 @@
   .fg-colhead,
   :global(.fg-row) {
     display: grid;
-    grid-template-columns: 34px minmax(0, 1.6fr) 160px minmax(0, 1fr) 48px;
+    grid-template-columns: 34px minmax(0, 1.4fr) 160px minmax(0, 1.8fr);
     align-items: center;
     gap: 12px;
     padding: 0 18px;

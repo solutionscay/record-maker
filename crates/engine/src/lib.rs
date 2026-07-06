@@ -19,4 +19,7 @@ pub use layout::{
     LayoutMeta, NewObject, ObjectGroup, ObjectKind, ObjectMeta, PartKind, PartMeta, RestoreObject,
     RestoreResult,
 };
-pub use model::{FieldKind, FieldMeta, NewField, NewRelationship, RelationshipMeta, TableMeta};
+pub use model::{
+    FieldKind, FieldMeta, NewField, NewRelationship, NewValueList, RelationshipMeta, TableMeta,
+    ValueListItem, ValueListMeta,
+};

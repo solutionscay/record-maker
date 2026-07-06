@@ -23,9 +23,9 @@ use axum::{
     Json, Router,
 };
 use record_maker_engine::{
-    FieldKind, FieldMeta, LayoutMeta, NewField, NewObject, NewRelationship, ObjectGroup,
-    ObjectKind, ObjectMeta, PartKind, PartMeta, RelationshipMeta, RestoreObject, RestoreResult,
-    Solution, TableMeta,
+    FieldKind, FieldMeta, LayoutMeta, NewField, NewObject, NewRelationship, NewValueList,
+    ObjectGroup, ObjectKind, ObjectMeta, PartKind, PartMeta, RelationshipMeta, RestoreObject,
+    RestoreResult, Solution, TableMeta, ValueListItem, ValueListMeta,
 };
 use serde_json::{Map, Value};
 
@@ -1223,6 +1223,36 @@ struct RelationshipSchemaView {
     to_field: i64,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValueListView {
+    id: i64,
+    name: String,
+    source: String,
+    config: Value,
+    position: i64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValueListItemView {
+    value: String,
+    display: String,
+    divider: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct ValueListBody {
+    name: String,
+    source: String,
+    config: Value,
+}
+
+#[derive(serde::Deserialize)]
+struct DuplicateValueListBody {
+    name: Option<String>,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateTableBody {
@@ -1309,6 +1339,39 @@ fn relationship_schema_view(r: RelationshipMeta) -> RelationshipSchemaView {
         from_field: r.from_field,
         to_field: r.to_field,
     }
+}
+
+fn value_list_view(list: ValueListMeta) -> ValueListView {
+    ValueListView {
+        id: list.id,
+        name: list.name,
+        source: list.source,
+        config: serde_json::from_str::<Value>(&list.config).unwrap_or(Value::Null),
+        position: list.position,
+    }
+}
+
+fn value_list_item_view(item: ValueListItem) -> ValueListItemView {
+    ValueListItemView {
+        value: item.value,
+        display: item.display,
+        divider: item.divider,
+    }
+}
+
+fn value_list_body(body: ValueListBody) -> Result<NewValueList, &'static str> {
+    if body.name.trim().is_empty() {
+        return Err("value list name is required");
+    }
+    if body.source != "custom" && body.source != "field" {
+        return Err("bad value list source");
+    }
+    let config = serde_json::to_string(&body.config).map_err(|_| "bad value list config")?;
+    Ok(NewValueList {
+        name: body.name,
+        source: body.source,
+        config,
+    })
 }
 
 fn parse_new_field(f: FieldBody) -> Result<NewField, &'static str> {
@@ -1838,6 +1901,84 @@ async fn delete_schema_relationship(
             }
             StatusCode::OK.into_response()
         }
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn value_lists(State(st): State<AppState>) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let lists = sol
+        .value_lists()
+        .unwrap()
+        .into_iter()
+        .map(value_list_view)
+        .collect::<Vec<_>>();
+    Json(lists)
+}
+
+async fn create_value_list(
+    State(st): State<AppState>,
+    Json(body): Json<ValueListBody>,
+) -> impl IntoResponse {
+    let Ok(list) = value_list_body(body) else {
+        return (StatusCode::BAD_REQUEST, "bad value list").into_response();
+    };
+    let mut sol = st.sol.lock().unwrap();
+    match sol.create_value_list(&list) {
+        Ok(list) => Json(value_list_view(list)).into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn update_value_list(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<ValueListBody>,
+) -> impl IntoResponse {
+    let Ok(list) = value_list_body(body) else {
+        return (StatusCode::BAD_REQUEST, "bad value list").into_response();
+    };
+    let mut sol = st.sol.lock().unwrap();
+    match sol.update_value_list(id, &list) {
+        Ok(Some(list)) => Json(value_list_view(list)).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn duplicate_value_list(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<DuplicateValueListBody>,
+) -> impl IntoResponse {
+    let mut sol = st.sol.lock().unwrap();
+    match sol.duplicate_value_list(id, body.name.as_deref()) {
+        Ok(Some(list)) => Json(value_list_view(list)).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn delete_value_list(State(st): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    match sol.delete_value_list(id) {
+        Ok(0) => StatusCode::NOT_FOUND.into_response(),
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+
+async fn value_list_items(State(st): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    match sol.resolve_value_list(id) {
+        Ok(Some(items)) => Json(
+            items
+                .into_iter()
+                .map(value_list_item_view)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
     }
 }
@@ -2915,6 +3056,10 @@ fn validate_record_values(
         if let Some(range) = validation.get("range").filter(|v| v.is_object()) {
             validate_range(field, trimmed, range)?;
         }
+
+        if let Some(value_list_id) = validation.get("memberOfValueList").and_then(Value::as_i64) {
+            validate_member_of_value_list(sol, field, value_list_id, trimmed)?;
+        }
     }
     Ok(())
 }
@@ -2967,6 +3112,36 @@ fn validate_range(field: &FieldMeta, value: &str, range: &Value) -> Result<(), S
             }
         }
         FieldKind::Text | FieldKind::Bool => {}
+    }
+    Ok(())
+}
+
+fn validate_member_of_value_list(
+    sol: &Solution,
+    field: &FieldMeta,
+    value_list_id: i64,
+    value: &str,
+) -> Result<(), String> {
+    let items = sol
+        .resolve_value_list(value_list_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Field \"{}\" references an unknown value list.", field.name))?;
+    let allowed: HashSet<String> = items
+        .into_iter()
+        .filter(|item| !item.divider)
+        .map(|item| item.value)
+        .collect();
+    for part in value
+        .split('\n')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if !allowed.contains(part) {
+            return Err(format!(
+                "Field \"{}\" must be a member of its value list.",
+                field.name
+            ));
+        }
     }
     Ok(())
 }
@@ -3096,6 +3271,11 @@ pub fn app(state: AppState) -> Router {
             "/schema/relationships/:id/delete",
             post(delete_schema_relationship),
         )
+        .route("/value-lists", get(value_lists).post(create_value_list))
+        .route("/value-lists/:id", post(update_value_list))
+        .route("/value-lists/:id/duplicate", post(duplicate_value_list))
+        .route("/value-lists/:id/delete", post(delete_value_list))
+        .route("/value-lists/:id/items", get(value_list_items))
         .route("/schema", get(schema_page))
         .route("/design/:layout", get(design))
         .route("/design/:layout/model", get(design_model))
@@ -3742,7 +3922,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_commits_enforce_required_unique_and_range_constraints() {
+    async fn value_list_routes_crud_and_resolve_items() {
+        let state = state_for(Solution::open_in_memory().unwrap());
+        let create = serde_json::json!({
+            "name": "Sizes",
+            "source": "custom",
+            "config": { "values": ["Small", "-", "Large"] }
+        });
+        let (status, resp) =
+            post_json_body(state.clone(), "/value-lists", &create.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        let list: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        let id = list["id"].as_i64().unwrap();
+        assert_eq!(list["name"].as_str(), Some("Sizes"));
+        assert_eq!(list["config"]["values"][0].as_str(), Some("Small"));
+
+        let (status, resp) = get_body(state.clone(), "/value-lists").await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        let lists: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(lists.as_array().unwrap().len(), 1);
+
+        let (status, resp) = get_body(state.clone(), &format!("/value-lists/{id}/items")).await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        let items: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(items[0]["value"].as_str(), Some("Small"));
+        assert_eq!(items[1]["divider"].as_bool(), Some(true));
+        assert_eq!(items[2]["value"].as_str(), Some("Large"));
+
+        let update = serde_json::json!({
+            "name": "Sizes Updated",
+            "source": "custom",
+            "config": { "values": ["Medium"] }
+        });
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/value-lists/{id}"),
+            &update.to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        assert!(resp.contains("Sizes Updated"));
+
+        let (status, resp) =
+            post_json_body(state.clone(), &format!("/value-lists/{id}/duplicate"), "{}").await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        assert!(resp.contains("Sizes Updated Copy"));
+
+        let (status, resp) =
+            post_json_body(state.clone(), &format!("/value-lists/{id}/delete"), "{}").await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+    }
+
+    #[tokio::test]
+    async fn record_commits_enforce_required_unique_range_and_value_list_constraints() {
         let mut sol = Solution::open_in_memory().unwrap();
         let table_id = sol
             .create_table(
@@ -3756,12 +3988,24 @@ mod tests {
                         name: "Total".into(),
                         kind: FieldKind::Number,
                     },
+                    NewField {
+                        name: "Status".into(),
+                        kind: FieldKind::Text,
+                    },
                 ],
             )
             .unwrap();
         let fields = sol.fields(table_id).unwrap();
         let number = fields.iter().find(|f| f.name == "Number").unwrap().clone();
         let total = fields.iter().find(|f| f.name == "Total").unwrap().clone();
+        let status_field = fields.iter().find(|f| f.name == "Status").unwrap().clone();
+        let statuses = sol
+            .create_value_list(&NewValueList {
+                name: "Statuses".into(),
+                source: "custom".into(),
+                config: r#"{"values":["Open","Closed"]}"#.into(),
+            })
+            .unwrap();
         sol.update_field_options(
             table_id,
             number.id,
@@ -3772,6 +4016,15 @@ mod tests {
             table_id,
             total.id,
             r#"{"validation":{"range":{"min":"1","max":"10"}}}"#,
+        )
+        .unwrap();
+        sol.update_field_options(
+            table_id,
+            status_field.id,
+            &format!(
+                r#"{{"validation":{{"memberOfValueList":{}}}}}"#,
+                statuses.id
+            ),
         )
         .unwrap();
         let form_layout = sol
@@ -3785,7 +4038,7 @@ mod tests {
         let (status, body) = post_form_body(
             state.clone(),
             &format!("/browse/{}", form_layout.id),
-            &format!("f{}=&f{}=5", number.id, total.id),
+            &format!("f{}=&f{}=5&f{}=Open", number.id, total.id, status_field.id),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -3795,17 +4048,36 @@ mod tests {
         let (status, body) = post_form_body(
             state.clone(),
             &format!("/browse/{}", form_layout.id),
-            &format!("f{}=INV-1&f{}=15", number.id, total.id),
+            &format!(
+                "f{}=INV-1&f{}=15&f{}=Open",
+                number.id, total.id, status_field.id
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("Total"));
         assert!(body.contains("at most 10"));
 
+        let (status, body) = post_form_body(
+            state.clone(),
+            &format!("/browse/{}", form_layout.id),
+            &format!(
+                "f{}=INV-1&f{}=5&f{}=Draft",
+                number.id, total.id, status_field.id
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("Status"));
+        assert!(body.contains("value list"));
+
         let (status, _body) = post_form_body(
             state.clone(),
             &format!("/browse/{}", form_layout.id),
-            &format!("f{}=INV-1&f{}=5", number.id, total.id),
+            &format!(
+                "f{}=INV-1&f{}=5&f{}=Open%0AClosed",
+                number.id, total.id, status_field.id
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::SEE_OTHER);
@@ -3813,7 +4085,10 @@ mod tests {
         let (status, body) = post_form_body(
             state,
             &format!("/browse/{}", form_layout.id),
-            &format!("f{}=INV-1&f{}=6", number.id, total.id),
+            &format!(
+                "f{}=INV-1&f{}=6&f{}=Closed",
+                number.id, total.id, status_field.id
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);

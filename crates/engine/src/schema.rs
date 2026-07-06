@@ -42,6 +42,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0008_schema_notes",
         include_str!("migrations/0008_schema_notes.sql"),
     ),
+    (
+        "0009_value_lists",
+        include_str!("migrations/0009_value_lists.sql"),
+    ),
 ];
 
 /// Schema version this build targets (the number of migrations defined).
@@ -88,6 +92,7 @@ mod tests {
             "meta_layout",
             "meta_part",
             "meta_object",
+            "meta_value_list",
         ] {
             let n: i64 = conn
                 .query_row(

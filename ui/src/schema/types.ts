@@ -30,6 +30,7 @@ export function kindIcon(kind: string): string {
 export interface FieldValidationOptions {
   required?: boolean;
   unique?: boolean;
+  memberOfValueList?: number | null;
   range?: {
     min?: string;
     max?: string;
@@ -79,4 +80,12 @@ export interface RelationshipView {
   toTable: number;
   fromField: number;
   toField: number;
+}
+
+export interface ValueListView {
+  id: number;
+  name: string;
+  source: 'custom' | 'field';
+  config: unknown;
+  position: number;
 }

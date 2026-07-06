@@ -3,7 +3,7 @@
 // screen; these only talk to the server and return the views it assigns, so the
 // store can reflect server truth after every op (#113 acceptance).
 
-import type { FieldKind, FieldOptions, FieldView, RelationshipView, TableView } from './types';
+import type { FieldKind, FieldOptions, FieldView, RelationshipView, TableView, ValueListView } from './types';
 
 /** A failed schema op — carries the server's status + message body so the store
  * can surface a real reason (the endpoints return CONFLICT/BAD_REQUEST with a
@@ -108,3 +108,7 @@ export const updateRelationship = (id: number, rel: Omit<RelationshipView, 'id'>
   postJson(`/schema/relationships/${id}`, rel);
 
 export const deleteRelationship = (id: number): Promise<void> => postVoid(`/schema/relationships/${id}/delete`);
+
+// ── value lists ─────────────────────────────────────────────────────────────
+
+export const listValueLists = (): Promise<ValueListView[]> => getJson('/value-lists');

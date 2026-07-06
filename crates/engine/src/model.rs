@@ -2,6 +2,8 @@
 
 use anyhow::{bail, Context, Result};
 use rusqlite::params;
+use rusqlite::types::ValueRef;
+use serde_json::Value;
 
 use crate::Solution;
 
@@ -107,6 +109,32 @@ pub struct NewRelationship {
     pub to_table: i64,
     pub from_field: i64,
     pub to_field: i64,
+}
+
+/// Metadata for a reusable value list.
+#[derive(Debug, Clone)]
+pub struct ValueListMeta {
+    pub id: i64,
+    pub name: String,
+    pub source: String,
+    pub config: String,
+    pub position: i64,
+}
+
+/// A value list to create or replace.
+#[derive(Debug, Clone)]
+pub struct NewValueList {
+    pub name: String,
+    pub source: String,
+    pub config: String,
+}
+
+/// One resolved value-list item. Dividers are skipped by validation consumers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueListItem {
+    pub value: String,
+    pub display: String,
+    pub divider: bool,
 }
 
 impl Solution {
@@ -540,6 +568,212 @@ impl Solution {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// All value lists, in manager display order.
+    pub fn value_lists(&self) -> Result<Vec<ValueListMeta>> {
+        let mut stmt = self.app.prepare(
+            "SELECT id, name, source, config, position \
+             FROM meta_value_list ORDER BY position, id",
+        )?;
+        let rows = stmt.query_map([], value_list_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Look up one value list by id.
+    pub fn value_list_by_id(&self, id: i64) -> Result<Option<ValueListMeta>> {
+        let mut stmt = self.app.prepare(
+            "SELECT id, name, source, config, position \
+             FROM meta_value_list WHERE id=?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], value_list_from_row)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Create a value list. The engine validates source/config only enough to
+    /// keep the metadata contract coherent; consumers resolve it at read time.
+    pub fn create_value_list(&mut self, list: &NewValueList) -> Result<ValueListMeta> {
+        validate_value_list_source(&list.source)?;
+        validate_value_list_config(&list.source, &list.config)?;
+        let position: i64 = self.app.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM meta_value_list",
+            [],
+            |r| r.get(0),
+        )?;
+        self.app.execute(
+            "INSERT INTO meta_value_list(name, source, config, position) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![list.name, list.source, list.config, position],
+        )?;
+        Ok(self
+            .value_list_by_id(self.app.last_insert_rowid())?
+            .expect("inserted value list"))
+    }
+
+    /// Replace a value-list declaration.
+    pub fn update_value_list(
+        &mut self,
+        id: i64,
+        list: &NewValueList,
+    ) -> Result<Option<ValueListMeta>> {
+        validate_value_list_source(&list.source)?;
+        validate_value_list_config(&list.source, &list.config)?;
+        let n = self.app.execute(
+            "UPDATE meta_value_list SET name=?1, source=?2, config=?3 WHERE id=?4",
+            params![list.name, list.source, list.config, id],
+        )?;
+        if n == 0 {
+            return Ok(None);
+        }
+        self.value_list_by_id(id)
+    }
+
+    /// Duplicate a value list, returning the new copy with a unique name.
+    pub fn duplicate_value_list(
+        &mut self,
+        id: i64,
+        name: Option<&str>,
+    ) -> Result<Option<ValueListMeta>> {
+        let Some(src) = self.value_list_by_id(id)? else {
+            return Ok(None);
+        };
+        let name = match name {
+            Some(name) if !name.trim().is_empty() => name.trim().to_string(),
+            _ => self.unique_value_list_copy_name(&src.name)?,
+        };
+        self.create_value_list(&NewValueList {
+            name,
+            source: src.source,
+            config: src.config,
+        })
+        .map(Some)
+    }
+
+    /// Delete a value list by id.
+    pub fn delete_value_list(&self, id: i64) -> Result<usize> {
+        Ok(self
+            .app
+            .execute("DELETE FROM meta_value_list WHERE id=?1", params![id])?)
+    }
+
+    /// Resolve a value list to concrete ordered items.
+    pub fn resolve_value_list(&self, id: i64) -> Result<Option<Vec<ValueListItem>>> {
+        let Some(list) = self.value_list_by_id(id)? else {
+            return Ok(None);
+        };
+        match list.source.as_str() {
+            "custom" => Ok(Some(resolve_custom_value_list(&list.config)?)),
+            "field" => Ok(Some(self.resolve_field_value_list(&list.config)?)),
+            other => bail!("unsupported value-list source {other}"),
+        }
+    }
+
+    fn unique_value_list_copy_name(&self, base: &str) -> Result<String> {
+        let mut candidate = format!("{base} Copy");
+        let mut suffix = 2;
+        while value_list_name_exists(self, &candidate)? {
+            candidate = format!("{base} Copy {suffix}");
+            suffix += 1;
+        }
+        Ok(candidate)
+    }
+
+    fn resolve_field_value_list(&self, config: &str) -> Result<Vec<ValueListItem>> {
+        let config: Value =
+            serde_json::from_str(config).context("parse field value-list config")?;
+        let from_field = config
+            .get("fromField")
+            .and_then(Value::as_i64)
+            .context("field value list needs fromField")?;
+        let second_field = config.get("secondField").and_then(Value::as_i64);
+        let show_second_only = config
+            .get("showSecondOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let sort = config
+            .get("sort")
+            .and_then(Value::as_str)
+            .unwrap_or("first");
+        let (table, first) = self
+            .field_table_by_field_id(from_field)?
+            .with_context(|| format!("unknown value-list field {from_field}"))?;
+        let second = match second_field {
+            Some(field_id) => Some(self.field_by_id(table.id, field_id)?.with_context(|| {
+                format!("second field {field_id} is not on table {}", table.id)
+            })?),
+            None => None,
+        };
+        let order = if sort == "second" && second.is_some() {
+            "second_value, first_value"
+        } else {
+            "first_value, second_value"
+        };
+        let sql = match &second {
+            Some(second) => format!(
+                "SELECT DISTINCT {first} AS first_value, {second} AS second_value FROM {table} ORDER BY {order}",
+                first = first.phys,
+                second = second.phys,
+                table = table.phys
+            ),
+            None => format!(
+                "SELECT DISTINCT {first} AS first_value, NULL AS second_value FROM {table} ORDER BY {order}",
+                first = first.phys,
+                table = table.phys
+            ),
+        };
+        let mut stmt = self.data.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            let value = value_ref_to_string(row.get_ref(0)?);
+            let second = value_ref_to_string(row.get_ref(1)?);
+            let display = if show_second_only && !second.is_empty() {
+                second.clone()
+            } else if second.is_empty() {
+                value.clone()
+            } else {
+                format!("{value} {second}")
+            };
+            Ok(ValueListItem {
+                value,
+                display,
+                divider: false,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn field_table_by_field_id(&self, field_id: i64) -> Result<Option<(TableMeta, FieldMeta)>> {
+        let mut stmt = self.app.prepare(
+            "SELECT t.id, t.name, COALESCE(t.notes, ''), t.phys_name, \
+                    f.id, f.name, COALESCE(f.notes, ''), f.phys_name, f.kind, COALESCE(f.options, ''), f.position \
+             FROM meta_field f JOIN meta_table t ON t.id=f.table_id WHERE f.id=?1",
+        )?;
+        let mut rows = stmt.query_map(params![field_id], |r| {
+            let kind_s: String = r.get(8)?;
+            Ok((
+                TableMeta {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    notes: r.get(2)?,
+                    phys: r.get(3)?,
+                },
+                FieldMeta {
+                    id: r.get(4)?,
+                    name: r.get(5)?,
+                    notes: r.get(6)?,
+                    phys: r.get(7)?,
+                    kind: FieldKind::parse(&kind_s).unwrap_or(FieldKind::Text),
+                    options: r.get(9)?,
+                    position: r.get(10)?,
+                },
+            ))
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
     /// All declared relationships, ordered by source table then name.
     pub fn relationships(&self) -> Result<Vec<RelationshipMeta>> {
         let mut stmt = self.app.prepare(
@@ -675,9 +909,94 @@ fn relationship_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relationsh
     })
 }
 
+fn value_list_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ValueListMeta> {
+    Ok(ValueListMeta {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        source: row.get(2)?,
+        config: row.get(3)?,
+        position: row.get(4)?,
+    })
+}
+
+fn validate_value_list_source(source: &str) -> Result<()> {
+    match source {
+        "custom" | "field" => Ok(()),
+        other => bail!("unsupported value-list source {other}"),
+    }
+}
+
+fn validate_value_list_config(source: &str, config: &str) -> Result<()> {
+    let parsed: Value = serde_json::from_str(config).context("parse value-list config")?;
+    match source {
+        "custom" => {
+            if !parsed.get("values").is_some_and(|v| {
+                v.as_array()
+                    .is_some_and(|items| items.iter().all(Value::is_string))
+            }) {
+                bail!("custom value list needs string values");
+            }
+        }
+        "field" => {
+            if parsed.get("fromField").and_then(Value::as_i64).is_none() {
+                bail!("field value list needs fromField");
+            }
+            if let Some(sort) = parsed.get("sort").and_then(Value::as_str) {
+                if sort != "first" && sort != "second" {
+                    bail!("field value list sort must be first or second");
+                }
+            }
+        }
+        other => bail!("unsupported value-list source {other}"),
+    }
+    Ok(())
+}
+
+fn resolve_custom_value_list(config: &str) -> Result<Vec<ValueListItem>> {
+    let parsed: Value = serde_json::from_str(config).context("parse custom value-list config")?;
+    let values = parsed
+        .get("values")
+        .and_then(Value::as_array)
+        .context("custom value list needs values")?;
+    Ok(values
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|value| {
+            let divider = value == "-";
+            ValueListItem {
+                value: if divider {
+                    String::new()
+                } else {
+                    value.to_string()
+                },
+                display: value.to_string(),
+                divider,
+            }
+        })
+        .collect())
+}
+
+fn value_list_name_exists(sol: &Solution, name: &str) -> Result<bool> {
+    let mut stmt = sol
+        .app
+        .prepare("SELECT 1 FROM meta_value_list WHERE name=?1 LIMIT 1")?;
+    let mut rows = stmt.query(params![name])?;
+    Ok(rows.next()?.is_some())
+}
+
+fn value_ref_to_string(v: ValueRef<'_>) -> String {
+    match v {
+        ValueRef::Null => String::new(),
+        ValueRef::Integer(i) => i.to_string(),
+        ValueRef::Real(f) => f.to_string(),
+        ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+        ValueRef::Blob(_) => "<blob>".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{FieldKind, NewField, NewRelationship, Solution};
+    use crate::{FieldKind, NewField, NewRelationship, NewValueList, Solution, ValueListItem};
 
     #[test]
     fn field_kind_str_parse_and_sql_type_round_trip() {
@@ -950,6 +1269,126 @@ mod tests {
                 .parse::<f64>()
                 .unwrap(),
             7.0
+        );
+    }
+
+    #[test]
+    fn value_list_crud_and_custom_resolution() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let list = s
+            .create_value_list(&NewValueList {
+                name: "Sizes".into(),
+                source: "custom".into(),
+                config: r#"{"values":["Small","Medium","-","Large"]}"#.into(),
+            })
+            .unwrap();
+        assert_eq!(list.name, "Sizes");
+        assert_eq!(s.value_lists().unwrap().len(), 1);
+        assert_eq!(
+            s.resolve_value_list(list.id).unwrap().unwrap(),
+            vec![
+                ValueListItem {
+                    value: "Small".into(),
+                    display: "Small".into(),
+                    divider: false,
+                },
+                ValueListItem {
+                    value: "Medium".into(),
+                    display: "Medium".into(),
+                    divider: false,
+                },
+                ValueListItem {
+                    value: String::new(),
+                    display: "-".into(),
+                    divider: true,
+                },
+                ValueListItem {
+                    value: "Large".into(),
+                    display: "Large".into(),
+                    divider: false,
+                },
+            ]
+        );
+
+        let updated = s
+            .update_value_list(
+                list.id,
+                &NewValueList {
+                    name: "Sizes v2".into(),
+                    source: "custom".into(),
+                    config: r#"{"values":["One"]}"#.into(),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.name, "Sizes v2");
+        let copy = s.duplicate_value_list(updated.id, None).unwrap().unwrap();
+        assert_eq!(copy.name, "Sizes v2 Copy");
+        assert_eq!(s.delete_value_list(updated.id).unwrap(), 1);
+        assert!(s.value_list_by_id(updated.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn field_value_list_resolves_distinct_values() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s
+            .create_table(
+                "Products",
+                &[
+                    NewField {
+                        name: "Code".into(),
+                        kind: FieldKind::Text,
+                    },
+                    NewField {
+                        name: "Name".into(),
+                        kind: FieldKind::Text,
+                    },
+                ],
+            )
+            .unwrap();
+        let table = s.table_by_id(tid).unwrap().unwrap();
+        let fields = s.fields(tid).unwrap();
+        s.insert_record(
+            &table,
+            &[(&fields[0], "B".into()), (&fields[1], "Beta".into())],
+        )
+        .unwrap();
+        s.insert_record(
+            &table,
+            &[(&fields[0], "A".into()), (&fields[1], "Alpha".into())],
+        )
+        .unwrap();
+        s.insert_record(
+            &table,
+            &[(&fields[0], "B".into()), (&fields[1], "Beta".into())],
+        )
+        .unwrap();
+
+        let list = s
+            .create_value_list(&NewValueList {
+                name: "Products".into(),
+                source: "field".into(),
+                config: format!(
+                    r#"{{"fromField":{},"secondField":{},"showSecondOnly":true,"sort":"second"}}"#,
+                    fields[0].id, fields[1].id
+                ),
+            })
+            .unwrap();
+        let items = s.resolve_value_list(list.id).unwrap().unwrap();
+        assert_eq!(
+            items,
+            vec![
+                ValueListItem {
+                    value: "A".into(),
+                    display: "Alpha".into(),
+                    divider: false,
+                },
+                ValueListItem {
+                    value: "B".into(),
+                    display: "Beta".into(),
+                    divider: false,
+                },
+            ]
         );
     }
 

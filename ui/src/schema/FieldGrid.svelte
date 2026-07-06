@@ -150,11 +150,12 @@
   }
   .fg-head {
     flex: none;
+    height: var(--sc-head-h);
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 12px 18px;
+    padding: 0 18px;
     border-bottom: 0.5px solid var(--rm-border);
     background: var(--rm-toolbar-bg);
   }

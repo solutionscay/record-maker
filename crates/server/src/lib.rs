@@ -119,14 +119,16 @@ struct Flipbook {
 /// Parse `?rec=N` (1-based) and clamp it into the found set (frozen #23):
 /// `[1, total]`, defaulting to 1; `0` when there are no records.
 fn clamp_rec(q: &HashMap<String, String>, total: i64) -> i64 {
+    clamp_rec_n(q.get("rec").and_then(|s| s.parse::<i64>().ok()), total)
+}
+
+/// Clamp a client-sent record number into the found set (1-based, `0` when
+/// empty) — the typed-body core [`clamp_rec`] parses `?rec=` into.
+fn clamp_rec_n(rec: Option<i64>, total: i64) -> i64 {
     if total <= 0 {
         return 0;
     }
-    let n = q
-        .get("rec")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(1);
-    n.clamp(1, total)
+    rec.unwrap_or(1).clamp(1, total)
 }
 
 /// Build the flipbook for record `current` of `total` on `layout_id`/`view`.
@@ -283,6 +285,69 @@ fn layout_table(sol: &Solution, layout_id: i64) -> Option<(LayoutMeta, TableMeta
 
 fn not_found(what: &str, id: i64) -> axum::response::Response {
     Html(format!("<p>No such {what}: {id}</p>")).into_response()
+}
+
+/// Error half of the JSON API handlers. Carries the exact status/body pairs the
+/// handlers used to build inline, so a converted handler can use `?` without
+/// changing a single response byte:
+/// - engine (`anyhow`) errors map to `409 CONFLICT` with the error text — the
+///   blanket policy every repetitive handler already applied;
+/// - a missing row maps to a bare `404 NOT_FOUND` (empty body);
+/// - validation failures map to `400 BAD_REQUEST` with a plain-text message.
+enum AppError {
+    /// Status-only response (empty body) — the bare 404s.
+    Status(StatusCode),
+    /// Status + plain-text message — the `(status, msg)` tuples.
+    Message(StatusCode, String),
+    /// A pre-built response carried whole (the HTML "No such layout" page some
+    /// design handlers return), kept byte-identical through the conversion.
+    Response(axum::response::Response),
+}
+
+/// The JSON handlers' return shape: success renders as-is, [`AppError`] renders
+/// the mapped status/body.
+type AppResult<T> = Result<T, AppError>;
+
+impl AppError {
+    fn not_found() -> Self {
+        AppError::Status(StatusCode::NOT_FOUND)
+    }
+
+    fn bad_request(msg: impl Into<String>) -> Self {
+        AppError::Message(StatusCode::BAD_REQUEST, msg.into())
+    }
+
+    fn conflict(msg: impl Into<String>) -> Self {
+        AppError::Message(StatusCode::CONFLICT, msg.into())
+    }
+
+    /// The HTML "No such layout" page (see [`not_found`]) as an error, for the
+    /// design handlers that respond that way to an unknown layout id.
+    fn no_such_layout(layout_id: i64) -> Self {
+        AppError::Response(not_found("layout", layout_id))
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            AppError::Status(status) => status.into_response(),
+            AppError::Message(status, msg) => (status, msg).into_response(),
+            AppError::Response(resp) => resp,
+        }
+    }
+}
+
+impl From<anyhow::Error> for AppError {
+    fn from(e: anyhow::Error) -> Self {
+        AppError::conflict(e.to_string())
+    }
+}
+
+impl From<(StatusCode, String)> for AppError {
+    fn from((status, msg): (StatusCode, String)) -> Self {
+        AppError::Message(status, msg)
+    }
 }
 
 // ---- Browse views — Table (live), Form/List placeholders until #25/#26 ----
@@ -797,6 +862,24 @@ fn object_view_for_rec(
     Some(object_view(&object, &by_name))
 }
 
+/// Shared tail of the single-object mutation handlers (binding / binding-path /
+/// content / read-only): 404 when the write matched no row, otherwise re-project
+/// the object against `rec` exactly as a model fetch would.
+fn updated_object_view(
+    sol: &Solution,
+    layout_id: i64,
+    object_id: i64,
+    rec: Option<i64>,
+    updated: usize,
+) -> AppResult<Json<ObjectView>> {
+    if updated == 0 {
+        return Err(AppError::not_found());
+    }
+    object_view_for_rec(sol, layout_id, object_id, rec)
+        .map(Json)
+        .ok_or_else(AppError::not_found)
+}
+
 fn related_route_choices(sol: &Solution, table: &TableMeta) -> Vec<RelatedRouteChoice> {
     sol.relationships()
         .unwrap_or_default()
@@ -860,6 +943,37 @@ fn render_part(
         part_style: part_style(part.props.as_deref()),
         objects,
     }
+}
+
+/// Project a part into the objects-free `PartView` the part-mutation handlers
+/// echo (create / height / kind / props) — one literal instead of four.
+fn part_view(part: &PartMeta) -> PartView {
+    PartView {
+        id: part.id,
+        kind: part.kind.as_str(),
+        height: part.height,
+        props: part.props.clone().unwrap_or_default(),
+        part_style: part_style(part.props.as_deref()),
+        objects: Vec::new(),
+    }
+}
+
+/// Shared tail of the part-mutation handlers (height / kind / props): 404 when
+/// the write matched no row, otherwise re-read the part and echo its view.
+fn updated_part_view(
+    sol: &Solution,
+    layout_id: i64,
+    part_id: i64,
+    updated: usize,
+) -> AppResult<Json<PartView>> {
+    if updated == 0 {
+        return Err(AppError::not_found());
+    }
+    let part = sol
+        .part_by_id(layout_id, part_id)
+        .unwrap()
+        .ok_or_else(AppError::not_found)?;
+    Ok(Json(part_view(&part)))
 }
 
 /// Canvas width for a layout: the rightmost object edge + a margin. Geometry is
@@ -1289,11 +1403,6 @@ struct UpdateFieldBody {
 }
 
 #[derive(serde::Deserialize)]
-struct FieldKindBody {
-    kind: String,
-}
-
-#[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FieldOrderBody {
     field_ids: Vec<i64>,
@@ -1571,77 +1680,68 @@ async fn schema_tables(State(st): State<AppState>) -> impl IntoResponse {
 async fn create_schema_table(
     State(st): State<AppState>,
     Json(body): Json<CreateTableBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<TableSchemaView>> {
     let notes = body.notes.unwrap_or_default();
-    let fields = match body
+    let fields = body
         .fields
         .unwrap_or_default()
         .into_iter()
         .map(parse_new_field)
         .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(fields) => fields,
-        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
-    };
+        .map_err(AppError::bad_request)?;
     let mut sol = st.sol.lock().unwrap();
-    let table_id = match sol.create_table(&body.name, &fields) {
-        Ok(id) => id,
-        Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
-    };
+    let table_id = sol.create_table(&body.name, &fields)?;
     let table = if notes.is_empty() {
         sol.table_by_id(table_id).unwrap().unwrap()
     } else {
-        match sol.update_table(table_id, &body.name, &notes) {
-            Ok(Some(table)) => table,
-            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-            Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
-        }
+        sol.update_table(table_id, &body.name, &notes)?
+            .ok_or_else(AppError::not_found)?
     };
-    Json(table_schema_view(table)).into_response()
+    Ok(Json(table_schema_view(table)))
 }
 
 async fn update_schema_table(
     State(st): State<AppState>,
     Path(table_id): Path<i64>,
     Json(body): Json<UpdateTableBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<TableSchemaView>> {
     let mut sol = st.sol.lock().unwrap();
-    match sol.update_table(table_id, &body.name, body.notes.as_deref().unwrap_or("")) {
-        Ok(Some(table)) => Json(table_schema_view(table)).into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
-    }
+    let table = sol
+        .update_table(table_id, &body.name, body.notes.as_deref().unwrap_or(""))?
+        .ok_or_else(AppError::not_found)?;
+    Ok(Json(table_schema_view(table)))
 }
 
 async fn rename_schema_table(
     State(st): State<AppState>,
     Path(table_id): Path<i64>,
     Json(body): Json<RenameBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<TableSchemaView>> {
     let mut sol = st.sol.lock().unwrap();
-    match sol.rename_table(table_id, &body.name) {
-        Ok(Some(table)) => Json(table_schema_view(table)).into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
-    }
+    let table = sol
+        .rename_table(table_id, &body.name)?
+        .ok_or_else(AppError::not_found)?;
+    Ok(Json(table_schema_view(table)))
 }
 
 async fn delete_schema_table(
     State(st): State<AppState>,
     Path(table_id): Path<i64>,
-) -> impl IntoResponse {
+) -> AppResult<StatusCode> {
     let mut sol = st.sol.lock().unwrap();
-    match sol.delete_table(table_id) {
-        Ok(0) => StatusCode::NOT_FOUND.into_response(),
-        Ok(_) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    if sol.delete_table(table_id)? == 0 {
+        return Err(AppError::not_found());
     }
+    Ok(StatusCode::OK)
 }
 
-async fn schema_fields(State(st): State<AppState>, Path(table_id): Path<i64>) -> impl IntoResponse {
+async fn schema_fields(
+    State(st): State<AppState>,
+    Path(table_id): Path<i64>,
+) -> AppResult<Json<Vec<FieldSchemaView>>> {
     let sol = st.sol.lock().unwrap();
     if sol.table_by_id(table_id).unwrap().is_none() {
-        return StatusCode::NOT_FOUND.into_response();
+        return Err(AppError::not_found());
     }
     let views: Vec<FieldSchemaView> = sol
         .fields(table_id)
@@ -1649,170 +1749,115 @@ async fn schema_fields(State(st): State<AppState>, Path(table_id): Path<i64>) ->
         .into_iter()
         .map(|field| field_schema_view_for_table(&sol, table_id, field))
         .collect();
-    Json(views).into_response()
+    Ok(Json(views))
+}
+
+/// Canonicalise an optional `options` bag into `(raw value, canonical JSON)`;
+/// 400 with the validation message when it doesn't parse.
+fn parse_options(options: Option<&Value>) -> AppResult<Option<(Value, String)>> {
+    match options {
+        Some(options) => match canonical_options(options) {
+            Ok(options_json) => Ok(Some((options.clone(), options_json))),
+            Err(msg) => Err(AppError::bad_request(msg)),
+        },
+        None => Ok(None),
+    }
+}
+
+/// Shared tail of [`create_schema_field`] / [`update_schema_field`]: sync the
+/// reference constraint, persist the canonical options, and project the field's
+/// schema view. With no options bag the field projects as-is.
+fn apply_field_options(
+    sol: &mut Solution,
+    table_id: i64,
+    field: FieldMeta,
+    options: Option<(Value, String)>,
+) -> AppResult<Json<FieldSchemaView>> {
+    let Some((options_value, options_json)) = options else {
+        return Ok(Json(field_schema_view_for_table(sol, table_id, field)));
+    };
+    let rel = sync_reference_constraint(sol, table_id, field.id, &options_value)?;
+    let field = sol
+        .update_field_options(table_id, field.id, &options_json)?
+        .ok_or_else(AppError::not_found)?;
+    let options = rel.as_ref().map_or_else(
+        || field_options_for_schema(sol, table_id, &field),
+        |rel| options_with_relationship_reference(field_options_value(&field), rel),
+    );
+    Ok(Json(field_schema_view_with_options(field, options)))
 }
 
 async fn create_schema_field(
     State(st): State<AppState>,
     Path(table_id): Path<i64>,
     Json(body): Json<FieldBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<FieldSchemaView>> {
     let notes = body.notes.clone().unwrap_or_default();
-    let options = match body.options.as_ref() {
-        Some(options) => match canonical_options(options) {
-            Ok(options_json) => Some((options.clone(), options_json)),
-            Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
-        },
-        None => None,
-    };
-    let field = match parse_new_field(body) {
-        Ok(field) => field,
-        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
-    };
+    let options = parse_options(body.options.as_ref())?;
+    let field = parse_new_field(body).map_err(AppError::bad_request)?;
     let mut sol = st.sol.lock().unwrap();
-    match sol.add_field(table_id, &field) {
-        Ok(field) => {
-            let field = if notes.is_empty() {
-                field
-            } else {
-                match sol.update_field(table_id, field.id, &field.name, field.kind, &notes) {
-                    Ok(Some(field)) => field,
-                    Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-                    Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
-                }
-            };
-            if let Some((options_value, options_json)) = options {
-                let rel =
-                    match sync_reference_constraint(&mut sol, table_id, field.id, &options_value) {
-                        Ok(rel) => rel,
-                        Err((status, msg)) => return (status, msg).into_response(),
-                    };
-                let field = match sol.update_field_options(table_id, field.id, &options_json) {
-                    Ok(Some(field)) => field,
-                    Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-                    Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
-                };
-                let options = rel.as_ref().map_or_else(
-                    || field_options_for_schema(&sol, table_id, &field),
-                    |rel| options_with_relationship_reference(field_options_value(&field), rel),
-                );
-                return Json(field_schema_view_with_options(field, options)).into_response();
-            }
-            Json(field_schema_view_for_table(&sol, table_id, field)).into_response()
-        }
-        Err(e) if e.to_string().contains("no table") => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
-    }
+    let field = match sol.add_field(table_id, &field) {
+        Ok(field) => field,
+        Err(e) if e.to_string().contains("no table") => return Err(AppError::not_found()),
+        Err(e) => return Err(e.into()),
+    };
+    let field = if notes.is_empty() {
+        field
+    } else {
+        sol.update_field(table_id, field.id, &field.name, field.kind, &notes)?
+            .ok_or_else(AppError::not_found)?
+    };
+    apply_field_options(&mut sol, table_id, field, options)
 }
 
 async fn update_schema_field(
     State(st): State<AppState>,
     Path((table_id, field_id)): Path<(i64, i64)>,
     Json(body): Json<UpdateFieldBody>,
-) -> impl IntoResponse {
-    let Some(kind) = FieldKind::parse(&body.kind) else {
-        return (StatusCode::BAD_REQUEST, "bad field kind").into_response();
-    };
-    let options = match body.options.as_ref() {
-        Some(options) => match canonical_options(options) {
-            Ok(options_json) => Some((options.clone(), options_json)),
-            Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
-        },
-        None => None,
-    };
+) -> AppResult<Json<FieldSchemaView>> {
+    let kind =
+        FieldKind::parse(&body.kind).ok_or_else(|| AppError::bad_request("bad field kind"))?;
+    let options = parse_options(body.options.as_ref())?;
     let mut sol = st.sol.lock().unwrap();
-    match sol.update_field(
-        table_id,
-        field_id,
-        &body.name,
-        kind,
-        body.notes.as_deref().unwrap_or(""),
-    ) {
-        Ok(Some(field)) => {
-            if let Some((options_value, options_json)) = options {
-                let rel =
-                    match sync_reference_constraint(&mut sol, table_id, field.id, &options_value) {
-                        Ok(rel) => rel,
-                        Err((status, msg)) => return (status, msg).into_response(),
-                    };
-                let field = match sol.update_field_options(table_id, field.id, &options_json) {
-                    Ok(Some(field)) => field,
-                    Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-                    Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
-                };
-                let options = rel.as_ref().map_or_else(
-                    || field_options_for_schema(&sol, table_id, &field),
-                    |rel| options_with_relationship_reference(field_options_value(&field), rel),
-                );
-                return Json(field_schema_view_with_options(field, options)).into_response();
-            }
-            Json(field_schema_view_for_table(&sol, table_id, field)).into_response()
-        }
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
-    }
-}
-
-async fn rename_schema_field(
-    State(st): State<AppState>,
-    Path((table_id, field_id)): Path<(i64, i64)>,
-    Json(body): Json<RenameBody>,
-) -> impl IntoResponse {
-    let mut sol = st.sol.lock().unwrap();
-    match sol.rename_field(table_id, field_id, &body.name) {
-        Ok(Some(field)) => Json(field_schema_view_for_table(&sol, table_id, field)).into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
-    }
-}
-
-async fn retype_schema_field(
-    State(st): State<AppState>,
-    Path((table_id, field_id)): Path<(i64, i64)>,
-    Json(body): Json<FieldKindBody>,
-) -> impl IntoResponse {
-    let Some(kind) = FieldKind::parse(&body.kind) else {
-        return (StatusCode::BAD_REQUEST, "bad field kind").into_response();
-    };
-    let mut sol = st.sol.lock().unwrap();
-    match sol.retype_field(table_id, field_id, kind) {
-        Ok(Some(field)) => Json(field_schema_view_for_table(&sol, table_id, field)).into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
-    }
+    let field = sol
+        .update_field(
+            table_id,
+            field_id,
+            &body.name,
+            kind,
+            body.notes.as_deref().unwrap_or(""),
+        )?
+        .ok_or_else(AppError::not_found)?;
+    apply_field_options(&mut sol, table_id, field, options)
 }
 
 async fn reorder_schema_fields(
     State(st): State<AppState>,
     Path(table_id): Path<i64>,
     Json(body): Json<FieldOrderBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<Vec<FieldSchemaView>>> {
     let mut sol = st.sol.lock().unwrap();
     if sol.table_by_id(table_id).unwrap().is_none() {
-        return StatusCode::NOT_FOUND.into_response();
+        return Err(AppError::not_found());
     }
-    match sol.reorder_fields(table_id, &body.field_ids) {
-        Ok(fields) => Json(
-            fields
-                .into_iter()
-                .map(|field| field_schema_view_for_table(&sol, table_id, field))
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
-    }
+    let fields = sol.reorder_fields(table_id, &body.field_ids)?;
+    Ok(Json(
+        fields
+            .into_iter()
+            .map(|field| field_schema_view_for_table(&sol, table_id, field))
+            .collect(),
+    ))
 }
 
 async fn delete_schema_field(
     State(st): State<AppState>,
     Path((table_id, field_id)): Path<(i64, i64)>,
-) -> impl IntoResponse {
+) -> AppResult<StatusCode> {
     let mut sol = st.sol.lock().unwrap();
-    match sol.delete_field(table_id, field_id) {
-        Ok(0) => StatusCode::NOT_FOUND.into_response(),
-        Ok(_) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    if sol.delete_field(table_id, field_id)? == 0 {
+        return Err(AppError::not_found());
     }
+    Ok(StatusCode::OK)
 }
 
 async fn schema_relationships(State(st): State<AppState>) -> impl IntoResponse {
@@ -1829,80 +1874,49 @@ async fn schema_relationships(State(st): State<AppState>) -> impl IntoResponse {
 async fn create_schema_relationship(
     State(st): State<AppState>,
     Json(body): Json<RelationshipBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<RelationshipSchemaView>> {
     let rel = relationship_body(body);
     let mut sol = st.sol.lock().unwrap();
-    match sol.create_relationship(&rel) {
-        Ok(Some(rel)) => {
-            if let Err(e) =
-                update_field_reference_options(&sol, rel.from_table, rel.from_field, Some(&rel))
-            {
-                return (StatusCode::CONFLICT, e.to_string()).into_response();
-            }
-            Json(relationship_schema_view(rel)).into_response()
-        }
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
-    }
+    let rel = sol
+        .create_relationship(&rel)?
+        .ok_or_else(AppError::not_found)?;
+    update_field_reference_options(&sol, rel.from_table, rel.from_field, Some(&rel))?;
+    Ok(Json(relationship_schema_view(rel)))
 }
 
 async fn update_schema_relationship(
     State(st): State<AppState>,
     Path(id): Path<i64>,
     Json(body): Json<RelationshipBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<RelationshipSchemaView>> {
     let rel = relationship_body(body);
     let mut sol = st.sol.lock().unwrap();
-    let old = match sol.relationship_by_id(id) {
-        Ok(old) => old,
-        Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
-    };
-    match sol.update_relationship(id, &rel) {
-        Ok(Some(rel)) => {
-            if let Some(old) = old {
-                if old.from_table != rel.from_table || old.from_field != rel.from_field {
-                    if let Err(e) =
-                        update_field_reference_options(&sol, old.from_table, old.from_field, None)
-                    {
-                        return (StatusCode::CONFLICT, e.to_string()).into_response();
-                    }
-                }
-            }
-            if let Err(e) =
-                update_field_reference_options(&sol, rel.from_table, rel.from_field, Some(&rel))
-            {
-                return (StatusCode::CONFLICT, e.to_string()).into_response();
-            }
-            Json(relationship_schema_view(rel)).into_response()
+    let old = sol.relationship_by_id(id)?;
+    let rel = sol
+        .update_relationship(id, &rel)?
+        .ok_or_else(AppError::not_found)?;
+    if let Some(old) = old {
+        if old.from_table != rel.from_table || old.from_field != rel.from_field {
+            update_field_reference_options(&sol, old.from_table, old.from_field, None)?;
         }
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
     }
+    update_field_reference_options(&sol, rel.from_table, rel.from_field, Some(&rel))?;
+    Ok(Json(relationship_schema_view(rel)))
 }
 
 async fn delete_schema_relationship(
     State(st): State<AppState>,
     Path(id): Path<i64>,
-) -> impl IntoResponse {
+) -> AppResult<StatusCode> {
     let sol = st.sol.lock().unwrap();
-    let old = match sol.relationship_by_id(id) {
-        Ok(old) => old,
-        Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
-    };
-    match sol.delete_relationship(id) {
-        Ok(0) => StatusCode::NOT_FOUND.into_response(),
-        Ok(_) => {
-            if let Some(old) = old {
-                if let Err(e) =
-                    update_field_reference_options(&sol, old.from_table, old.from_field, None)
-                {
-                    return (StatusCode::CONFLICT, e.to_string()).into_response();
-                }
-            }
-            StatusCode::OK.into_response()
-        }
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    let old = sol.relationship_by_id(id)?;
+    if sol.delete_relationship(id)? == 0 {
+        return Err(AppError::not_found());
     }
+    if let Some(old) = old {
+        update_field_reference_options(&sol, old.from_table, old.from_field, None)?;
+    }
+    Ok(StatusCode::OK)
 }
 
 async fn value_lists(State(st): State<AppState>) -> impl IntoResponse {
@@ -1919,68 +1933,57 @@ async fn value_lists(State(st): State<AppState>) -> impl IntoResponse {
 async fn create_value_list(
     State(st): State<AppState>,
     Json(body): Json<ValueListBody>,
-) -> impl IntoResponse {
-    let Ok(list) = value_list_body(body) else {
-        return (StatusCode::BAD_REQUEST, "bad value list").into_response();
-    };
+) -> AppResult<Json<ValueListView>> {
+    let list = value_list_body(body).map_err(|_| AppError::bad_request("bad value list"))?;
     let mut sol = st.sol.lock().unwrap();
-    match sol.create_value_list(&list) {
-        Ok(list) => Json(value_list_view(list)).into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
-    }
+    Ok(Json(value_list_view(sol.create_value_list(&list)?)))
 }
 
 async fn update_value_list(
     State(st): State<AppState>,
     Path(id): Path<i64>,
     Json(body): Json<ValueListBody>,
-) -> impl IntoResponse {
-    let Ok(list) = value_list_body(body) else {
-        return (StatusCode::BAD_REQUEST, "bad value list").into_response();
-    };
+) -> AppResult<Json<ValueListView>> {
+    let list = value_list_body(body).map_err(|_| AppError::bad_request("bad value list"))?;
     let mut sol = st.sol.lock().unwrap();
-    match sol.update_value_list(id, &list) {
-        Ok(Some(list)) => Json(value_list_view(list)).into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
-    }
+    let list = sol
+        .update_value_list(id, &list)?
+        .ok_or_else(AppError::not_found)?;
+    Ok(Json(value_list_view(list)))
 }
 
 async fn duplicate_value_list(
     State(st): State<AppState>,
     Path(id): Path<i64>,
     Json(body): Json<DuplicateValueListBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<ValueListView>> {
     let mut sol = st.sol.lock().unwrap();
-    match sol.duplicate_value_list(id, body.name.as_deref()) {
-        Ok(Some(list)) => Json(value_list_view(list)).into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
-    }
+    let list = sol
+        .duplicate_value_list(id, body.name.as_deref())?
+        .ok_or_else(AppError::not_found)?;
+    Ok(Json(value_list_view(list)))
 }
 
-async fn delete_value_list(State(st): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+async fn delete_value_list(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+) -> AppResult<StatusCode> {
     let sol = st.sol.lock().unwrap();
-    match sol.delete_value_list(id) {
-        Ok(0) => StatusCode::NOT_FOUND.into_response(),
-        Ok(_) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    if sol.delete_value_list(id)? == 0 {
+        return Err(AppError::not_found());
     }
+    Ok(StatusCode::OK)
 }
 
-async fn value_list_items(State(st): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+async fn value_list_items(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+) -> AppResult<Json<Vec<ValueListItemView>>> {
     let sol = st.sol.lock().unwrap();
-    match sol.resolve_value_list(id) {
-        Ok(Some(items)) => Json(
-            items
-                .into_iter()
-                .map(value_list_item_view)
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
-    }
+    let items = sol
+        .resolve_value_list(id)?
+        .ok_or_else(AppError::not_found)?;
+    Ok(Json(items.into_iter().map(value_list_item_view).collect()))
 }
 
 async fn design_model(
@@ -2061,7 +2064,7 @@ async fn update_object_geometry(
     State(st): State<AppState>,
     Path((layout_id, object_id)): Path<(i64, i64)>,
     Json(geom): Json<GeometryUpdate>,
-) -> impl IntoResponse {
+) -> AppResult<StatusCode> {
     let sol = st.sol.lock().unwrap();
     let updated = sol
         .set_object_geometry(
@@ -2074,9 +2077,9 @@ async fn update_object_geometry(
         )
         .unwrap();
     if updated == 0 {
-        return StatusCode::NOT_FOUND.into_response();
+        return Err(AppError::not_found());
     }
-    StatusCode::OK.into_response()
+    Ok(StatusCode::OK)
 }
 
 /// A cross-band move from the Layout canvas (#46): the object's new owning part
@@ -2098,7 +2101,7 @@ async fn update_object_part(
     State(st): State<AppState>,
     Path((layout_id, object_id)): Path<(i64, i64)>,
     Json(body): Json<ObjectPartUpdate>,
-) -> impl IntoResponse {
+) -> AppResult<StatusCode> {
     let sol = st.sol.lock().unwrap();
     let updated = sol
         .set_object_part(
@@ -2110,9 +2113,9 @@ async fn update_object_part(
         )
         .unwrap();
     if updated == 0 {
-        return StatusCode::NOT_FOUND.into_response();
+        return Err(AppError::not_found());
     }
-    StatusCode::OK.into_response()
+    Ok(StatusCode::OK)
 }
 
 /// One object's geometry in a bulk commit (#46): the object id plus its new box.
@@ -2181,40 +2184,25 @@ async fn create_object_group(
     State(st): State<AppState>,
     Path(layout_id): Path<i64>,
     Json(body): Json<CreateObjectGroupBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<ObjectGroupView>> {
     let mut sol = st.sol.lock().unwrap();
-    match sol
+    let group = sol
         .create_object_group(layout_id, &body.object_ids, body.id)
         .unwrap()
-    {
-        Some(group) => axum::Json(object_group_view(group)).into_response(),
-        None => (
-            StatusCode::BAD_REQUEST,
-            "group needs at least two objects in the layout",
-        )
-            .into_response(),
-    }
+        .ok_or_else(|| AppError::bad_request("group needs at least two objects in the layout"))?;
+    Ok(Json(object_group_view(group)))
 }
 
 /// Ungroup without touching member geometry/styles (#75).
 async fn delete_object_group(
     State(st): State<AppState>,
     Path((layout_id, group_id)): Path<(i64, i64)>,
-) -> impl IntoResponse {
+) -> AppResult<StatusCode> {
     let sol = st.sol.lock().unwrap();
-    match sol.delete_object_group(layout_id, group_id).unwrap() {
-        0 => StatusCode::NOT_FOUND.into_response(),
-        _ => StatusCode::OK.into_response(),
+    if sol.delete_object_group(layout_id, group_id).unwrap() == 0 {
+        return Err(AppError::not_found());
     }
-}
-
-/// Clamp a client-sent record number into the found set (1-based, `0` when
-/// empty) — the create handler's equivalent of [`clamp_rec`] for a typed body.
-fn clamp_rec_n(rec: Option<i64>, total: i64) -> i64 {
-    if total <= 0 {
-        return 0;
-    }
-    rec.unwrap_or(1).clamp(1, total)
+    Ok(StatusCode::OK)
 }
 
 /// One object the Create zone places (#48). `kind` is the [`ObjectKind`] string;
@@ -2255,39 +2243,27 @@ async fn create_design_object(
     State(st): State<AppState>,
     Path(layout_id): Path<i64>,
     Json(body): Json<CreateObjectBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<Vec<ObjectView>>> {
     let mut sol = st.sol.lock().unwrap();
     let Some((_lay, table)) = layout_table(&sol, layout_id) else {
-        return not_found("layout", layout_id);
+        return Err(AppError::no_such_layout(layout_id));
     };
-    let Some(kind) = ObjectKind::parse(&body.kind) else {
-        return (StatusCode::BAD_REQUEST, "bad object kind").into_response();
-    };
+    let kind =
+        ObjectKind::parse(&body.kind).ok_or_else(|| AppError::bad_request("bad object kind"))?;
     let fields = sol.fields(table.id).unwrap();
-    let ids = sol.record_ids(&table).unwrap();
-    let rec = clamp_rec_n(body.rec, ids.len() as i64);
-    let by_name = if rec >= 1 {
-        match sol
-            .get_record(&table, &fields, ids[(rec - 1) as usize])
-            .unwrap()
-        {
-            Some(cells) => by_name_map(&fields, cells),
-            None => HashMap::new(),
-        }
-    } else {
-        HashMap::new()
-    };
+    let by_name = by_name_for_rec(&sol, &table, &fields, body.rec);
 
     let created_ids: Vec<i64> = if kind == ObjectKind::Field {
         if body.create_label.unwrap_or(true) {
             // Field-tool placement: resolve the chosen field to build its binding
             // and spawn the caption label atomically (#60).
-            let Some(fid) = body.field_id else {
-                return (StatusCode::BAD_REQUEST, "field tool needs a fieldId").into_response();
-            };
-            let Some(f) = fields.iter().find(|f| f.id == fid) else {
-                return (StatusCode::BAD_REQUEST, "no such field").into_response();
-            };
+            let fid = body
+                .field_id
+                .ok_or_else(|| AppError::bad_request("field tool needs a fieldId"))?;
+            let f = fields
+                .iter()
+                .find(|f| f.id == fid)
+                .ok_or_else(|| AppError::bad_request("no such field"))?;
             let binding = format!("{}.{}", table.name, f.name);
             let label = f.name.clone();
             match sol
@@ -2304,7 +2280,7 @@ async fn create_design_object(
                 .unwrap()
             {
                 Some((label_id, field_id)) => vec![label_id, field_id],
-                None => return StatusCode::NOT_FOUND.into_response(),
+                None => return Err(AppError::not_found()),
             }
         } else {
             // Value-only field copy (duplicate/paste, #48/#85). Prefer the source
@@ -2316,13 +2292,13 @@ async fn create_design_object(
             let binding = match body.binding.clone() {
                 Some(b) => b,
                 None => {
-                    let Some(fid) = body.field_id else {
-                        return (StatusCode::BAD_REQUEST, "field tool needs a fieldId")
-                            .into_response();
-                    };
-                    let Some(f) = fields.iter().find(|f| f.id == fid) else {
-                        return (StatusCode::BAD_REQUEST, "no such field").into_response();
-                    };
+                    let fid = body
+                        .field_id
+                        .ok_or_else(|| AppError::bad_request("field tool needs a fieldId"))?;
+                    let f = fields
+                        .iter()
+                        .find(|f| f.id == fid)
+                        .ok_or_else(|| AppError::bad_request("no such field"))?;
                     format!("{}.{}", table.name, f.name)
                 }
             };
@@ -2342,7 +2318,7 @@ async fn create_design_object(
             };
             match sol.create_object(layout_id, &new).unwrap() {
                 Some(id) => vec![id],
-                None => return StatusCode::NOT_FOUND.into_response(),
+                None => return Err(AppError::not_found()),
             }
         }
     } else {
@@ -2364,7 +2340,7 @@ async fn create_design_object(
         };
         match sol.create_object(layout_id, &new).unwrap() {
             Some(id) => vec![id],
-            None => return StatusCode::NOT_FOUND.into_response(),
+            None => return Err(AppError::not_found()),
         }
     };
 
@@ -2376,7 +2352,7 @@ async fn create_design_object(
         .filter_map(|id| part_objs.iter().find(|o| o.id == *id))
         .map(|o| object_view(o, &by_name))
         .collect();
-    axum::Json(views).into_response()
+    Ok(Json(views))
 }
 
 /// One object restored at its ORIGINAL id (#84). The client sends the store's
@@ -2414,16 +2390,15 @@ async fn restore_design_objects(
     State(st): State<AppState>,
     Path(layout_id): Path<i64>,
     Json(body): Json<RestoreObjectsBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<Vec<ObjectView>>> {
     let mut sol = st.sol.lock().unwrap();
     if layout_table(&sol, layout_id).is_none() {
-        return not_found("layout", layout_id);
+        return Err(AppError::no_such_layout(layout_id));
     }
     let mut restores = Vec::with_capacity(body.objects.len());
     for o in &body.objects {
-        let Some(kind) = ObjectKind::parse(&o.kind) else {
-            return (StatusCode::BAD_REQUEST, "bad object kind").into_response();
-        };
+        let kind = ObjectKind::parse(&o.kind)
+            .ok_or_else(|| AppError::bad_request("bad object kind"))?;
         restores.push(RestoreObject {
             id: o.id,
             part_id: o.part_id,
@@ -2441,18 +2416,18 @@ async fn restore_design_objects(
     }
     match sol.restore_objects(layout_id, &restores).unwrap() {
         RestoreResult::Restored => {}
-        RestoreResult::PartNotFound => return StatusCode::NOT_FOUND.into_response(),
-        RestoreResult::IdInUse => return (StatusCode::CONFLICT, "id in use").into_response(),
+        RestoreResult::PartNotFound => return Err(AppError::not_found()),
+        RestoreResult::IdInUse => return Err(AppError::conflict("id in use")),
     }
     let rec = body.rec;
     let mut views = Vec::with_capacity(restores.len());
     for o in &restores {
         match object_view_for_rec(&sol, layout_id, o.id, rec) {
             Some(v) => views.push(v),
-            None => return StatusCode::NOT_FOUND.into_response(),
+            None => return Err(AppError::not_found()),
         }
     }
-    axum::Json(views).into_response()
+    Ok(Json(views))
 }
 
 /// A band the Create zone adds (#48): the [`PartKind`] string and an optional
@@ -2485,40 +2460,24 @@ async fn create_design_part(
     State(st): State<AppState>,
     Path(layout_id): Path<i64>,
     Json(body): Json<CreatePartBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<CreatePartResult>> {
     let sol = st.sol.lock().unwrap();
     if layout_table(&sol, layout_id).is_none() {
-        return not_found("layout", layout_id);
+        return Err(AppError::no_such_layout(layout_id));
     }
-    let Some(kind) = PartKind::parse(&body.kind) else {
-        return (StatusCode::BAD_REQUEST, "bad part kind").into_response();
-    };
+    let kind =
+        PartKind::parse(&body.kind).ok_or_else(|| AppError::bad_request("bad part kind"))?;
     let height = body.height.unwrap_or(80).max(1);
-    let id = match sol.create_part(layout_id, kind, height) {
-        Ok(id) => id,
-        Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
-    };
-    let positions: Vec<PartPosition> = sol
-        .parts(layout_id)
+    let id = sol.create_part(layout_id, kind, height)?;
+    let positions = part_positions(&sol, layout_id);
+    let part = sol
+        .part_by_id(layout_id, id)
         .unwrap()
-        .into_iter()
-        .map(|p| PartPosition {
-            id: p.id,
-            position: p.position,
-        })
-        .collect();
-    axum::Json(CreatePartResult {
-        part: PartView {
-            id,
-            kind: kind.as_str(),
-            height,
-            props: String::new(),
-            part_style: String::new(),
-            objects: Vec::new(),
-        },
+        .ok_or_else(AppError::not_found)?;
+    Ok(Json(CreatePartResult {
+        part: part_view(&part),
         positions,
-    })
-    .into_response()
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -2533,24 +2492,11 @@ async fn update_part_height(
     State(st): State<AppState>,
     Path((layout_id, part_id)): Path<(i64, i64)>,
     Json(body): Json<PartHeightBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<PartView>> {
     let sol = st.sol.lock().unwrap();
     let height = body.height.max(1);
-    if sol.set_part_height(layout_id, part_id, height).unwrap() == 0 {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let Some(part) = sol.part_by_id(layout_id, part_id).unwrap() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    axum::Json(PartView {
-        id: part.id,
-        kind: part.kind.as_str(),
-        height: part.height,
-        props: part.props.clone().unwrap_or_default(),
-        part_style: part_style(part.props.as_deref()),
-        objects: Vec::new(),
-    })
-    .into_response()
+    let updated = sol.set_part_height(layout_id, part_id, height).unwrap();
+    updated_part_view(&sol, layout_id, part_id, updated)
 }
 
 #[derive(serde::Deserialize)]
@@ -2564,28 +2510,12 @@ async fn update_part_kind(
     State(st): State<AppState>,
     Path((layout_id, part_id)): Path<(i64, i64)>,
     Json(body): Json<PartKindBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<PartView>> {
     let sol = st.sol.lock().unwrap();
-    let Some(kind) = PartKind::parse(&body.kind) else {
-        return (StatusCode::BAD_REQUEST, "bad part kind").into_response();
-    };
-    match sol.set_part_kind(layout_id, part_id, kind) {
-        Ok(0) => return StatusCode::NOT_FOUND.into_response(),
-        Ok(_) => {}
-        Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
-    }
-    let Some(part) = sol.part_by_id(layout_id, part_id).unwrap() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    axum::Json(PartView {
-        id: part.id,
-        kind: part.kind.as_str(),
-        height: part.height,
-        props: part.props.clone().unwrap_or_default(),
-        part_style: part_style(part.props.as_deref()),
-        objects: Vec::new(),
-    })
-    .into_response()
+    let kind =
+        PartKind::parse(&body.kind).ok_or_else(|| AppError::bad_request("bad part kind"))?;
+    let updated = sol.set_part_kind(layout_id, part_id, kind)?;
+    updated_part_view(&sol, layout_id, part_id, updated)
 }
 
 /// Persist a band's `props` from the Band inspector (#49/Issue 7), layout-scoped,
@@ -2596,24 +2526,11 @@ async fn update_part_props(
     State(st): State<AppState>,
     Path((layout_id, part_id)): Path<(i64, i64)>,
     Json(body): Json<PropsBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<PartView>> {
     let sol = st.sol.lock().unwrap();
     let props = body.props.to_string();
-    if sol.set_part_props(layout_id, part_id, &props).unwrap() == 0 {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let Some(part) = sol.part_by_id(layout_id, part_id).unwrap() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    axum::Json(PartView {
-        id: part.id,
-        kind: part.kind.as_str(),
-        height: part.height,
-        props: part.props.clone().unwrap_or_default(),
-        part_style: part_style(part.props.as_deref()),
-        objects: Vec::new(),
-    })
-    .into_response()
+    let updated = sol.set_part_props(layout_id, part_id, &props).unwrap();
+    updated_part_view(&sol, layout_id, part_id, updated)
 }
 
 /// The direction a summary band moves within its layout (Issue 4).
@@ -2631,6 +2548,19 @@ struct PartPosition {
     position: i64,
 }
 
+/// The layout's full `[{id, position}]` ordering — the resync payload the part
+/// create/move endpoints return.
+fn part_positions(sol: &Solution, layout_id: i64) -> Vec<PartPosition> {
+    sol.parts(layout_id)
+        .unwrap()
+        .into_iter()
+        .map(|p| PartPosition {
+            id: p.id,
+            position: p.position,
+        })
+        .collect()
+}
+
 /// Move a summary band up/down within its layout, staying between the header and
 /// footer (Issue 4). 200 returns the layout's parts as `[{id, position}]` (after
 /// the move) so the client resyncs positions; 404 when the move was a no-op (no
@@ -2639,36 +2569,24 @@ async fn move_design_part(
     State(st): State<AppState>,
     Path((layout_id, part_id)): Path<(i64, i64)>,
     Json(body): Json<PartMoveBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<Vec<PartPosition>>> {
     let mut sol = st.sol.lock().unwrap();
-    match sol.move_part(layout_id, part_id, body.up) {
-        Ok(0) => return StatusCode::NOT_FOUND.into_response(),
-        Ok(_) => {}
-        Err(e) => return (StatusCode::CONFLICT, e.to_string()).into_response(),
+    if sol.move_part(layout_id, part_id, body.up)? == 0 {
+        return Err(AppError::not_found());
     }
-    let positions: Vec<PartPosition> = sol
-        .parts(layout_id)
-        .unwrap()
-        .into_iter()
-        .map(|p| PartPosition {
-            id: p.id,
-            position: p.position,
-        })
-        .collect();
-    axum::Json(positions).into_response()
+    Ok(Json(part_positions(&sol, layout_id)))
 }
 
 /// Delete a band from a layout. Child objects are removed with it.
 async fn delete_design_part(
     State(st): State<AppState>,
     Path((layout_id, part_id)): Path<(i64, i64)>,
-) -> impl IntoResponse {
+) -> AppResult<StatusCode> {
     let sol = st.sol.lock().unwrap();
-    match sol.delete_part(layout_id, part_id) {
-        Ok(0) => StatusCode::NOT_FOUND.into_response(),
-        Ok(_) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    if sol.delete_part(layout_id, part_id)? == 0 {
+        return Err(AppError::not_found());
     }
+    Ok(StatusCode::OK)
 }
 
 /// Delete an object from a layout (#48) — the Create zone's delete and the undo
@@ -2676,12 +2594,12 @@ async fn delete_design_part(
 async fn delete_design_object(
     State(st): State<AppState>,
     Path((layout_id, object_id)): Path<(i64, i64)>,
-) -> impl IntoResponse {
+) -> AppResult<StatusCode> {
     let sol = st.sol.lock().unwrap();
-    match sol.delete_object(layout_id, object_id).unwrap() {
-        0 => StatusCode::NOT_FOUND.into_response(),
-        _ => StatusCode::OK.into_response(),
+    if sol.delete_object(layout_id, object_id).unwrap() == 0 {
+        return Err(AppError::not_found());
     }
+    Ok(StatusCode::OK)
 }
 
 /// The appearance bag the Style zone commits (#49) — an opaque JSON object the
@@ -2708,16 +2626,17 @@ async fn update_object_props(
     State(st): State<AppState>,
     Path((layout_id, object_id)): Path<(i64, i64)>,
     Json(body): Json<PropsBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<StyleResult>> {
     let sol = st.sol.lock().unwrap();
     let props = body.props.to_string();
     if sol.set_object_props(layout_id, object_id, &props).unwrap() == 0 {
-        return StatusCode::NOT_FOUND.into_response();
+        return Err(AppError::not_found());
     }
-    let Some(o) = sol.object_by_id(layout_id, object_id).unwrap() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    axum::Json(StyleResult {
+    let o = sol
+        .object_by_id(layout_id, object_id)
+        .unwrap()
+        .ok_or_else(AppError::not_found)?;
+    Ok(Json(StyleResult {
         object_style: object_style(o.kind, o.props.as_deref()),
         text_style: text_style(o.kind, o.props.as_deref()),
         shape_style: if o.kind.is_shape() {
@@ -2725,8 +2644,7 @@ async fn update_object_props(
         } else {
             String::new()
         },
-    })
-    .into_response()
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -2743,27 +2661,21 @@ async fn update_object_binding(
     State(st): State<AppState>,
     Path((layout_id, object_id)): Path<(i64, i64)>,
     Json(body): Json<BindingBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<ObjectView>> {
     let sol = st.sol.lock().unwrap();
     let Some((_lay, table)) = layout_table(&sol, layout_id) else {
-        return not_found("layout", layout_id);
+        return Err(AppError::no_such_layout(layout_id));
     };
     let fields = sol.fields(table.id).unwrap();
-    let Some(field) = fields.iter().find(|f| f.id == body.field_id) else {
-        return (StatusCode::BAD_REQUEST, "no such field").into_response();
-    };
+    let field = fields
+        .iter()
+        .find(|f| f.id == body.field_id)
+        .ok_or_else(|| AppError::bad_request("no such field"))?;
     let binding = format!("{}.{}", table.name, field.name);
-    if sol
+    let updated = sol
         .set_object_binding(layout_id, object_id, &binding)
-        .unwrap()
-        == 0
-    {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    match object_view_for_rec(&sol, layout_id, object_id, body.rec) {
-        Some(view) => axum::Json(view).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+        .unwrap();
+    updated_object_view(&sol, layout_id, object_id, body.rec, updated)
 }
 
 #[derive(serde::Deserialize)]
@@ -2780,22 +2692,15 @@ async fn update_object_binding_path(
     State(st): State<AppState>,
     Path((layout_id, object_id)): Path<(i64, i64)>,
     Json(body): Json<BindingPathBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<ObjectView>> {
     let sol = st.sol.lock().unwrap();
     if layout_table(&sol, layout_id).is_none() {
-        return not_found("layout", layout_id);
+        return Err(AppError::no_such_layout(layout_id));
     }
-    if sol
+    let updated = sol
         .set_object_binding(layout_id, object_id, &body.binding)
-        .unwrap()
-        == 0
-    {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    match object_view_for_rec(&sol, layout_id, object_id, body.rec) {
-        Some(view) => axum::Json(view).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+        .unwrap();
+    updated_object_view(&sol, layout_id, object_id, body.rec, updated)
 }
 
 #[derive(serde::Deserialize)]
@@ -2808,19 +2713,12 @@ async fn update_object_content(
     State(st): State<AppState>,
     Path((layout_id, object_id)): Path<(i64, i64)>,
     Json(body): Json<ContentBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<ObjectView>> {
     let sol = st.sol.lock().unwrap();
-    if sol
+    let updated = sol
         .set_object_content(layout_id, object_id, &body.content)
-        .unwrap()
-        == 0
-    {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    match object_view_for_rec(&sol, layout_id, object_id, None) {
-        Some(view) => axum::Json(view).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+        .unwrap();
+    updated_object_view(&sol, layout_id, object_id, None, updated)
 }
 
 #[derive(serde::Deserialize)]
@@ -2835,19 +2733,12 @@ async fn update_object_read_only(
     State(st): State<AppState>,
     Path((layout_id, object_id)): Path<(i64, i64)>,
     Json(body): Json<ReadOnlyBody>,
-) -> impl IntoResponse {
+) -> AppResult<Json<ObjectView>> {
     let sol = st.sol.lock().unwrap();
-    if sol
+    let updated = sol
         .set_object_read_only(layout_id, object_id, body.read_only)
-        .unwrap()
-        == 0
-    {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    match object_view_for_rec(&sol, layout_id, object_id, body.rec) {
-        Some(view) => axum::Json(view).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+        .unwrap();
+    updated_object_view(&sol, layout_id, object_id, body.rec, updated)
 }
 
 /// Map a file extension to a content type for the editor bundle. Only the few
@@ -3248,16 +3139,8 @@ pub fn app(state: AppState) -> Router {
             post(reorder_schema_fields),
         )
         .route(
-            "/schema/tables/:table_id/fields/:field_id/rename",
-            post(rename_schema_field),
-        )
-        .route(
             "/schema/tables/:table_id/fields/:field_id",
             post(update_schema_field),
-        )
-        .route(
-            "/schema/tables/:table_id/fields/:field_id/retype",
-            post(retype_schema_field),
         )
         .route(
             "/schema/tables/:table_id/fields/:field_id/delete",
@@ -3844,14 +3727,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{resp}");
         assert!(resp.contains(r#""notes":"Paid and open invoices""#));
 
-        let (status, resp) = post_json_body(
-            state.clone(),
-            &format!("/schema/tables/{table_id}/fields/{number_id}/rename"),
-            r#"{"name":"Invoice Number"}"#,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{resp}");
-
+        // The update endpoint also carries renames (the dedicated rename route
+        // was dropped as a strict subset of it).
         let (status, resp) = post_json_body(
             state.clone(),
             &format!("/schema/tables/{table_id}/fields/{number_id}"),
@@ -3870,6 +3747,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{resp}");
+        assert!(resp.contains(r#""name":"Invoice Number""#));
         assert!(resp.contains(r#""notes":"Shown on customer forms""#));
         let field: serde_json::Value = serde_json::from_str(&resp).unwrap();
         assert_eq!(
@@ -3881,10 +3759,11 @@ mod tests {
             Some(true)
         );
 
+        // Retype likewise goes through the update endpoint.
         let (status, resp) = post_json_body(
             state.clone(),
-            &format!("/schema/tables/{table_id}/fields/{total_id}/retype"),
-            r#"{"kind":"text"}"#,
+            &format!("/schema/tables/{table_id}/fields/{total_id}"),
+            r#"{"name":"Total","kind":"text"}"#,
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{resp}");

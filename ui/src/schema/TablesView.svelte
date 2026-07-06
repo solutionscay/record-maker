@@ -18,7 +18,7 @@
 </script>
 
 <div class="tv">
-  <header class="tv-head">
+  <header class="sc-viewhead tv-head">
     <span class="sc-micro">Tables</span>
     <button type="button" class="sc-btn sc-btn--primary" onclick={onnew}>
       <Icon name="plus" />New table
@@ -27,10 +27,10 @@
 
   <div class="tv-list">
     {#if store.loading}
-      <p class="tv-note sc-hint">Loading tables...</p>
+      <p class="sc-note sc-hint">Loading tables...</p>
     {:else if store.tables.length === 0}
-      <div class="tv-empty">
-        <p class="tv-empty-title">No tables yet</p>
+      <div class="sc-empty tv-empty">
+        <p class="sc-empty-title">No tables yet</p>
         <p class="sc-hint">Create your first table to start defining fields.</p>
         <button type="button" class="sc-btn sc-btn--primary" onclick={onnew}>
           <Icon name="plus" />New table
@@ -39,7 +39,7 @@
     {/if}
 
     {#if !store.loading && store.tables.length > 0}
-      <div class="tv-colhead">
+      <div class="tv-colhead sc-colhead">
         <span class="tv-c-icon" aria-hidden="true"></span>
         <span class="sc-micro">Table</span>
         <span class="sc-micro">Notes</span>
@@ -79,40 +79,16 @@
     display: flex;
     flex-direction: column;
   }
+  /* Header bar / col-header / empty-state chrome comes from the shared .sc-*
+     classes (schema.css); this view adds only its stickiness and grid. */
   .tv-head {
     position: sticky;
     top: 0;
     z-index: 2;
-    flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    height: var(--sc-head-h);
-    padding: 0 18px;
-    border-bottom: 0.5px solid var(--rm-border);
-    background: var(--rm-toolbar-bg);
   }
   .tv-list {
     flex: 1 1 auto;
     min-height: 0;
-  }
-  .tv-note {
-    margin: 0;
-    padding: 16px 18px;
-  }
-  .tv-empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    padding: 48px 24px;
-    text-align: center;
-  }
-  .tv-empty-title {
-    margin: 0;
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--rm-text);
   }
   .tv-empty .sc-btn {
     margin-top: 6px;
@@ -124,14 +100,6 @@
     align-items: center;
     gap: 12px;
     padding: 0 12px 0 18px;
-  }
-  .tv-colhead {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    height: var(--sc-head-h);
-    border-bottom: 0.5px solid var(--rm-border);
-    background: var(--rm-toolbar-bg);
   }
   .tv-row {
     min-height: var(--sc-row-h);

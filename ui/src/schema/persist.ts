@@ -2,42 +2,17 @@
 // Layout editor's persist.ts. The store is the source of truth for what's on
 // screen; these only talk to the server and return the views it assigns, so the
 // store can reflect server truth after every op (#113 acceptance).
+//
+// The fetch/throw mechanics live in the shared HTTP helper (#132): every failed
+// op throws its typed HttpError, which carries the server's status + message so
+// the store can surface a real reason (the endpoints return CONFLICT/BAD_REQUEST
+// with a human-readable string, e.g. a duplicate-name conflict).
 
+import { getJson, postJson, postVoid as httpPostVoid } from '../shared/http';
 import type { FieldKind, FieldOptions, FieldView, RelationshipView, TableView, ValueListView } from './types';
 
-/** A failed schema op — carries the server's status + message body so the store
- * can surface a real reason (the endpoints return CONFLICT/BAD_REQUEST with a
- * human-readable string, e.g. a duplicate-name conflict). */
-export class SchemaError extends Error {
-  status: number;
-  constructor(status: number, message: string) {
-    super(message || `HTTP ${status}`);
-    this.name = 'SchemaError';
-    this.status = status;
-  }
-}
-
-async function getJson<T>(url: string): Promise<T> {
-  const r = await fetch(url);
-  if (!r.ok) throw new SchemaError(r.status, await r.text().catch(() => ''));
-  return (await r.json()) as T;
-}
-
-async function postJson<T>(url: string, body?: unknown): Promise<T> {
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
-  });
-  if (!r.ok) throw new SchemaError(r.status, await r.text().catch(() => ''));
-  return (await r.json()) as T;
-}
-
 /** POST that returns no JSON body (the delete endpoints just 200/OK). */
-async function postVoid(url: string): Promise<void> {
-  const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-  if (!r.ok) throw new SchemaError(r.status, await r.text().catch(() => ''));
-}
+const postVoid = (url: string): Promise<void> => httpPostVoid(url, {});
 
 // ── tables ──────────────────────────────────────────────────────────────────
 

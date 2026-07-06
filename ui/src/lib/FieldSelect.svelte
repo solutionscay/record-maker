@@ -11,6 +11,7 @@
   import type { FieldChoice } from './model';
   import Icon from './Icon.svelte';
   import { FIELD_DRAG_MIME } from './dnd';
+  import { kindIcon } from '../shared/field-kinds';
 
   let {
     fields,
@@ -50,17 +51,10 @@
     dragToPlace?: boolean;
   } = $props();
 
-  // Each FieldKind::as_str value → the sprite symbol drawn beside the name.
-  const KIND_ICON: Record<string, string> = {
-    text: 'type-text',
-    number: 'type-number',
-    date: 'type-date',
-    time: 'type-time',
-    timestamp: 'type-timestamp',
-    bool: 'type-bool',
-  };
+  // Each FieldKind::as_str value → the sprite symbol drawn beside the name
+  // (the shared kind table, #132); an unknown kind falls back to the text glyph.
   function iconFor(kind: string): string {
-    return KIND_ICON[kind] ?? 'type-text';
+    return kindIcon(kind, 'type-text');
   }
 
   let open = $state(false);

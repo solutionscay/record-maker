@@ -5,6 +5,7 @@
   import type { FieldKind, FieldOptions, FieldView } from './types';
   import { FIELD_KINDS, kindIcon, kindLabel } from './types';
   import Icon from '../lib/Icon.svelte';
+  import SchemaDrawer from './SchemaDrawer.svelte';
   import { untrack } from 'svelte';
 
   let {
@@ -98,14 +99,6 @@
     }
   });
 
-  $effect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onclose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  });
-
   function optionsDraft(): FieldOptions {
     const validation: NonNullable<FieldOptions['validation']> = {};
     if (primary) validation.primary = true;
@@ -138,136 +131,17 @@
   }
 </script>
 
-<aside class="fd">
-  <header class="fd-head">
-    <span class="fd-title">{field ? 'Field details' : 'New field'}</span>
-    <button type="button" class="sc-btn sc-btn--icon sc-btn--ghost" title="Close" onclick={onclose}>
-      <Icon name="minus" />
-    </button>
-  </header>
+<SchemaDrawer title={field ? 'Field details' : 'New field'} {onclose}>
+  {#snippet lead()}
+    <div class="fd-chip">
+      <Icon name={kindIcon(kind)} />
+      <span class="fd-chip-name">{name || 'Untitled'}</span>
+      <span class="fd-chip-sep">.</span>
+      <span class="fd-chip-kind">{kindLabel(kind)}</span>
+    </div>
+  {/snippet}
 
-  <div class="fd-chip">
-    <Icon name={kindIcon(kind)} />
-    <span class="fd-chip-name">{name || 'Untitled'}</span>
-    <span class="fd-chip-sep">.</span>
-    <span class="fd-chip-kind">{kindLabel(kind)}</span>
-  </div>
-
-  <div class="fd-body">
-    <label class="sc-micro fd-label" for="fd-name">Field name</label>
-    <!-- svelte-ignore a11y_autofocus -->
-    <input id="fd-name" class="sc-input" bind:value={name} autofocus />
-
-    <label class="sc-micro fd-label" for="fd-kind">Type</label>
-    <select id="fd-kind" class="sc-select" bind:value={kind}>
-      {#each FIELD_KINDS as k (k.kind)}
-        <option value={k.kind}>{k.label}</option>
-      {/each}
-    </select>
-
-    <section class="fd-section" aria-labelledby="fd-validation">
-      <span id="fd-validation" class="sc-micro fd-label">Validation</span>
-      <label class="fd-check">
-        <input type="checkbox" bind:checked={primary} />
-        <span>Primary ID</span>
-      </label>
-      <label class="fd-check">
-        <input type="checkbox" checked={primary || required} disabled={primary} onchange={(e) => (required = e.currentTarget.checked)} />
-        <span>Required</span>
-      </label>
-      <label class="fd-check">
-        <input type="checkbox" checked={primary || unique} disabled={primary} onchange={(e) => (unique = e.currentTarget.checked)} />
-        <span>Unique</span>
-      </label>
-      <label class="fd-check">
-        <input type="checkbox" bind:checked={memberOfEnabled} disabled={store.valueLists.length === 0} />
-        <span>Member of value list</span>
-      </label>
-      {#if memberOfEnabled}
-        <label>
-          <span class="sc-hint">Value list</span>
-          <select
-            class="sc-select"
-            value={memberOfValueList ?? ''}
-            onchange={(e) => (memberOfValueList = Number(e.currentTarget.value))}
-            disabled={store.valueLists.length === 0}
-          >
-            {#each store.valueLists as list (list.id)}
-              <option value={list.id}>{list.name}</option>
-            {/each}
-          </select>
-        </label>
-      {/if}
-      {#if hasRange}
-        <div class="fd-range">
-          <label>
-            <span class="sc-hint">Min</span>
-            <input class="sc-input" type={rangeInputType} bind:value={rangeMin} />
-          </label>
-          <label>
-            <span class="sc-hint">Max</span>
-            <input class="sc-input" type={rangeInputType} bind:value={rangeMax} />
-          </label>
-        </div>
-      {/if}
-    </section>
-
-    <section class="fd-section" aria-labelledby="fd-reference">
-      <span id="fd-reference" class="sc-micro fd-label">Reference</span>
-      <label class="fd-check">
-        <input type="checkbox" bind:checked={referenceEnabled} />
-        <span>References another field</span>
-      </label>
-      {#if referenceEnabled}
-        <div class="fd-ref">
-          <label>
-            <span class="sc-hint">Relationship name</span>
-            <input class="sc-input" bind:value={referenceName} />
-          </label>
-          <label>
-            <span class="sc-hint">Target table</span>
-            <select
-              class="sc-select"
-              value={referenceToTable ?? ''}
-              onchange={(e) => {
-                referenceToTable = Number(e.currentTarget.value);
-                referenceToField = store.fieldsByTable[referenceToTable]?.[0]?.id ?? null;
-              }}
-            >
-              {#each store.tables as table (table.id)}
-                <option value={table.id}>{table.name}</option>
-              {/each}
-            </select>
-          </label>
-          <label>
-            <span class="sc-hint">Target field</span>
-            <select
-              class="sc-select"
-              value={referenceToField ?? ''}
-              onchange={(e) => (referenceToField = Number(e.currentTarget.value))}
-              disabled={referenceFields.length === 0}
-            >
-              {#each referenceFields as target (target.id)}
-                <option value={target.id}>{target.name}</option>
-              {/each}
-            </select>
-          </label>
-        </div>
-      {/if}
-    </section>
-
-    <label class="sc-micro fd-label" for="fd-notes">Notes</label>
-    <textarea id="fd-notes" class="sc-textarea" rows="5" bind:value={notes}></textarea>
-
-    {#if field}
-      <span class="sc-micro fd-label">Physical name</span>
-      <code class="fd-code">{field.phys || 'Created when schema is saved'}</code>
-    {/if}
-
-    <p class="sc-hint fd-note">Drawer Save updates the draft. The schema is not applied until the window Save.</p>
-  </div>
-
-  <footer class="fd-foot">
+  {#snippet footer()}
     {#if field}
       <button
         type="button"
@@ -282,49 +156,122 @@
     <span class="fd-spacer"></span>
     <button type="button" class="sc-btn" onclick={onclose}>Cancel</button>
     <button type="button" class="sc-btn sc-btn--primary" onclick={save} disabled={name.trim().length === 0 || !memberOfValid || !referenceValid}>Save</button>
-  </footer>
-</aside>
+  {/snippet}
+
+  <label class="sc-micro fd-label" for="fd-name">Field name</label>
+  <!-- svelte-ignore a11y_autofocus -->
+  <input id="fd-name" class="sc-input" bind:value={name} autofocus />
+
+  <label class="sc-micro fd-label" for="fd-kind">Type</label>
+  <select id="fd-kind" class="sc-select" bind:value={kind}>
+    {#each FIELD_KINDS as k (k.kind)}
+      <option value={k.kind}>{k.label}</option>
+    {/each}
+  </select>
+
+  <section class="fd-section" aria-labelledby="fd-validation">
+    <span id="fd-validation" class="sc-micro fd-label">Validation</span>
+    <label class="fd-check">
+      <input type="checkbox" bind:checked={primary} />
+      <span>Primary ID</span>
+    </label>
+    <label class="fd-check">
+      <input type="checkbox" checked={primary || required} disabled={primary} onchange={(e) => (required = e.currentTarget.checked)} />
+      <span>Required</span>
+    </label>
+    <label class="fd-check">
+      <input type="checkbox" checked={primary || unique} disabled={primary} onchange={(e) => (unique = e.currentTarget.checked)} />
+      <span>Unique</span>
+    </label>
+    <label class="fd-check">
+      <input type="checkbox" bind:checked={memberOfEnabled} disabled={store.valueLists.length === 0} />
+      <span>Member of value list</span>
+    </label>
+    {#if memberOfEnabled}
+      <label>
+        <span class="sc-hint">Value list</span>
+        <select
+          class="sc-select"
+          value={memberOfValueList ?? ''}
+          onchange={(e) => (memberOfValueList = Number(e.currentTarget.value))}
+          disabled={store.valueLists.length === 0}
+        >
+          {#each store.valueLists as list (list.id)}
+            <option value={list.id}>{list.name}</option>
+          {/each}
+        </select>
+      </label>
+    {/if}
+    {#if hasRange}
+      <div class="fd-range">
+        <label>
+          <span class="sc-hint">Min</span>
+          <input class="sc-input" type={rangeInputType} bind:value={rangeMin} />
+        </label>
+        <label>
+          <span class="sc-hint">Max</span>
+          <input class="sc-input" type={rangeInputType} bind:value={rangeMax} />
+        </label>
+      </div>
+    {/if}
+  </section>
+
+  <section class="fd-section" aria-labelledby="fd-reference">
+    <span id="fd-reference" class="sc-micro fd-label">Reference</span>
+    <label class="fd-check">
+      <input type="checkbox" bind:checked={referenceEnabled} />
+      <span>References another field</span>
+    </label>
+    {#if referenceEnabled}
+      <div class="fd-ref">
+        <label>
+          <span class="sc-hint">Relationship name</span>
+          <input class="sc-input" bind:value={referenceName} />
+        </label>
+        <label>
+          <span class="sc-hint">Target table</span>
+          <select
+            class="sc-select"
+            value={referenceToTable ?? ''}
+            onchange={(e) => {
+              referenceToTable = Number(e.currentTarget.value);
+              referenceToField = store.fieldsByTable[referenceToTable]?.[0]?.id ?? null;
+            }}
+          >
+            {#each store.tables as table (table.id)}
+              <option value={table.id}>{table.name}</option>
+            {/each}
+          </select>
+        </label>
+        <label>
+          <span class="sc-hint">Target field</span>
+          <select
+            class="sc-select"
+            value={referenceToField ?? ''}
+            onchange={(e) => (referenceToField = Number(e.currentTarget.value))}
+            disabled={referenceFields.length === 0}
+          >
+            {#each referenceFields as target (target.id)}
+              <option value={target.id}>{target.name}</option>
+            {/each}
+          </select>
+        </label>
+      </div>
+    {/if}
+  </section>
+
+  <label class="sc-micro fd-label" for="fd-notes">Notes</label>
+  <textarea id="fd-notes" class="sc-textarea" rows="5" bind:value={notes}></textarea>
+
+  {#if field}
+    <span class="sc-micro fd-label">Physical name</span>
+    <code class="fd-code">{field.phys || 'Created when schema is saved'}</code>
+  {/if}
+
+  <p class="sc-hint fd-note">Drawer Save updates the draft. The schema is not applied until the window Save.</p>
+</SchemaDrawer>
 
 <style>
-  .fd {
-    position: absolute;
-    top: 0;
-    right: 0;
-    z-index: 20;
-    width: 360px;
-    max-width: 100%;
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    border-left: 0.5px solid var(--rm-border);
-    background: var(--rm-inspector-bg);
-    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.14);
-    animation: fd-slide 0.16s ease-out;
-  }
-  @keyframes fd-slide {
-    from {
-      transform: translateX(14px);
-      opacity: 0.4;
-    }
-    to {
-      transform: translateX(0);
-      opacity: 1;
-    }
-  }
-  .fd-head {
-    flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 12px 12px 18px;
-    border-bottom: 0.5px solid var(--rm-border);
-  }
-  .fd-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--rm-text);
-  }
   .fd-chip {
     flex: none;
     display: flex;
@@ -353,12 +300,6 @@
   .fd-chip-sep,
   .fd-chip-kind {
     color: var(--rm-text-dim);
-  }
-  .fd-body {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow: auto;
-    padding: 18px;
   }
   .fd-label {
     display: block;
@@ -419,14 +360,6 @@
   .fd-note {
     margin: 14px 0 0;
     line-height: 1.45;
-  }
-  .fd-foot {
-    flex: none;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 12px 18px;
-    border-top: 0.5px solid var(--rm-border);
   }
   .fd-delete {
     color: var(--rm-danger);

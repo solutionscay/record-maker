@@ -1,0 +1,28 @@
+/* CANONICAL --rm-* design tokens (#132) — the "modern Mac" palette (design ref
+ * "2a — Light") both Vite entries import, so every Svelte island resolves the
+ * same values whether or not the server chrome defined them.
+ *
+ * !! KEEP IN STEP with crates/server/templates/shell.html, which carries a
+ * !! byte-identical copy: server-rendered pages (Browse mode) load no Vite CSS,
+ * !! so the shell cannot depend on this file. If you change a value here,
+ * !! change it there in the same commit.
+ *
+ * Declared on `body` — exactly where shell.html declares them — so specificity
+ * and inheritance are identical whichever copy loads first. */
+body {
+  --rm-toolbar-bg: #f6f6f7;
+  --rm-sidebar-bg: #f0f0f2;
+  --rm-inspector-bg: #f7f7f8;
+  --rm-workspace-bg: #e9e9ec;
+  --rm-text: #1c1c1e;
+  --rm-text-dim: #8a8a8e;
+  --rm-border: rgba(0, 0, 0, 0.09);
+  --rm-border-strong: rgba(0, 0, 0, 0.16);
+  --rm-control-bg: #ffffff;
+  --rm-segment-track: #e6e6e9;
+  --rm-segment-active-bg: #ffffff;
+  --rm-accent: #0a84ff;
+  --rm-accent-soft: rgba(10, 132, 255, 0.12);
+  --rm-danger: #ff453a;
+  --rm-shadow-card: 0 1px 3px rgba(0, 0, 0, 0.08), 0 8px 26px rgba(0, 0, 0, 0.07);
+}

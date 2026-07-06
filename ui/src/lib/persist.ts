@@ -3,15 +3,19 @@
 // of truth; these only SYNC server state and return what the server assigns —
 // new object ids (so the store can add the object undoably) and the server-derived
 // shape style (the single source of that derivation, [[layout-object-types]]).
+//
+// The fetch/throw mechanics live in the shared HTTP helper (#132); this module
+// wires in the editor's `llog` channel and keeps the endpoint vocabulary.
 
 import type { ObjectGroupView, ObjectView, PartView } from './model';
+import { postJson as httpPostJson, postVoid as httpPostVoid, type HttpLog } from '../shared/http';
+import { llog } from './log';
 
 export interface StyleResult {
   objectStyle: string;
   textStyle: string;
   shapeStyle: string;
 }
-import { llog } from './log';
 
 /** The object the Create zone places (#48). For a `field`, `fieldId` names which
  * field to bind (the server builds the binding + spawns the caption label). `rec`
@@ -35,20 +39,16 @@ export interface NewObjectRequest {
   binding?: string | null;
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<T> {
-  llog('persist', `POST ${url}`, { body });
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) {
-    llog('error', `POST ${url} → HTTP ${r.status}`);
-    throw new Error(`HTTP ${r.status}`);
-  }
-  const json = (await r.json()) as T;
-  llog('persist', `POST ${url} ✓`, { response: json });
-  return json;
+// The editor's logging hook for the shared helper: JSON posts log their body,
+// success payload, and failures on the persist/error channels (as before).
+const log: HttpLog = {
+  start: (url, body) => llog('persist', `POST ${url}`, { body }),
+  ok: (url, response) => llog('persist', `POST ${url} ✓`, { response }),
+  fail: (url, status) => llog('error', `POST ${url} → HTTP ${status}`),
+};
+
+function postJson<T>(url: string, body: unknown): Promise<T> {
+  return httpPostJson(url, body, log);
 }
 
 /** Create an object; returns the created view(s) — a field returns its value
@@ -102,40 +102,29 @@ export function movePart(
 }
 
 /** Delete a band. Objects in the band are deleted with it. */
-export async function deletePart(layoutId: string, id: number): Promise<void> {
-  const r = await fetch(`/design/${layoutId}/part/${id}/delete`, { method: 'POST' });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+export function deletePart(layoutId: string, id: number): Promise<void> {
+  return httpPostVoid(`/design/${layoutId}/part/${id}/delete`);
 }
 
 /** Reparent an object to another band (cross-band drag, #46): persist its new
  * owning part + part-relative origin. No body on success (200). */
-export async function setObjectPart(
+export function setObjectPart(
   layoutId: string,
   id: number,
   partId: number,
   x: number,
   y: number,
 ): Promise<void> {
-  const r = await fetch(`/design/${layoutId}/object/${id}/part`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ partId, x, y }),
-  });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return httpPostVoid(`/design/${layoutId}/object/${id}/part`, { partId, x, y });
 }
 
 /** Persist one object's geometry. */
-export async function setObjectGeometry(
+export function setObjectGeometry(
   layoutId: string,
   id: number,
   geom: { x: number; y: number; w: number; h: number },
 ): Promise<void> {
-  const r = await fetch(`/design/${layoutId}/object/${id}/geometry`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(geom),
-  });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return httpPostVoid(`/design/${layoutId}/object/${id}/geometry`, geom);
 }
 
 /** Batch-persist objects' stacking order (#83 Arrange z-order). The panel
@@ -143,31 +132,21 @@ export async function setObjectGeometry(
  * and POSTs `[{id,z}, …]`; the server writes them in one transaction, scoped to
  * the layout. No body needed on success (the server returns a count, which the
  * store doesn't consume — z reaches the DOM straight from the document `z`). */
-export async function setObjectsZ(
+export function setObjectsZ(
   layoutId: string,
   items: { id: number; z: number }[],
 ): Promise<void> {
-  const r = await fetch(`/design/${layoutId}/z`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(items),
-  });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return httpPostVoid(`/design/${layoutId}/z`, items);
 }
 
 /** Batch-persist objects' geometry after a drag/resize/align settles. The store
  * already holds the new rects; this only SYNCs them to the server (siblings that
  * crossed a band boundary go through `setObjectPart` instead). */
-export async function setObjectsGeometry(
+export function setObjectsGeometry(
   layoutId: string,
   items: { id: number; x: number; y: number; w: number; h: number }[],
 ): Promise<void> {
-  const r = await fetch(`/design/${layoutId}/geometry`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(items),
-  });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return httpPostVoid(`/design/${layoutId}/geometry`, items);
 }
 
 /** Create a durable group over existing objects (#75). History replay supplies
@@ -177,33 +156,26 @@ export function createObjectGroup(layoutId: string, objectIds: number[], id?: nu
 }
 
 /** Remove a durable group without changing child geometry/styles (#75). */
-export async function deleteObjectGroup(layoutId: string, id: number): Promise<void> {
-  const r = await fetch(`/design/${layoutId}/group/${id}/delete`, { method: 'POST' });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+export function deleteObjectGroup(layoutId: string, id: number): Promise<void> {
+  return httpPostVoid(`/design/${layoutId}/group/${id}/delete`);
 }
 
 /** Delete an object (the undo of a create / the Create-zone delete). */
-export async function deleteObject(layoutId: string, id: number): Promise<void> {
-  const r = await fetch(`/design/${layoutId}/object/${id}/delete`, { method: 'POST' });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+export function deleteObject(layoutId: string, id: number): Promise<void> {
+  return httpPostVoid(`/design/${layoutId}/object/${id}/delete`);
 }
 
 /** Batch-delete objects in one transaction (multi-delete / cut) — the bulk
  * sibling of `deleteObject`, mirroring `setObjectsGeometry`: the server scopes
  * each id to the layout and skips unknown ids, returning a count the store
  * doesn't consume. */
-export async function deleteObjects(layoutId: string, ids: number[]): Promise<void> {
-  const r = await fetch(`/design/${layoutId}/objects/delete`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(ids),
-  });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+export function deleteObjects(layoutId: string, ids: number[]): Promise<void> {
+  return httpPostVoid(`/design/${layoutId}/objects/delete`, ids);
 }
 
 /** Commit a props bag (#49); returns the server-derived shape style for the
  * canvas (empty for a non-shape object). */
-export async function setObjectProps(
+export function setObjectProps(
   layoutId: string,
   id: number,
   props: Record<string, unknown>,

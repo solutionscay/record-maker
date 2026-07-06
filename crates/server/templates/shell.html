@@ -8,7 +8,12 @@
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     /* Modern-Mac palette (design ref "2a — Light"). Tokens live on body so both
-       the server chrome and the Layout-mode Svelte islands inherit them. */
+       the server chrome and the Layout-mode Svelte islands inherit them.
+       !! CANONICAL COPY: ui/src/shared/tokens.css (#132). This block is a
+       !! byte-identical duplicate kept because Browse-mode pages load no Vite
+       !! CSS. If you change a value in either file, change BOTH in one commit.
+       (Same for the .layout-select chevron below — its canonical copy is the
+       --rm-chevron custom property in ui/src/shared/controls.css.) */
     body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif;
            color: #1b1b1f; -webkit-font-smoothing: antialiased;
            user-select: none; -webkit-user-select: none;

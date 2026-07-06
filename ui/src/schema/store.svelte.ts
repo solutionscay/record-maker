@@ -3,7 +3,7 @@
 // the draft; the schema-window Save applies the draft through the #107 API.
 
 import * as api from './persist';
-import { SchemaError } from './persist';
+import { HttpError } from '../shared/http';
 import {
   emptyFieldOptions,
   type FieldKind,
@@ -122,7 +122,7 @@ export class SchemaStore {
       this.error = null;
       return out;
     } catch (e) {
-      this.error = e instanceof SchemaError ? e.message : e instanceof Error ? e.message : String(e);
+      this.error = e instanceof HttpError ? e.message : e instanceof Error ? e.message : String(e);
       return null;
     }
   }
@@ -480,7 +480,7 @@ export class SchemaStore {
       this.error = null;
       return true;
     } catch (e) {
-      this.error = e instanceof SchemaError ? e.message : e instanceof Error ? e.message : String(e);
+      this.error = e instanceof HttpError ? e.message : e instanceof Error ? e.message : String(e);
       return false;
     } finally {
       this.saving = false;

@@ -50,7 +50,11 @@
   );
 
   $effect(() => {
-    const nextHydrationKey = `${tableId}:${field?.id ?? 'new'}`;
+    const fieldSignature =
+      field == null
+        ? 'new'
+        : `${field.id}:${field.name}:${field.kind}:${field.notes}:${JSON.stringify(field.options ?? {})}`;
+    const nextHydrationKey = `${tableId}:${fieldSignature}`;
     if (nextHydrationKey === hydrationKey) return;
     hydrationKey = nextHydrationKey;
 

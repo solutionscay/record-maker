@@ -185,6 +185,13 @@ impl Solution {
             crate::layout::generate_default_form(&tx, table_id, name, name, "form", &field_meta)?;
         crate::layout::clone_layout(&tx, form_layout_id, name, table_id, "list")?;
         crate::layout::clone_layout(&tx, form_layout_id, name, table_id, "table")?;
+        // Mark the trio as the table's default layouts (#151): enable/disable-able
+        // but never deletable, unlike Layout Manager "New layout" ones. At this
+        // point the trio is the only thing bound to the table, so this is safe.
+        tx.execute(
+            "UPDATE meta_layout SET is_default=1 WHERE table_id=?1",
+            params![table_id],
+        )?;
         tx.commit()?;
 
         // Physical table lives in data.db (a separate connection → a separate step).

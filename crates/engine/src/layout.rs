@@ -70,6 +70,15 @@ pub struct LayoutMeta {
     /// Order in the flat Layout Manager list (#149), lowest first. Not scoped
     /// per table — every layout in the solution shares one global order.
     pub position: i64,
+    /// One of a table's auto-generated Form/List/Table trio (#151). Default
+    /// layouts can be enabled/disabled per view but never deleted. Custom
+    /// layouts (Layout Manager "New layout") are `false`: freely deletable.
+    pub is_default: bool,
+    /// Whether this layout participates in Browse navigation — the sidebar
+    /// picker and view toggle only surface enabled defaults (#151). Custom
+    /// layouts are always stored `enabled = true`; the flag is only meaningful
+    /// for the default trio.
+    pub enabled: bool,
 }
 
 /// The kind of a layout part (band). Determines where the band renders and how
@@ -325,6 +334,9 @@ pub enum RestoreResult {
     IdInUse,
 }
 
+/// Column list every `layout_meta_from_row` read must SELECT, in order.
+const LAYOUT_COLS: &str = "id, name, table_id, view, position, is_default, enabled";
+
 fn layout_meta_from_row(r: &rusqlite::Row) -> rusqlite::Result<LayoutMeta> {
     Ok(LayoutMeta {
         id: r.get(0)?,
@@ -332,15 +344,17 @@ fn layout_meta_from_row(r: &rusqlite::Row) -> rusqlite::Result<LayoutMeta> {
         table_id: r.get(2)?,
         view: r.get(3)?,
         position: r.get(4)?,
+        is_default: r.get(5)?,
+        enabled: r.get(6)?,
     })
 }
 
 impl Solution {
     /// All layouts, in the flat Layout Manager order (#149).
     pub fn layouts(&self) -> Result<Vec<LayoutMeta>> {
-        let mut stmt = self.app.prepare(
-            "SELECT id, name, table_id, view, position FROM meta_layout ORDER BY position, id",
-        )?;
+        let mut stmt = self.app.prepare(&format!(
+            "SELECT {LAYOUT_COLS} FROM meta_layout ORDER BY position, id"
+        ))?;
         let rows = stmt.query_map([], layout_meta_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -351,18 +365,18 @@ impl Solution {
     /// Since #149 a table may also carry extra manager-created layouts beyond
     /// the default trio; those come back too, in id order.
     pub fn layouts_for_table(&self, table_id: i64) -> Result<Vec<LayoutMeta>> {
-        let mut stmt = self.app.prepare(
-            "SELECT id, name, table_id, view, position FROM meta_layout WHERE table_id=?1 ORDER BY id",
-        )?;
+        let mut stmt = self.app.prepare(&format!(
+            "SELECT {LAYOUT_COLS} FROM meta_layout WHERE table_id=?1 ORDER BY id"
+        ))?;
         let rows = stmt.query_map(params![table_id], layout_meta_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Look up a single layout by id.
     pub fn layout_by_id(&self, id: i64) -> Result<Option<LayoutMeta>> {
-        let mut stmt = self.app.prepare(
-            "SELECT id, name, table_id, view, position FROM meta_layout WHERE id=?1",
-        )?;
+        let mut stmt = self.app.prepare(&format!(
+            "SELECT {LAYOUT_COLS} FROM meta_layout WHERE id=?1"
+        ))?;
         let mut rows = stmt.query_map(params![id], layout_meta_from_row)?;
         match rows.next() {
             Some(r) => Ok(Some(r?)),
@@ -412,18 +426,48 @@ impl Solution {
         self.layout_by_id(id)
     }
 
-    /// Delete a layout. Refuses to delete a table's last remaining layout — a
-    /// table with zero layouts has no way to be browsed or designed at all.
+    /// Delete a layout. Refuses to delete a **default** layout (#151) — the
+    /// Form/List/Table trio is enable/disable-able but permanent, so a table
+    /// can never be stripped of its built-in views. Only custom (Layout
+    /// Manager "New layout") layouts are deletable.
     pub fn delete_layout(&mut self, id: i64) -> Result<usize> {
         let Some(layout) = self.layout_by_id(id)? else {
             return Ok(0);
         };
-        if self.layouts_for_table(layout.table_id)?.len() <= 1 {
-            bail!("cannot delete a table's only layout");
+        if layout.is_default {
+            bail!("default layouts can't be deleted — disable the view instead");
         }
         Ok(self
             .app
             .execute("DELETE FROM meta_layout WHERE id=?1", params![id])?)
+    }
+
+    /// Enable or disable a default layout view (#151). Guarded: a table must
+    /// keep at least one enabled default so it never falls out of the Browse
+    /// picker / view toggle. `None` if the layout doesn't exist; errors if it's
+    /// a custom layout (enabled-ness is only meaningful for the default trio)
+    /// or if disabling would zero out the table's last enabled default.
+    pub fn set_layout_enabled(&mut self, id: i64, enabled: bool) -> Result<Option<LayoutMeta>> {
+        let Some(layout) = self.layout_by_id(id)? else {
+            return Ok(None);
+        };
+        if !layout.is_default {
+            bail!("only default layouts can be enabled or disabled");
+        }
+        if !enabled {
+            let others_enabled = self
+                .layouts_for_table(layout.table_id)?
+                .iter()
+                .any(|l| l.is_default && l.enabled && l.id != id);
+            if !others_enabled {
+                bail!("a table must keep at least one enabled view");
+            }
+        }
+        self.app.execute(
+            "UPDATE meta_layout SET enabled=?1 WHERE id=?2",
+            params![enabled, id],
+        )?;
+        self.layout_by_id(id)
     }
 
     /// Reorder the flat Layout Manager list (#149): `layout_ids` must include
@@ -714,30 +758,52 @@ mod tests {
     }
 
     #[test]
-    fn rename_and_delete_layout_guard_a_tables_last_layout() {
+    fn defaults_are_undeletable_customs_are_deletable_and_renamable() {
         let mut s = Solution::open_in_memory().unwrap();
-        let tid = s
-            .create_table("Contacts", &[])
-            .unwrap();
+        let tid = s.create_table("Contacts", &[]).unwrap();
+
+        // The auto-generated trio is all default; a "New layout" is custom.
+        let trio = s.layouts_for_table(tid).unwrap();
+        assert_eq!(trio.len(), 3);
+        assert!(trio.iter().all(|l| l.is_default && l.enabled));
         let extra = s.create_layout(tid, "Contact Details", "list").unwrap();
+        assert!(!extra.is_default && extra.enabled);
 
         let renamed = s.rename_layout(extra.id, "Details").unwrap().unwrap();
         assert_eq!(renamed.name, "Details");
         assert!(s.rename_layout(999_999, "Nope").unwrap().is_none());
 
-        // Deleting the extra layout is fine — the table still has its default trio.
+        // A custom layout deletes; a default layout never does.
         assert_eq!(s.delete_layout(extra.id).unwrap(), 1);
         assert!(s.layout_by_id(extra.id).unwrap().is_none());
         assert_eq!(s.delete_layout(extra.id).unwrap(), 0);
-
-        // But a table's LAST layout refuses to delete.
-        let siblings = s.layouts_for_table(tid).unwrap();
-        for l in &siblings[..siblings.len() - 1] {
-            s.delete_layout(l.id).unwrap();
+        for l in &trio {
+            assert!(s.delete_layout(l.id).is_err(), "default {} deletable", l.view);
         }
-        let last = s.layouts_for_table(tid).unwrap();
-        assert_eq!(last.len(), 1);
-        assert!(s.delete_layout(last[0].id).is_err());
+        assert_eq!(s.layouts_for_table(tid).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn set_layout_enabled_toggles_defaults_and_guards_the_last_enabled() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s.create_table("Contacts", &[]).unwrap();
+        let trio = s.layouts_for_table(tid).unwrap();
+        let by_view = |v: &str| trio.iter().find(|l| l.view == v).unwrap().id;
+        let (form, list, table) = (by_view("form"), by_view("list"), by_view("table"));
+
+        // Disable two of the three — fine, one stays enabled.
+        assert!(!s.set_layout_enabled(form, false).unwrap().unwrap().enabled);
+        assert!(!s.set_layout_enabled(list, false).unwrap().unwrap().enabled);
+        // Disabling the LAST enabled default is refused.
+        assert!(s.set_layout_enabled(table, false).is_err());
+        assert!(s.layout_by_id(table).unwrap().unwrap().enabled);
+        // Re-enabling is always fine.
+        assert!(s.set_layout_enabled(form, true).unwrap().unwrap().enabled);
+
+        // Custom layouts can't be toggled at all; unknown ids return None.
+        let custom = s.create_layout(tid, "Extra", "form").unwrap();
+        assert!(s.set_layout_enabled(custom.id, false).is_err());
+        assert!(s.set_layout_enabled(999_999, false).unwrap().is_none());
     }
 
     #[test]

@@ -1417,25 +1417,109 @@ async fn layout_manager_routes_crud_and_guard_last_layout() {
         post_json_body(state.clone(), &format!("/layouts/{extra_id}/delete"), "{}").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    // But deleting a table's LAST layout is refused (409, engine guard).
+    // Default layouts (the auto-generated trio) refuse deletion (#151) and
+    // carry isDefault/enabled; toggling enabled works via /enabled, guarded
+    // against disabling the last enabled view.
     let (_, resp) = get_body(state.clone(), "/layouts/all").await;
     let all: serde_json::Value = serde_json::from_str(&resp).unwrap();
-    let contacts_layouts: Vec<i64> = all
+    let defaults: Vec<&serde_json::Value> = all
         .as_array()
         .unwrap()
         .iter()
-        .filter(|l| l["tableId"].as_i64() == Some(table_id))
-        .map(|l| l["id"].as_i64().unwrap())
+        .filter(|l| l["tableId"].as_i64() == Some(table_id) && l["isDefault"].as_bool() == Some(true))
         .collect();
-    for id in &contacts_layouts[..contacts_layouts.len() - 1] {
-        let (status, _) =
-            post_json_body(state.clone(), &format!("/layouts/{id}/delete"), "{}").await;
-        assert_eq!(status, StatusCode::OK);
-    }
-    let last = contacts_layouts.last().unwrap();
-    let (status, resp) =
-        post_json_body(state.clone(), &format!("/layouts/{last}/delete"), "{}").await;
+    assert_eq!(defaults.len(), 3, "the default trio");
+    assert!(defaults.iter().all(|l| l["enabled"].as_bool() == Some(true)));
+    let by_view = |v: &str| -> i64 {
+        defaults.iter().find(|l| l["view"].as_str() == Some(v)).unwrap()["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let (form, list, table) = (by_view("form"), by_view("list"), by_view("table"));
+
+    // A default can't be deleted.
+    let (status, resp) = post_json_body(state.clone(), &format!("/layouts/{form}/delete"), "{}").await;
     assert_eq!(status, StatusCode::CONFLICT, "{resp}");
+
+    // Disable two of three; the last enabled default refuses to disable.
+    for id in [form, list] {
+        let (status, resp) = post_json_body(
+            state.clone(),
+            &format!("/layouts/{id}/enabled"),
+            r#"{"enabled":false}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resp}");
+        assert!(resp.contains(r#""enabled":false"#));
+    }
+    let (status, _) = post_json_body(
+        state.clone(),
+        &format!("/layouts/{table}/enabled"),
+        r#"{"enabled":false}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Re-enabling a disabled default is always fine.
+    let (status, _) = post_json_body(
+        state.clone(),
+        &format!("/layouts/{form}/enabled"),
+        r#"{"enabled":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// #151: disabling a table's Form view must not strand the home redirect or the
+/// sidebar picker — the table lands on its next enabled default view instead.
+#[tokio::test]
+async fn disabling_form_falls_through_to_next_enabled_default() {
+    use axum::http::Request;
+    use tower::ServiceExt;
+    let state = state_for(Solution::open_in_memory().unwrap());
+    let (_, resp) = post_json_body(
+        state.clone(),
+        "/schema/tables",
+        &serde_json::json!({"name": "Contacts", "fields": []}).to_string(),
+    )
+    .await;
+    let table_id = serde_json::from_str::<serde_json::Value>(&resp).unwrap()["id"]
+        .as_i64()
+        .unwrap();
+
+    let (_, resp) = get_body(state.clone(), "/layouts/all").await;
+    let all: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let id_for = |v: &str| -> i64 {
+        all.as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["tableId"].as_i64() == Some(table_id) && l["view"].as_str() == Some(v))
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let form = id_for("form");
+    let list = id_for("list");
+
+    // Disable Form. Home now redirects to List (not a dead end), and the picker
+    // still lists the table (its List layout is the landing handle).
+    let (status, _) =
+        post_json_body(state.clone(), &format!("/layouts/{form}/enabled"), r#"{"enabled":false}"#)
+            .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let resp = app(state.clone())
+        .oneshot(Request::builder().uri("/").body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(resp.status().is_redirection(), "home should redirect, got {}", resp.status());
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(location, format!("/browse/{list}"), "lands on List when Form is off");
+
+    // The picker (rendered into the browse shell) still names the table.
+    let (status, html) = get_body(state.clone(), &format!("/browse/{list}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Contacts"), "picker still lists the table");
 }
 
 /// #48 create: placing a shape POSTs `{partId,kind,x,y,w,h,props}`, persists a

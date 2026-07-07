@@ -45,6 +45,7 @@ use routes::design::{
 };
 use routes::layouts::{
     create_layout, delete_layout, list_layouts, rename_layout, reorder_layouts,
+    set_layout_enabled,
 };
 use routes::records::{create_record, delete_record, open_record, revert_record, save_record};
 use routes::schema::{
@@ -257,6 +258,7 @@ pub fn app(state: AppState) -> Router {
         .route("/layouts/all", get(list_layouts))
         .route("/layouts/order", post(reorder_layouts))
         .route("/layouts/:id/rename", post(rename_layout))
+        .route("/layouts/:id/enabled", post(set_layout_enabled))
         .route("/layouts/:id/delete", post(delete_layout))
         .route("/design/:layout", get(design))
         .route("/design/format-sample", post(format_sample))

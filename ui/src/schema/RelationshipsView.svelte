@@ -3,7 +3,6 @@
     Background,
     BackgroundVariant,
     Controls,
-    MarkerType,
     SvelteFlow,
     type Edge,
     type EdgeTypes,
@@ -58,10 +57,24 @@
       .filter((field) => field.primary || field.fkNames.length > 0 || field.keyNames.length > 0);
   }
 
+  // Table boxes now size to their content (no fixed width/truncation, #143),
+  // so a fixed grid spacing would let wide boxes overlap their neighbors.
+  // Estimate each table's rendered width from its longest visible name and
+  // space every column by the widest table in the whole graph.
+  function estimatedNodeWidth(table: TableView): number {
+    const names = [table.name, ...keyFieldRows(table).map((f) => f.name)];
+    const longest = names.reduce((max, name) => Math.max(max, name.length), 10);
+    return Math.min(520, Math.max(190, longest * 7 + 150));
+  }
+
+  const columnSpacing = $derived(
+    Math.max(340, ...store.tables.map((t) => estimatedNodeWidth(t) + 70)),
+  );
+
   function nodePosition(index: number): { x: number; y: number } {
     const columns = Math.max(1, Math.min(3, Math.ceil(Math.sqrt(Math.max(1, store.tables.length)))));
     return {
-      x: (index % columns) * 340,
+      x: (index % columns) * columnSpacing,
       y: Math.floor(index / columns) * 260,
     };
   }
@@ -119,7 +132,13 @@
         sourceHandle: `source-${sourceSide}-${rel.fromField}`,
         targetHandle: `target-${targetSide}-${rel.toField}`,
         data: { relationshipId: rel.id, label: `${rel.name} - many to one`, onOpen: onedit },
-        markerEnd: { type: MarkerType.ArrowClosed },
+        // Crow's-foot notation (#143): a fork at the source (the FK/"many"
+        // side) and a tick at the target (the referenced/"one" side),
+        // defined once as custom SVG markers below. Svelte Flow wraps these
+        // in url('#...') itself, so these must be bare marker ids, not
+        // already-wrapped url(#...) strings.
+        markerStart: 'rm-crowfoot-many',
+        markerEnd: 'rm-crowfoot-one',
         class: 'rv-edge',
       };
     }),
@@ -131,6 +150,22 @@
 </script>
 
 <div class="rv">
+  <!-- Crow's-foot marker defs (#143): referenced by id from anywhere in the
+       document via url(#...), so this can live outside Svelte Flow's own
+       <svg> canvas. Fork = "many" (source/FK end); tick pair = "one"
+       (target/referenced end). Neutral gray regardless of hover/selected
+       state, matching the line's own default (unselected) color. -->
+  <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+    <defs>
+      <marker id="rm-crowfoot-many" markerWidth="14" markerHeight="12" refX="0" refY="6" orient="auto">
+        <path d="M0,6 L13,0.5 M0,6 L13,11.5 M0,6 L13,6" fill="none" stroke="#60646c" stroke-width="1.4" stroke-linecap="round" />
+      </marker>
+      <marker id="rm-crowfoot-one" markerWidth="10" markerHeight="12" refX="9" refY="6" orient="auto">
+        <path d="M3,0.5 L3,11.5 M7,0.5 L7,11.5" fill="none" stroke="#60646c" stroke-width="1.4" stroke-linecap="round" />
+      </marker>
+    </defs>
+  </svg>
+
   <header class="sc-viewhead rv-head">
     <div class="rv-title">
       <span class="sc-micro">Relationships</span>

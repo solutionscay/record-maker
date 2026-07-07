@@ -59,7 +59,7 @@
 
 <div class="tn" class:selected role="button" tabindex="0" onclick={openTable} onkeydown={onTableKeydown}>
   <header class="tn-head">
-    <span class="tn-title" title={data.table.name}>{data.table.name}</span>
+    <span class="tn-title">{data.table.name}</span>
     <span class="tn-count">{data.relationshipCount}</span>
   </header>
 
@@ -72,7 +72,7 @@
       {#each data.fields as field, index (field.id)}
         <button type="button" class="tn-field nodrag nopan" onclick={(e) => openField(e, field.id)}>
           <Icon name={kindIcon(field.kind)} />
-          <span class="tn-field-name" title={field.name}>{field.name}</span>
+          <span class="tn-field-name">{field.name}</span>
           <span class="tn-kind">{kindLabel(field.kind)}</span>
           {#if field.primary}
             <span class="tn-badge tn-badge--primary" title="Primary ID">id</span>
@@ -134,7 +134,8 @@
 
 <style>
   .tn {
-    width: 238px;
+    width: max-content;
+    min-width: 190px;
     min-height: 90px;
     overflow: hidden;
     border: 0.5px solid var(--rm-border);
@@ -163,9 +164,6 @@
   }
   .tn-title {
     flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 13px;
     font-weight: 700;
@@ -194,7 +192,7 @@
     width: 100%;
     height: 28px;
     display: grid;
-    grid-template-columns: 16px minmax(0, 1fr) auto auto auto auto auto;
+    grid-template-columns: 16px auto auto auto auto auto auto;
     align-items: center;
     gap: 6px;
     padding: 0 10px 0 12px;
@@ -214,9 +212,6 @@
     color: var(--rm-text-dim);
   }
   .tn-field-name {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 12px;
     font-weight: 600;

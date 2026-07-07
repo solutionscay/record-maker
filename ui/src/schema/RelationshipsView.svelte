@@ -44,13 +44,18 @@
     return store.relationships.filter((r) => r.fromTable === tableId || r.toTable === tableId).length;
   }
 
-  function fieldRows(table: TableView): SchemaGraphField[] {
-    return (store.fieldsByTable[table.id] ?? []).map((field) => ({
-      id: field.id,
-      name: field.name,
-      kind: field.kind,
-      ...fieldBadgeInfo(store, table.id, field),
-    }));
+  // The graph is a relationship diagram, not a column dump: only fields that
+  // are a primary key, an FK, or referenced by another field earn a row here
+  // (#142). Everything else stays visible in the Fields list.
+  function keyFieldRows(table: TableView): SchemaGraphField[] {
+    return (store.fieldsByTable[table.id] ?? [])
+      .map((field) => ({
+        id: field.id,
+        name: field.name,
+        kind: field.kind,
+        ...fieldBadgeInfo(store, table.id, field),
+      }))
+      .filter((field) => field.primary || field.fkNames.length > 0 || field.keyNames.length > 0);
   }
 
   function nodePosition(index: number): { x: number; y: number } {
@@ -76,19 +81,24 @@
   }
 
   const nodes = $derived.by<SchemaNode[]>(() =>
-    store.tables.map((table, index) => ({
-      id: `table-${table.id}`,
-      type: 'schemaTable',
-      position: nodePosition(index),
-      data: {
-        table,
-        fields: fieldRows(table),
-        relationshipCount: relationshipCount(table.id),
-        onTable: ontable,
-        onField: (tableId: number, fieldId: number) => onfield(fieldId, tableId),
-      },
-      draggable: false,
-    })),
+    store.tables.map((table, index) => {
+      const totalFieldCount = (store.fieldsByTable[table.id] ?? []).length;
+      const fields = keyFieldRows(table);
+      return {
+        id: `table-${table.id}`,
+        type: 'schemaTable',
+        position: nodePosition(index),
+        data: {
+          table,
+          fields,
+          hiddenFieldCount: totalFieldCount - fields.length,
+          relationshipCount: relationshipCount(table.id),
+          onTable: ontable,
+          onField: (tableId: number, fieldId: number) => onfield(fieldId, tableId),
+        },
+        draggable: false,
+      };
+    }),
   );
 
   const edges = $derived.by<SchemaEdge[]>(() =>

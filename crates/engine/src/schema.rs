@@ -46,6 +46,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0009_value_lists",
         include_str!("migrations/0009_value_lists.sql"),
     ),
+    (
+        "0010_layout_position",
+        include_str!("migrations/0010_layout_position.sql"),
+    ),
 ];
 
 /// Schema version this build targets (the number of migrations defined).

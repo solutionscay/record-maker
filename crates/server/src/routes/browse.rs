@@ -12,8 +12,8 @@ use axum::{
 use crate::viewmodel::{
     build_bands, build_form_record, build_list, canonical_view, clamp_rec, flipbook,
     layout_field_formats, layout_parts_with_objects, layout_stepper, layout_table, view_label,
-    CellView, Chrome, DesignTemplate, FieldView, FormTemplate, ListTemplate, RecordView,
-    SchemaTemplate, TableTemplate,
+    CellView, Chrome, DesignTemplate, FieldView, FormTemplate, LayoutsTemplate, ListTemplate,
+    RecordView, SchemaTemplate, TableTemplate,
 };
 use crate::{format, not_found, AppState};
 
@@ -179,4 +179,12 @@ pub(crate) async fn schema_page(State(st): State<AppState>) -> impl IntoResponse
     let sol = st.sol.lock().unwrap();
     let chrome = Chrome::build(&sol, "schema", None);
     Html(SchemaTemplate { chrome }.render().unwrap()).into_response()
+}
+
+/// The Layout Manager page (#149). Renders the shell in `layouts` mode with a
+/// single mount node; the Svelte island drives everything over `/layouts/*`.
+pub(crate) async fn layouts_page(State(st): State<AppState>) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let chrome = Chrome::build(&sol, "layouts", None);
+    Html(LayoutsTemplate { chrome }.render().unwrap()).into_response()
 }

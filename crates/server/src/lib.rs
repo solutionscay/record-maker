@@ -34,7 +34,7 @@ mod viewmodel;
 
 pub use seed::seed;
 
-use routes::browse::{browse, design, index, schema_page};
+use routes::browse::{browse, design, index, layouts_page, schema_page};
 use routes::design::{
     create_design_object, create_design_part, create_object_group, delete_design_object,
     delete_design_objects, delete_design_part, delete_object_group, design_model, format_sample,
@@ -42,6 +42,9 @@ use routes::design::{
     update_object_content, update_object_geometry, update_object_part, update_object_props,
     update_object_read_only, update_objects_geometry, update_objects_z, update_part_height,
     update_part_kind, update_part_props,
+};
+use routes::layouts::{
+    create_layout, delete_layout, list_layouts, rename_layout, reorder_layouts,
 };
 use routes::records::{create_record, delete_record, open_record, revert_record, save_record};
 use routes::schema::{
@@ -250,6 +253,11 @@ pub fn app(state: AppState) -> Router {
         .route("/value-lists/:id/delete", post(delete_value_list))
         .route("/value-lists/:id/items", get(value_list_items))
         .route("/schema", get(schema_page))
+        .route("/layouts", get(layouts_page).post(create_layout))
+        .route("/layouts/all", get(list_layouts))
+        .route("/layouts/order", post(reorder_layouts))
+        .route("/layouts/:id/rename", post(rename_layout))
+        .route("/layouts/:id/delete", post(delete_layout))
         .route("/design/:layout", get(design))
         .route("/design/format-sample", post(format_sample))
         .route("/design/:layout/model", get(design_model))

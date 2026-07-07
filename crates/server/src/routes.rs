@@ -4,5 +4,6 @@
 
 pub(crate) mod browse;
 pub(crate) mod design;
+pub(crate) mod layouts;
 pub(crate) mod records;
 pub(crate) mod schema;

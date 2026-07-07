@@ -446,6 +446,17 @@ pub(crate) struct SchemaTemplate {
     pub(crate) chrome: Chrome,
 }
 
+/// The Layout Manager surface (#149): a sibling to Layout Mode and the schema
+/// builder that lists, creates, renames, deletes, and reorders every layout
+/// in the solution over the `/layouts/*` API. App-global rather than
+/// per-layout, so it carries no current layout — the Svelte island fetches
+/// the list itself and owns the whole surface.
+#[derive(Template)]
+#[template(path = "layouts.html")]
+pub(crate) struct LayoutsTemplate {
+    pub(crate) chrome: Chrome,
+}
+
 /// Resolve a field object's binding to its (field, field_id, label, value) for the
 /// current record. Interim two-segment resolver: the last dot-path segment is the
 /// field name, matched case-insensitively against `by_name` (lowercased field name

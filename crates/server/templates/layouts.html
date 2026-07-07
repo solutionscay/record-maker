@@ -1,0 +1,17 @@
+{% extends "shell.html" %}
+
+{% block head_extra %}
+{# Built layout-manager styles (Svelte 5 + Vite, served from ui/dist by axum).
+   Present once the frontend is built; harmlessly absent until then. #}
+<link rel="stylesheet" href="/ui/layout-manager.css">
+{% endblock %}
+
+{% block content %}
+{# Mount node for the layout-manager island (#149). The island fetches every
+   layout itself over the `/layouts/*` endpoints and owns the whole surface: a
+   flat, reorderable list with create/rename/delete. #}
+<div id="layouts-root"></div>
+<script type="module" src="/ui/layout-manager.js"></script>
+{% endblock %}
+
+{% block statusbar %}<span>Layouts · create, name, and order</span>{% endblock %}

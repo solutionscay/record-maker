@@ -114,13 +114,15 @@
     .app.has-inspector .content { padding: 0; overflow: hidden; background-color: var(--rm-workspace-bg);
                  background-image: repeating-linear-gradient(0deg, rgba(127,127,127,.06) 0 1px, transparent 1px 6px); }
     .app.has-inspector .content > #layout-editor { height: 100%; }
-    /* Schema builder (#113): a full-width, sidebar-less window (no rail) — the
-       island owns its own tabbed navigation, so the pane is edge-to-edge and
-       fills the height like the editor canvas does. */
+    /* Schema builder (#113) and Layout Manager (#149): full-width, sidebar-less
+       windows (no rail) — each island owns its own navigation/footer, so the
+       pane is edge-to-edge and fills the height like the editor canvas does.
+       Shared class/rule since both are the same shape, just a different
+       mount node. */
     .app.is-schema { grid-template-columns: 1fr;
            grid-template-areas: "topbar" "content" "status"; }
     .app.is-schema .content { padding: 0; overflow: hidden; background: var(--rm-workspace-bg); }
-    .app.is-schema .content > #schema-root { height: 100%; }
+    .app.is-schema .content > #schema-root, .app.is-schema .content > #layouts-root { height: 100%; }
     /* Bottom status strip — collapse toggle + mode + per-view detail. */
     .statusbar { grid-area: status; border-top: .5px solid var(--rm-border); background: var(--rm-toolbar-bg);
                  padding: 6px 12px; font-size: 11.5px; color: var(--rm-text-dim);
@@ -274,7 +276,7 @@
      below and the Svelte islands (mounted into this same document) can reference
      its `<symbol>`s via `<use href="#icon-…">`. No CDN, no runtime fetch. #}
   {% include "_icons.svg" %}
-  <div class="app {% if chrome.mode == "design" %}has-inspector{% endif %}{% if chrome.mode == "schema" %}is-schema{% endif %}">
+  <div class="app {% if chrome.mode == "design" %}has-inspector{% endif %}{% if chrome.mode == "schema" || chrome.mode == "layouts" %}is-schema{% endif %}">
     <header class="topbar">
       <span class="brand"><svg class="icon"><use href="#icon-app"></use></svg>Record Maker</span>
       {% if !chrome.view_tabs.is_empty() %}
@@ -320,9 +322,9 @@
       </div>
     </header>
 
-    {# Schema mode is a full-width, sidebar-less window — the island owns its own
-       tabbed navigation, so no rail is rendered at all. #}
-    {% if chrome.mode != "schema" %}
+    {# Schema and Layouts modes are full-width, sidebar-less windows — each
+       island owns its own navigation, so no rail is rendered at all. #}
+    {% if chrome.mode != "schema" && chrome.mode != "layouts" %}
     <aside class="sidebar">
       <nav class="modes">
         {% match chrome.current_layout %}
@@ -408,9 +410,10 @@
     </aside>
     {% endif %}
 
-    {# Schema mode has its own in-window footer (the Done button); the shared
-       status strip (collapse toggle / mode) would be redundant there. #}
-    {% if chrome.mode != "schema" %}
+    {# Schema and Layouts modes have their own in-window footer (the Done
+       button); the shared status strip (collapse toggle / mode) would be
+       redundant there. #}
+    {% if chrome.mode != "schema" && chrome.mode != "layouts" %}
     <footer class="statusbar">
       <button type="button" class="collapse" title="Collapse / expand the sidebar"
               onclick="document.querySelector('.app').classList.toggle('rail-collapsed')"><svg class="icon"><use href="#icon-collapse"></use></svg></button>
@@ -677,6 +680,13 @@
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'd') {
         e.preventDefault();
         if (MODE !== 'schema') window.location.href = '/schema';
+        return;
+      }
+      // Ctrl/⌘ Shift L — open the Layout Manager (#149). Same stopgap as the
+      // schema-builder binding above; a proper menu entry replaces both later.
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'l') {
+        e.preventDefault();
+        if (MODE !== 'layouts') window.location.href = '/layouts';
         return;
       }
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;

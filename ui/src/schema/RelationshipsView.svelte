@@ -186,18 +186,25 @@
 </script>
 
 <div class="rv">
-  <!-- Crow's-foot marker defs (#143): referenced by id from anywhere in the
-       document via url(#...), so this can live outside Svelte Flow's own
-       <svg> canvas. Fork = "many" (source/FK end); tick pair = "one"
-       (target/referenced end). Neutral gray regardless of hover/selected
-       state, matching the line's own default (unselected) color. -->
+  <!-- Crow's-foot marker defs (#143, reworked #146): referenced by id from
+       anywhere in the document via url(#...), so this can live outside
+       Svelte Flow's own <svg> canvas. Fork = "many" (source/FK end); tick
+       pair = "one" (target/referenced end). userSpaceOnUse keeps the glyphs
+       a fixed size regardless of the path's own stroke-width (which grows on
+       hover/selected) — with the default strokeWidth units, the whole
+       marker would visibly balloon on hover. Neutral gray regardless of
+       hover/selected state, matching the line's own default color. -->
   <svg width="0" height="0" style="position: absolute" aria-hidden="true">
     <defs>
-      <marker id="rm-crowfoot-many" markerWidth="18" markerHeight="16" refX="0" refY="8" orient="auto">
-        <path d="M0,8 L17,1 M0,8 L17,15 M0,8 L17,8" fill="none" stroke="#54585f" stroke-width="1.8" stroke-linecap="round" />
+      <!-- Prongs touch the box at three points (top/mid/bottom) and converge
+           to a single vertex further out along the line — a real fork, not
+           an arrowhead. refX=0 anchors the box-touching side flush against
+           the path's endpoint, so there's no gap between line and box. -->
+      <marker id="rm-crowfoot-many" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="16" refX="0" refY="8" orient="auto">
+        <path d="M0,0 L11,8 M0,16 L11,8 M0,8 L11,8" fill="none" stroke="#54585f" stroke-width="1.4" stroke-linecap="round" />
       </marker>
-      <marker id="rm-crowfoot-one" markerWidth="13" markerHeight="16" refX="12" refY="8" orient="auto">
-        <path d="M4,1 L4,15 M9,1 L9,15" fill="none" stroke="#54585f" stroke-width="1.8" stroke-linecap="round" />
+      <marker id="rm-crowfoot-one" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="13" refX="9" refY="6.5" orient="auto">
+        <path d="M3,0.5 L3,12.5 M7,0.5 L7,12.5" fill="none" stroke="#54585f" stroke-width="1.4" stroke-linecap="round" />
       </marker>
     </defs>
   </svg>

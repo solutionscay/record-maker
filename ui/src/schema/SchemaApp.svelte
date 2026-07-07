@@ -112,7 +112,7 @@
     {:else if tab === 'fields'}
       <FieldGrid {store} onswitch={openTable} onedit={editField} onnew={newField} onnotables={goTables} openFieldId={fieldDrawer?.id ?? null} />
     {:else}
-      <RelationshipsView {store} onnew={newRelationship} onedit={editRelationship} ontable={editTable} onfield={editField} />
+      <RelationshipsView {store} onnew={newRelationship} onedit={editRelationship} ontable={editTable} />
     {/if}
 
     {#if tableDrawerOpen}

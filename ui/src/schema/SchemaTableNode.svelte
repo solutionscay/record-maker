@@ -23,7 +23,6 @@
     hiddenFieldCount: number;
     relationshipCount: number;
     onTable: (id: number) => void;
-    onField: (tableId: number, fieldId: number) => void;
   }
 
   let {
@@ -43,11 +42,6 @@
     event.preventDefault();
     openTable();
   }
-
-  function openField(event: MouseEvent, fieldId: number) {
-    event.stopPropagation();
-    data.onField(data.table.id, fieldId);
-  }
 </script>
 
 <div class="tn" class:selected role="button" tabindex="0" onclick={openTable} onkeydown={onTableKeydown}>
@@ -63,7 +57,12 @@
       <div class="tn-empty">No key fields ({data.hiddenFieldCount} not shown)</div>
     {:else}
       {#each data.fields as field (field.id)}
-        <button type="button" class="tn-field nodrag nopan" onclick={(e) => openField(e, field.id)}>
+        <!-- Purely informational (#148) — stop the click here so it doesn't
+             bubble up into the table box's own onclick and open the table
+             drawer instead. -->
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="tn-field" onclick={(e) => e.stopPropagation()}>
           <Icon name={kindIcon(field.kind)} />
           <span class="tn-field-name">{field.name}</span>
           <span class="tn-kind">{kindLabel(field.kind)}</span>
@@ -82,7 +81,7 @@
           {#if field.fkNames.length > 0}
             <span class="tn-badge tn-badge--fk" title={`References ${field.fkNames.join(', ')}`}>fk</span>
           {/if}
-        </button>
+        </div>
       {/each}
       {#if data.hiddenFieldCount > 0}
         <div class="tn-more">+{data.hiddenFieldCount} more field{data.hiddenFieldCount === 1 ? '' : 's'}</div>
@@ -166,15 +165,7 @@
     align-items: center;
     gap: 6px;
     padding: 0 10px 0 12px;
-    border: 0;
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
     text-align: left;
-  }
-  .tn-field:hover {
-    background: rgba(0, 0, 0, 0.04);
   }
   .tn-field :global(.icon) {
     width: 14px;

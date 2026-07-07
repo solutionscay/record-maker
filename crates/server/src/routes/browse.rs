@@ -31,7 +31,10 @@ pub(crate) async fn index(State(st): State<AppState>) -> impl IntoResponse {
     });
     match landing {
         Some(l) => Redirect::to(&format!("/browse/{}", l.id)).into_response(),
-        None => Html("<p>No layouts yet.</p>".to_string()).into_response(),
+        // Nothing browsable (no tables yet, or every default view disabled) —
+        // send them to the schema builder to create/manage tables rather than
+        // a raw dead-end page (#152).
+        None => Redirect::to("/schema").into_response(),
     }
 }
 

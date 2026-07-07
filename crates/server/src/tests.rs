@@ -1305,6 +1305,139 @@ async fn schema_page_renders_builder_mount_node() {
     );
 }
 
+#[tokio::test]
+async fn layouts_page_renders_manager_mount_node() {
+    let sol = Solution::open_in_memory().unwrap();
+    let state = state_for(sol);
+
+    let (status, html) = get_body(state.clone(), "/layouts").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.contains(r#"id="layouts-root""#),
+        "layouts page mounts the manager island"
+    );
+    assert!(
+        html.contains(r#"src="/ui/layout-manager.js""#),
+        "layouts page loads the layout-manager bundle"
+    );
+
+    let (_, browse) = get_body(state, "/").await;
+    assert!(
+        !browse.contains(r#"id="layouts-root""#),
+        "the layouts island is scoped to /layouts"
+    );
+}
+
+#[tokio::test]
+async fn layout_manager_routes_crud_and_guard_last_layout() {
+    let state = state_for(Solution::open_in_memory().unwrap());
+    let create_table = serde_json::json!({
+        "name": "Contacts",
+        "fields": [{"name": "Name", "kind": "text"}]
+    });
+    let (status, resp) =
+        post_json_body(state.clone(), "/schema/tables", &create_table.to_string()).await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    let table: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let table_id = table["id"].as_i64().unwrap();
+
+    let (status, resp) = get_body(state.clone(), "/layouts/all").await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    let all: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 3, "the default trio");
+    assert_eq!(all[0]["tableName"].as_str(), Some("Contacts"));
+
+    let create = serde_json::json!({"name": "Contact Details", "tableId": table_id, "view": "form"});
+    let (status, resp) = post_json_body(state.clone(), "/layouts", &create.to_string()).await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    let extra: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let extra_id = extra["id"].as_i64().unwrap();
+    assert_eq!(extra["name"].as_str(), Some("Contact Details"));
+    assert_eq!(extra["tableName"].as_str(), Some("Contacts"));
+
+    // Unknown table / bad view are rejected.
+    let (status, _) = post_json_body(
+        state.clone(),
+        "/layouts",
+        &serde_json::json!({"name": "Bad", "tableId": 999_999, "view": "form"}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = post_json_body(
+        state.clone(),
+        "/layouts",
+        &serde_json::json!({"name": "Bad", "tableId": table_id, "view": "nope"}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, resp) = post_json_body(
+        state.clone(),
+        &format!("/layouts/{extra_id}/rename"),
+        r#"{"name":"Details"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert!(resp.contains(r#""name":"Details""#));
+    let (status, _) = post_json_body(state.clone(), "/layouts/999999/rename", r#"{"name":"x"}"#)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Reorder: reverse the full global order and confirm it persists.
+    let (_, resp) = get_body(state.clone(), "/layouts/all").await;
+    let all: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let mut ids: Vec<i64> = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["id"].as_i64().unwrap())
+        .collect();
+    ids.reverse();
+    let (status, resp) = post_json_body(
+        state.clone(),
+        "/layouts/order",
+        &serde_json::json!({"layoutIds": ids}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    let reordered: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let reordered_ids: Vec<i64> = reordered
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(reordered_ids, ids);
+
+    // Deleting the extra layout succeeds — the table's default trio remains.
+    let (status, _) =
+        post_json_body(state.clone(), &format!("/layouts/{extra_id}/delete"), "{}").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) =
+        post_json_body(state.clone(), &format!("/layouts/{extra_id}/delete"), "{}").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // But deleting a table's LAST layout is refused (409, engine guard).
+    let (_, resp) = get_body(state.clone(), "/layouts/all").await;
+    let all: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let contacts_layouts: Vec<i64> = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|l| l["tableId"].as_i64() == Some(table_id))
+        .map(|l| l["id"].as_i64().unwrap())
+        .collect();
+    for id in &contacts_layouts[..contacts_layouts.len() - 1] {
+        let (status, _) =
+            post_json_body(state.clone(), &format!("/layouts/{id}/delete"), "{}").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let last = contacts_layouts.last().unwrap();
+    let (status, resp) =
+        post_json_body(state.clone(), &format!("/layouts/{last}/delete"), "{}").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{resp}");
+}
+
 /// #48 create: placing a shape POSTs `{partId,kind,x,y,w,h,props}`, persists a
 /// `meta_object`, and echoes back its `ObjectView` (with the server-derived
 /// shape_style) so the store can add it without a re-hydrate.

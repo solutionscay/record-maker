@@ -182,7 +182,7 @@ impl Solution {
         // — all in the same transaction, so table + layouts are created atomically.
         // The three start identical but are then designed independently.
         let form_layout_id =
-            crate::layout::generate_default_form(&tx, table_id, name, &field_meta)?;
+            crate::layout::generate_default_form(&tx, table_id, name, name, "form", &field_meta)?;
         crate::layout::clone_layout(&tx, form_layout_id, name, table_id, "list")?;
         crate::layout::clone_layout(&tx, form_layout_id, name, table_id, "table")?;
         tx.commit()?;

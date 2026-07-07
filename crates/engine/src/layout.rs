@@ -49,7 +49,7 @@
 //! - `props` — JSON bag reserved for appearance/style and misc (#49). The
 //!   structural contract does not define its shape; it round-trips opaquely.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use rusqlite::{Connection, Transaction, params};
 
 use crate::Solution;
@@ -67,6 +67,9 @@ pub struct LayoutMeta {
     pub name: String,
     pub table_id: i64,
     pub view: String,
+    /// Order in the flat Layout Manager list (#149), lowest first. Not scoped
+    /// per table — every layout in the solution shares one global order.
+    pub position: i64,
 }
 
 /// The kind of a layout part (band). Determines where the band renders and how
@@ -322,78 +325,159 @@ pub enum RestoreResult {
     IdInUse,
 }
 
+fn layout_meta_from_row(r: &rusqlite::Row) -> rusqlite::Result<LayoutMeta> {
+    Ok(LayoutMeta {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        table_id: r.get(2)?,
+        view: r.get(3)?,
+        position: r.get(4)?,
+    })
+}
+
 impl Solution {
-    /// All layouts, ordered by name.
+    /// All layouts, in the flat Layout Manager order (#149).
     pub fn layouts(&self) -> Result<Vec<LayoutMeta>> {
-        let mut stmt = self
-            .app
-            .prepare("SELECT id, name, table_id, view FROM meta_layout ORDER BY name, id")?;
-        let rows = stmt.query_map([], |r| {
-            Ok(LayoutMeta {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                table_id: r.get(2)?,
-                view: r.get(3)?,
-            })
-        })?;
+        let mut stmt = self.app.prepare(
+            "SELECT id, name, table_id, view, position FROM meta_layout ORDER BY position, id",
+        )?;
+        let rows = stmt.query_map([], layout_meta_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Every layout bound to `table_id`, ordered by id (#57). A table carries one
     /// layout **per view** (form/list/table) — independent design surfaces that
     /// happen to bind the same table — so this returns the per-view siblings.
+    /// Since #149 a table may also carry extra manager-created layouts beyond
+    /// the default trio; those come back too, in id order.
     pub fn layouts_for_table(&self, table_id: i64) -> Result<Vec<LayoutMeta>> {
         let mut stmt = self.app.prepare(
-            "SELECT id, name, table_id, view FROM meta_layout WHERE table_id=?1 ORDER BY id",
+            "SELECT id, name, table_id, view, position FROM meta_layout WHERE table_id=?1 ORDER BY id",
         )?;
-        let rows = stmt.query_map(params![table_id], |r| {
-            Ok(LayoutMeta {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                table_id: r.get(2)?,
-                view: r.get(3)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![table_id], layout_meta_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Look up a single layout by id.
     pub fn layout_by_id(&self, id: i64) -> Result<Option<LayoutMeta>> {
-        let mut stmt = self
-            .app
-            .prepare("SELECT id, name, table_id, view FROM meta_layout WHERE id=?1")?;
-        let mut rows = stmt.query_map(params![id], |r| {
-            Ok(LayoutMeta {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                table_id: r.get(2)?,
-                view: r.get(3)?,
-            })
-        })?;
+        let mut stmt = self.app.prepare(
+            "SELECT id, name, table_id, view, position FROM meta_layout WHERE id=?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], layout_meta_from_row)?;
         match rows.next() {
             Some(r) => Ok(Some(r?)),
             None => Ok(None),
         }
     }
+
+    /// Create a new, blank (field-populated) layout for `table_id` (#149) — the
+    /// Layout Manager's "New" action. Appends at the end of the global flat
+    /// order. `view` must be one of `form`/`list`/`table`.
+    pub fn create_layout(&mut self, table_id: i64, name: &str, view: &str) -> Result<LayoutMeta> {
+        if !matches!(view, "form" | "list" | "table") {
+            bail!("view must be one of form, list, table");
+        }
+        let Some(table) = self.table_by_id(table_id)? else {
+            bail!("no table {table_id}");
+        };
+        let fields: Vec<(i64, String)> = self
+            .fields(table_id)?
+            .into_iter()
+            .map(|f| (f.id, f.name))
+            .collect();
+        let tx = self.app.transaction()?;
+        let position: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM meta_layout",
+            [],
+            |r| r.get(0),
+        )?;
+        let layout_id = generate_default_form(&tx, table_id, name, &table.name, view, &fields)?;
+        tx.execute(
+            "UPDATE meta_layout SET position=?1 WHERE id=?2",
+            params![position, layout_id],
+        )?;
+        tx.commit()?;
+        self.layout_by_id(layout_id)?
+            .ok_or_else(|| anyhow::anyhow!("layout {layout_id} vanished after insert"))
+    }
+
+    /// Rename a layout. `None` if it doesn't exist.
+    pub fn rename_layout(&mut self, id: i64, name: &str) -> Result<Option<LayoutMeta>> {
+        let n = self
+            .app
+            .execute("UPDATE meta_layout SET name=?1 WHERE id=?2", params![name, id])?;
+        if n == 0 {
+            return Ok(None);
+        }
+        self.layout_by_id(id)
+    }
+
+    /// Delete a layout. Refuses to delete a table's last remaining layout — a
+    /// table with zero layouts has no way to be browsed or designed at all.
+    pub fn delete_layout(&mut self, id: i64) -> Result<usize> {
+        let Some(layout) = self.layout_by_id(id)? else {
+            return Ok(0);
+        };
+        if self.layouts_for_table(layout.table_id)?.len() <= 1 {
+            bail!("cannot delete a table's only layout");
+        }
+        Ok(self
+            .app
+            .execute("DELETE FROM meta_layout WHERE id=?1", params![id])?)
+    }
+
+    /// Reorder the flat Layout Manager list (#149): `layout_ids` must include
+    /// every layout in the solution, exactly once.
+    pub fn reorder_layouts(&mut self, layout_ids: &[i64]) -> Result<Vec<LayoutMeta>> {
+        let current = self.layouts()?;
+        if current.len() != layout_ids.len() {
+            bail!("layout order must include every layout exactly once");
+        }
+        for l in &current {
+            if !layout_ids.contains(&l.id) {
+                bail!("layout order must include every layout exactly once");
+            }
+        }
+        for id in layout_ids {
+            if layout_ids.iter().filter(|other| *other == id).count() != 1 {
+                bail!("layout order must not contain duplicates");
+            }
+        }
+        let tx = self.app.transaction()?;
+        for (position, layout_id) in layout_ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE meta_layout SET position=?1 WHERE id=?2",
+                params![position as i64, layout_id],
+            )?;
+        }
+        tx.commit()?;
+        self.layouts()
+    }
 }
 
-/// Create a default Form layout for a freshly-defined table, inside the caller's
-/// transaction (so table + layout are atomic). One meta_layout (view='form'),
-/// header/body/footer meta_parts, and — per field — TWO objects stacked down the
-/// body (#60): a `text` label (its `content` = the field name) and, beside it, a
-/// value `field` object bound `<TableName>.<FieldName>` (the frozen binding
-/// contract). The label is independent: it renders the caption while the field
-/// renders the value only. The label is inserted first so it owns the lower id
-/// (paints behind / reads left-to-right). Returns the new layout id. (#21/#60)
+/// Create a blank, field-populated layout — either the default Form generated
+/// for a freshly-defined table, or (#149) a Layout Manager "New" layout of any
+/// view kind for an existing table — inside the caller's transaction (so it's
+/// atomic with whatever else the caller is doing). One meta_layout row,
+/// header/body/footer meta_parts, and — per field — TWO objects stacked down
+/// the body (#60): a `text` label (its `content` = the field name) and,
+/// beside it, a value `field` object bound `<TableName>.<FieldName>` (the
+/// frozen binding contract) — `table_name` drives the binding regardless of
+/// `layout_name`, which is only the layout's own display name. The label is
+/// independent: it renders the caption while the field renders the value
+/// only. The label is inserted first so it owns the lower id (paints behind /
+/// reads left-to-right). Returns the new layout id. (#21/#60/#149)
 pub(crate) fn generate_default_form(
     tx: &Transaction<'_>,
     table_id: i64,
+    layout_name: &str,
     table_name: &str,
+    view: &str,
     fields: &[(i64, String)],
 ) -> Result<i64> {
     tx.execute(
-        "INSERT INTO meta_layout(name, table_id, view) VALUES (?1, ?2, 'form')",
-        params![table_name, table_id],
+        "INSERT INTO meta_layout(name, table_id, view) VALUES (?1, ?2, ?3)",
+        params![layout_name, table_id, view],
     )?;
     let layout_id = tx.last_insert_rowid();
     tx.execute(
@@ -585,6 +669,96 @@ mod tests {
         let one = s.layout_by_id(ls[0].id).unwrap().unwrap();
         assert_eq!(one.id, ls[0].id);
         assert!(s.layout_by_id(999_999).unwrap().is_none());
+    }
+
+    #[test]
+    fn create_layout_appends_a_named_extra_layout_bound_to_the_right_table() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s
+            .create_table(
+                "Contacts",
+                &[NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                }],
+            )
+            .unwrap();
+
+        let extra = s.create_layout(tid, "Contact Details", "form").unwrap();
+        assert_eq!(extra.name, "Contact Details");
+        assert_eq!(extra.table_id, tid);
+        assert_eq!(extra.view, "form");
+
+        // Bindings use the TABLE's name, not the layout's own display name.
+        let objects: Vec<String> = s
+            .parts(extra.id)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.kind == PartKind::Body)
+            .map(|p| {
+                s.objects(p.id)
+                    .unwrap()
+                    .into_iter()
+                    .filter_map(|o| o.binding)
+                    .collect()
+            })
+            .unwrap();
+        assert_eq!(objects, vec!["Contacts.Name"]);
+
+        // Sits after the table's own default trio in the global flat order.
+        let all = s.layouts().unwrap();
+        assert_eq!(all.last().unwrap().id, extra.id);
+
+        assert!(s.create_layout(tid, "Bad", "nope").is_err());
+        assert!(s.create_layout(999_999, "Bad", "form").is_err());
+    }
+
+    #[test]
+    fn rename_and_delete_layout_guard_a_tables_last_layout() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s
+            .create_table("Contacts", &[])
+            .unwrap();
+        let extra = s.create_layout(tid, "Contact Details", "list").unwrap();
+
+        let renamed = s.rename_layout(extra.id, "Details").unwrap().unwrap();
+        assert_eq!(renamed.name, "Details");
+        assert!(s.rename_layout(999_999, "Nope").unwrap().is_none());
+
+        // Deleting the extra layout is fine — the table still has its default trio.
+        assert_eq!(s.delete_layout(extra.id).unwrap(), 1);
+        assert!(s.layout_by_id(extra.id).unwrap().is_none());
+        assert_eq!(s.delete_layout(extra.id).unwrap(), 0);
+
+        // But a table's LAST layout refuses to delete.
+        let siblings = s.layouts_for_table(tid).unwrap();
+        for l in &siblings[..siblings.len() - 1] {
+            s.delete_layout(l.id).unwrap();
+        }
+        let last = s.layouts_for_table(tid).unwrap();
+        assert_eq!(last.len(), 1);
+        assert!(s.delete_layout(last[0].id).is_err());
+    }
+
+    #[test]
+    fn reorder_layouts_persists_global_order_and_validates_the_set() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s.create_table("Contacts", &[]).unwrap();
+        let a = s.create_layout(tid, "A", "form").unwrap();
+        let b = s.create_layout(tid, "B", "form").unwrap();
+
+        let mut ids: Vec<i64> = s.layouts().unwrap().iter().map(|l| l.id).collect();
+        assert_eq!(*ids.last().unwrap(), b.id);
+        ids.reverse();
+        let reordered = s.reorder_layouts(&ids).unwrap();
+        assert_eq!(
+            reordered.iter().map(|l| l.id).collect::<Vec<_>>(),
+            ids
+        );
+
+        // Missing/duplicate ids are rejected.
+        assert!(s.reorder_layouts(&[a.id]).is_err());
+        assert!(s.reorder_layouts(&[a.id, a.id, b.id]).is_err());
     }
 
     #[test]

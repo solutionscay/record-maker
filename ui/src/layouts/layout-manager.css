@@ -1,0 +1,82 @@
+/* The shared design-system layer (#132), pulled in via CSS @import so Vite
+ * inlines it into THIS entry's layout-manager.css — a JS-side import would
+ * hoist the shared CSS into a common chunk whose stylesheet the fixed-name
+ * askama templates never link. Mirrors schema.css, which solves the same
+ * per-entry-bundle constraint the same way. */
+@import '../shared/tokens.css';
+@import '../shared/controls.css';
+
+/* Same list-view vocabulary as the schema builder (#113/#132) — the Layout
+ * Manager is structurally a sibling of the Tables tab (flat list, New button,
+ * row actions), so it reuses the identical `.sc-*` recipe/values rather than
+ * inventing its own scale. Duplicated (not shared via JS import) for the same
+ * reason schema.css's own copy is: each Vite entry needs its own bundled CSS
+ * file, and this block is small and stable. */
+#layouts-root {
+  --sc-row-h: 40px;
+  --sc-head-h: 36px;
+  --sc-ctl-h: 28px;
+  --sc-radius: 0;
+  --sc-hover: #f0f0f2;
+  --sc-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --sc-ring: 0 0 0 3px var(--rm-accent-soft);
+}
+
+.sc-micro {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--rm-text-dim);
+}
+.sc-hint {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--rm-text-dim);
+}
+.sc-count {
+  font-size: 12px;
+  color: var(--rm-text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sc-viewhead {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--sc-head-h);
+  padding: 0 18px;
+  border-bottom: 0.5px solid var(--rm-border);
+  background: var(--rm-toolbar-bg);
+}
+
+.sc-colhead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: var(--sc-head-h);
+  border-bottom: 0.5px solid var(--rm-border);
+  background: var(--rm-toolbar-bg);
+}
+
+.sc-note {
+  margin: 0;
+  padding: 16px 18px;
+}
+
+.sc-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 48px 24px;
+  text-align: center;
+}
+.sc-empty-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--rm-text);
+}

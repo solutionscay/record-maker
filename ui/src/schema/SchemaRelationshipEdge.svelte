@@ -14,6 +14,7 @@
     targetY,
     sourcePosition = Position.Right,
     targetPosition = Position.Left,
+    markerStart,
     markerEnd,
     data,
     selected = false,
@@ -24,6 +25,7 @@
     targetY: number;
     sourcePosition?: Position;
     targetPosition?: Position;
+    markerStart?: string;
     markerEnd?: string;
     data?: SchemaRelationshipEdgeData;
     selected?: boolean;
@@ -50,7 +52,7 @@
   }
 </script>
 
-<BaseEdge path={edgePath} {markerEnd} class={`re-path${selected ? ' selected' : ''}`} />
+<BaseEdge path={edgePath} {markerStart} {markerEnd} class={`re-path${selected ? ' selected' : ''}`} />
 <EdgeLabel x={labelX} y={labelY} transparent>
   <button type="button" class="re-label nodrag nopan" onclick={open}>
     {data?.label ?? 'relationship'}

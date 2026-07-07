@@ -167,7 +167,7 @@
         target: `table-${rel.toTable}`,
         sourceHandle: `source-${sourceSide}-${rel.fromField}`,
         targetHandle: `target-${targetSide}-${rel.toField}`,
-        data: { relationshipId: rel.id, label: `${rel.name} - many to one`, onOpen: onedit },
+        data: { relationshipId: rel.id, name: rel.name },
         // Crow's-foot notation (#143): a fork at the source (the FK/"many"
         // side) and a tick at the target (the referenced/"one" side),
         // defined once as custom SVG markers below. Svelte Flow wraps these
@@ -193,11 +193,11 @@
        state, matching the line's own default (unselected) color. -->
   <svg width="0" height="0" style="position: absolute" aria-hidden="true">
     <defs>
-      <marker id="rm-crowfoot-many" markerWidth="14" markerHeight="12" refX="0" refY="6" orient="auto">
-        <path d="M0,6 L13,0.5 M0,6 L13,11.5 M0,6 L13,6" fill="none" stroke="#60646c" stroke-width="1.4" stroke-linecap="round" />
+      <marker id="rm-crowfoot-many" markerWidth="18" markerHeight="16" refX="0" refY="8" orient="auto">
+        <path d="M0,8 L17,1 M0,8 L17,15 M0,8 L17,8" fill="none" stroke="#54585f" stroke-width="1.8" stroke-linecap="round" />
       </marker>
-      <marker id="rm-crowfoot-one" markerWidth="10" markerHeight="12" refX="9" refY="6" orient="auto">
-        <path d="M3,0.5 L3,11.5 M7,0.5 L7,11.5" fill="none" stroke="#60646c" stroke-width="1.4" stroke-linecap="round" />
+      <marker id="rm-crowfoot-one" markerWidth="13" markerHeight="16" refX="12" refY="8" orient="auto">
+        <path d="M4,1 L4,15 M9,1 L9,15" fill="none" stroke="#54585f" stroke-width="1.8" stroke-linecap="round" />
       </marker>
     </defs>
   </svg>

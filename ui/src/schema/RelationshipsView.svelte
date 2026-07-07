@@ -71,6 +71,42 @@
     Math.max(340, ...store.tables.map((t) => estimatedNodeWidth(t) + 70)),
   );
 
+  // Grid position is otherwise blind to relationships: two related tables can
+  // land in different rows purely because of creation order, forcing their
+  // edge into a long detour through left/right-only handles instead of a
+  // direct line (#144). Reorder the tables fed into the grid (layout only —
+  // the Tables tab keeps its own order) via BFS over the relationship graph,
+  // so directly-related tables end up adjacent in the linear sequence and
+  // usually land in the same row. Doesn't fully solve hub-shaped graphs with
+  // more neighbors than fit in one row, but fixes the common case.
+  const layoutTables = $derived.by<TableView[]>(() => {
+    const byId = new Map(store.tables.map((t) => [t.id, t]));
+    const neighbors = new Map<number, Set<number>>(store.tables.map((t) => [t.id, new Set<number>()]));
+    for (const rel of store.relationships) {
+      if (!neighbors.has(rel.fromTable) || !neighbors.has(rel.toTable)) continue;
+      neighbors.get(rel.fromTable)!.add(rel.toTable);
+      neighbors.get(rel.toTable)!.add(rel.fromTable);
+    }
+    const visited = new Set<number>();
+    const ordered: TableView[] = [];
+    for (const start of store.tables) {
+      if (visited.has(start.id)) continue;
+      const queue = [start.id];
+      visited.add(start.id);
+      while (queue.length > 0) {
+        const id = queue.shift()!;
+        ordered.push(byId.get(id)!);
+        for (const neighborId of neighbors.get(id) ?? []) {
+          if (!visited.has(neighborId)) {
+            visited.add(neighborId);
+            queue.push(neighborId);
+          }
+        }
+      }
+    }
+    return ordered;
+  });
+
   function nodePosition(index: number): { x: number; y: number } {
     const columns = Math.max(1, Math.min(3, Math.ceil(Math.sqrt(Math.max(1, store.tables.length)))));
     return {
@@ -80,7 +116,7 @@
   }
 
   function nodeX(tableId: number): number {
-    const index = store.tables.findIndex((t) => t.id === tableId);
+    const index = layoutTables.findIndex((t) => t.id === tableId);
     return index === -1 ? 0 : nodePosition(index).x;
   }
 
@@ -94,7 +130,7 @@
   }
 
   const nodes = $derived.by<SchemaNode[]>(() =>
-    store.tables.map((table, index) => {
+    layoutTables.map((table, index) => {
       const totalFieldCount = (store.fieldsByTable[table.id] ?? []).length;
       const fields = keyFieldRows(table);
       return {

@@ -11,7 +11,7 @@ use axum::{
 
 use crate::viewmodel::{
     build_bands, build_form_record, build_list, canonical_view, clamp_rec, flipbook,
-    layout_field_formats, layout_parts_with_objects, layout_stepper, layout_table, view_label,
+    layout_parts_with_objects, layout_stepper, layout_table, table_body_columns, view_label,
     CellView, Chrome, DesignTemplate, FieldView, FormTemplate, LayoutsTemplate, ListTemplate,
     RecordView, SchemaTemplate, TableTemplate,
 };
@@ -99,10 +99,11 @@ pub(crate) async fn browse(
         }
         _ => {
             let fields = sol.fields(table.id).unwrap();
-            let records = sol.list_records(&table, &fields).unwrap();
-            // One parts+objects fetch feeds both the column formats and the bands.
+            // One parts+objects fetch feeds both the placed columns and the bands.
             let parts = layout_parts_with_objects(&sol, layout_id);
-            let formats = layout_field_formats(&parts, &fields);
+            let columns = table_body_columns(&parts, &fields);
+            let column_fields = columns.iter().map(|c| c.field.clone()).collect::<Vec<_>>();
+            let records = sol.list_records(&table, &column_fields).unwrap();
             let (header, footer) = build_bands(&parts);
             let tmpl = TableTemplate {
                 chrome,
@@ -110,25 +111,26 @@ pub(crate) async fn browse(
                 table: table.name.clone(),
                 header,
                 footer,
-                fields: fields
+                fields: columns
                     .iter()
-                    .map(|f| FieldView {
-                        name: f.name.clone(),
+                    .map(|c| FieldView {
+                        name: c.field.name.clone(),
                     })
                     .collect(),
                 records: records
                     .into_iter()
                     .map(|r| RecordView {
                         id: r.id,
-                        cells: fields
+                        cells: columns
                             .iter()
                             .zip(r.cells)
-                            .map(|(f, value)| {
+                            .map(|(c, value)| {
                                 // Format the DISPLAY value only; the input still
                                 // commits the raw `value` (see _band controller).
-                                let (display, style) = match formats.get(&f.id) {
+                                let (display, style) = match c.format.as_ref() {
                                     Some(spec) => {
-                                        let fmt = format::format_value(&value, Some(spec), f.kind);
+                                        let fmt =
+                                            format::format_value(&value, Some(spec), c.field.kind);
                                         let style = fmt
                                             .color
                                             .map(|c| format!("color:{c};"))
@@ -138,7 +140,7 @@ pub(crate) async fn browse(
                                     None => (value.clone(), String::new()),
                                 };
                                 CellView {
-                                    field_id: f.id,
+                                    field_id: c.field.id,
                                     value,
                                     display,
                                     style,

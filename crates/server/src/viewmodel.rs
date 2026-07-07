@@ -3,7 +3,7 @@
 //! record values into them. Shared by the Browse pages and the Layout-Mode
 //! design model (#44 parity contract).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use askama::Template;
 use axum::Json;
@@ -429,6 +429,12 @@ pub(crate) struct ListRow {
 
 pub(crate) struct FieldView {
     pub(crate) name: String,
+}
+
+/// One Table-view column derived from a placed body field object.
+pub(crate) struct TableColumn {
+    pub(crate) field: FieldMeta,
+    pub(crate) format: Option<serde_json::Value>,
 }
 
 pub(crate) struct RecordView {
@@ -940,36 +946,59 @@ pub(crate) fn build_list(
     (header, rows, footer)
 }
 
-/// Map each table column to its value-format bag (the `format` sub-object of a
-/// field object's props) drawn from the layout's prefetched parts+objects
-/// ([`layout_parts_with_objects`]). Table columns are field-derived, so a column
-/// formats iff the layout holds a field object bound to it that carries a
-/// `format` bag; later objects win on a duplicate binding. Form/List format
-/// per-object via [`object_view`]; this brings Table to parity.
-pub(crate) fn layout_field_formats(
+/// Project Table Browse columns from field objects placed in Body parts. Schema
+/// fields that are not placed on the Table layout are intentionally omitted; the
+/// layout body is the source of truth for Table Browse's grid. Duplicate bindings
+/// collapse to the first object in visual column order.
+pub(crate) fn table_body_columns(
     parts: &[(PartMeta, Vec<ObjectMeta>)],
     fields: &[FieldMeta],
-) -> HashMap<i64, serde_json::Value> {
-    let by_name: HashMap<String, i64> = fields
+) -> Vec<TableColumn> {
+    let by_name: HashMap<String, usize> = fields
         .iter()
-        .map(|f| (f.name.to_lowercase(), f.id))
+        .enumerate()
+        .map(|(i, f)| (f.name.to_lowercase(), i))
         .collect();
-    let mut map = HashMap::new();
-    for (_p, objects) in parts {
+    let mut candidates = Vec::new();
+    for (p, objects) in parts {
+        if p.kind != PartKind::Body {
+            continue;
+        }
         for o in objects {
+            if o.kind != ObjectKind::Field {
+                continue;
+            }
             let Some(binding) = o.binding.as_deref() else {
                 continue;
             };
             let seg = binding.rsplit('.').next().unwrap_or(binding).to_lowercase();
-            let Some(&fid) = by_name.get(&seg) else {
+            let Some(&idx) = by_name.get(&seg) else {
                 continue;
             };
-            if let Some(fmt) =
-                parse_props(o.props.as_deref()).and_then(|v| v.get("format").cloned())
-            {
-                map.insert(fid, fmt);
-            }
+            let format = parse_props(o.props.as_deref()).and_then(|v| v.get("format").cloned());
+            candidates.push((
+                o.x,
+                o.y,
+                o.z,
+                o.id,
+                TableColumn {
+                    field: fields[idx].clone(),
+                    format,
+                },
+            ));
         }
     }
-    map
+    candidates.sort_by_key(|(x, y, z, id, _)| (*x, *y, *z, *id));
+
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .filter_map(|(_, _, _, _, column)| {
+            if seen.insert(column.field.id) {
+                Some(column)
+            } else {
+                None
+            }
+        })
+        .collect()
 }

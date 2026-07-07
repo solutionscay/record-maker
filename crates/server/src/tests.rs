@@ -1008,6 +1008,71 @@ async fn table_view_renders_header_and_footer_bands() {
     );
 }
 
+#[tokio::test]
+async fn table_view_grid_uses_only_placed_body_fields() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    sol.create_table(
+        "Customers",
+        &[
+            NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            },
+            NewField {
+                name: "Email".into(),
+                kind: FieldKind::Text,
+            },
+            NewField {
+                name: "City".into(),
+                kind: FieldKind::Text,
+            },
+        ],
+    )
+    .unwrap();
+    let table = sol.table_by_name("Customers").unwrap().unwrap();
+    let fields = sol.fields(table.id).unwrap();
+    sol.insert_record(
+        &table,
+        &[
+            (&fields[0], "Ada".into()),
+            (&fields[1], "ada@example.com".into()),
+            (&fields[2], "London".into()),
+        ],
+    )
+    .unwrap();
+    let table_l = sol
+        .layouts_for_table(table.id)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.view == "table")
+        .unwrap()
+        .id;
+    let body = body_part(&sol, table_l);
+
+    sol.app
+        .execute(
+            &format!(
+                "DELETE FROM meta_object WHERE part_id={} AND binding='Customers.Email'",
+                body.id
+            ),
+            [],
+        )
+        .unwrap();
+
+    let (status, html) = get_body(state_for(sol), &format!("/browse/{table_l}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("<th>Name</th>"), "{html}");
+    assert!(html.contains("<th>City</th>"), "{html}");
+    assert!(!html.contains("<th>Email</th>"), "{html}");
+    assert!(html.contains(r#"name="f"#), "editable cells still render");
+    assert!(html.contains("Ada"), "{html}");
+    assert!(html.contains("London"), "{html}");
+    assert!(
+        !html.contains("ada@example.com"),
+        "unplaced field value must not leak into table grid\n{html}"
+    );
+}
+
 /// #57 Layout-mode chrome: the view toggle stays (switching which view you
 /// DESIGN, via /design/ siblings) and the pagination control is repurposed to
 /// step layouts; record actions are Browse-only.

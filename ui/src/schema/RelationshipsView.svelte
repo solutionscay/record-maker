@@ -154,9 +154,10 @@
     store.relationships.filter(validRelationship).map((rel) => {
       // The source table's handle must face toward the target table (and vice
       // versa) or Svelte Flow's smooth-step router loops the path around both
-      // boxes instead of connecting them directly (#139). Each field carries a
-      // handle on both sides (SchemaTableNode), so pick left/right per edge
-      // from where the two tables actually land in the grid.
+      // boxes instead of connecting them directly (#139). Each table carries
+      // one centered handle per side (SchemaTableNode, #147), so pick
+      // left/right per edge from where the two tables actually land in the
+      // grid.
       const fromOnLeft = nodeX(rel.fromTable) <= nodeX(rel.toTable);
       const sourceSide = fromOnLeft ? 'right' : 'left';
       const targetSide = fromOnLeft ? 'left' : 'right';
@@ -165,8 +166,8 @@
         type: 'schemaRelationship',
         source: `table-${rel.fromTable}`,
         target: `table-${rel.toTable}`,
-        sourceHandle: `source-${sourceSide}-${rel.fromField}`,
-        targetHandle: `target-${targetSide}-${rel.toField}`,
+        sourceHandle: `source-${sourceSide}`,
+        targetHandle: `target-${targetSide}`,
         data: { relationshipId: rel.id, name: rel.name },
         // Crow's-foot notation (#143): a fork at the source (the FK/"many"
         // side) and a tick at the target (the referenced/"one" side),

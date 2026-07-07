@@ -26,9 +26,6 @@
     onField: (tableId: number, fieldId: number) => void;
   }
 
-  const rowTop = 52;
-  const rowHeight = 28;
-
   let {
     data,
     selected = false,
@@ -36,10 +33,6 @@
     data: SchemaTableNodeData;
     selected?: boolean;
   } = $props();
-
-  function handleTop(index: number): string {
-    return `${rowTop + index * rowHeight + rowHeight / 2}px`;
-  }
 
   function openTable() {
     data.onTable(data.table.id);
@@ -69,7 +62,7 @@
     {:else if data.fields.length === 0}
       <div class="tn-empty">No key fields ({data.hiddenFieldCount} not shown)</div>
     {:else}
-      {#each data.fields as field, index (field.id)}
+      {#each data.fields as field (field.id)}
         <button type="button" class="tn-field nodrag nopan" onclick={(e) => openField(e, field.id)}>
           <Icon name={kindIcon(field.kind)} />
           <span class="tn-field-name">{field.name}</span>
@@ -90,46 +83,23 @@
             <span class="tn-badge tn-badge--fk" title={`References ${field.fkNames.join(', ')}`}>fk</span>
           {/if}
         </button>
-        <!-- Both sides carry a target+target and source+target handle pair (#139)
-             so an edge can attach to whichever side actually faces the other
-             table, instead of being fixed to target-left/source-right
-             regardless of layout. Paint order keeps the left dot reading
-             blue (target) and the right dot green (source), matching the
-             original single-handle-per-side look. -->
-        <Handle
-          type="source"
-          id={`source-left-${field.id}`}
-          position={Position.Left}
-          class="tn-handle tn-handle--source"
-          style={`top: ${handleTop(index)}`}
-        />
-        <Handle
-          type="target"
-          id={`target-left-${field.id}`}
-          position={Position.Left}
-          class="tn-handle tn-handle--target"
-          style={`top: ${handleTop(index)}`}
-        />
-        <Handle
-          type="target"
-          id={`target-right-${field.id}`}
-          position={Position.Right}
-          class="tn-handle tn-handle--target"
-          style={`top: ${handleTop(index)}`}
-        />
-        <Handle
-          type="source"
-          id={`source-right-${field.id}`}
-          position={Position.Right}
-          class="tn-handle tn-handle--source"
-          style={`top: ${handleTop(index)}`}
-        />
       {/each}
       {#if data.hiddenFieldCount > 0}
         <div class="tn-more">+{data.hiddenFieldCount} more field{data.hiddenFieldCount === 1 ? '' : 's'}</div>
       {/if}
     {/if}
   </div>
+  <!-- One handle quartet per box, not per field row (#147) — a relationship
+       connects at the vertical center of the table regardless of which field
+       it references, like a classic ER diagram, instead of jogging to
+       whichever row the field happens to land on. Both sides carry a
+       target+source pair (#139) so an edge can attach to whichever side
+       actually faces the other table. No `top` override: Svelte Flow centers
+       Left/Right handles vertically by default. -->
+  <Handle type="source" id="source-left" position={Position.Left} class="tn-handle tn-handle--source" />
+  <Handle type="target" id="target-left" position={Position.Left} class="tn-handle tn-handle--target" />
+  <Handle type="target" id="target-right" position={Position.Right} class="tn-handle tn-handle--target" />
+  <Handle type="source" id="source-right" position={Position.Right} class="tn-handle tn-handle--source" />
 </div>
 
 <style>

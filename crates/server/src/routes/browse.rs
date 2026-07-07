@@ -17,16 +17,19 @@ use crate::viewmodel::{
 };
 use crate::{format, not_found, AppState};
 
-/// Home → the first table's Form Browse view (the Form layout is the canonical
-/// landing surface now that each view is its own layout, #57).
+/// Home → the first enabled default Browse layout, preferring Form (#57/#151).
+/// Keyed off "enabled default" rather than the Form view specifically, so
+/// disabling a table's Form view doesn't strand the home redirect.
 pub(crate) async fn index(State(st): State<AppState>) -> impl IntoResponse {
     let sol = st.sol.lock().unwrap();
-    match sol
-        .layouts()
-        .unwrap()
-        .into_iter()
-        .find(|l| l.view == "form")
-    {
+    let layouts = sol.layouts().unwrap();
+    // Prefer Form, then List, then Table, among enabled defaults.
+    let landing = ["form", "list", "table"].iter().find_map(|&v| {
+        layouts
+            .iter()
+            .find(|l| l.is_default && l.enabled && l.view == v)
+    });
+    match landing {
         Some(l) => Redirect::to(&format!("/browse/{}", l.id)).into_response(),
         None => Html("<p>No layouts yet.</p>".to_string()).into_response(),
     }

@@ -12,6 +12,8 @@ export interface LayoutManagerView {
   tableName: string;
   view: string;
   position: number;
+  isDefault: boolean;
+  enabled: boolean;
 }
 
 export interface TableOption {
@@ -31,6 +33,9 @@ export const createLayout = (
 
 export const renameLayout = (id: number, name: string): Promise<LayoutManagerView> =>
   postJson(`/layouts/${id}/rename`, { name });
+
+export const setLayoutEnabled = (id: number, enabled: boolean): Promise<LayoutManagerView> =>
+  postJson(`/layouts/${id}/enabled`, { enabled });
 
 export const deleteLayout = (id: number): Promise<void> => postVoid(`/layouts/${id}/delete`);
 

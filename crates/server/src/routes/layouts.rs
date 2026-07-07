@@ -20,6 +20,8 @@ pub(crate) struct LayoutManagerView {
     table_name: String,
     view: String,
     position: i64,
+    is_default: bool,
+    enabled: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -33,6 +35,11 @@ pub(crate) struct CreateLayoutBody {
 #[derive(serde::Deserialize)]
 pub(crate) struct RenameLayoutBody {
     name: String,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct SetEnabledBody {
+    enabled: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -55,6 +62,8 @@ fn layout_manager_view(sol: &record_maker_engine::Solution, l: LayoutMeta) -> La
         table_name,
         view: l.view,
         position: l.position,
+        is_default: l.is_default,
+        enabled: l.enabled,
     }
 }
 
@@ -86,6 +95,18 @@ pub(crate) async fn rename_layout(
     let mut sol = st.sol.lock().unwrap();
     let layout = sol
         .rename_layout(id, &body.name)?
+        .ok_or_else(AppError::not_found)?;
+    Ok(Json(layout_manager_view(&sol, layout)))
+}
+
+pub(crate) async fn set_layout_enabled(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<SetEnabledBody>,
+) -> AppResult<Json<LayoutManagerView>> {
+    let mut sol = st.sol.lock().unwrap();
+    let layout = sol
+        .set_layout_enabled(id, body.enabled)?
         .ok_or_else(AppError::not_found)?;
     Ok(Json(layout_manager_view(&sol, layout)))
 }

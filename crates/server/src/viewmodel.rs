@@ -114,6 +114,18 @@ fn layouts_for_table_in(layouts: &[LayoutMeta], table_id: i64) -> Vec<&LayoutMet
     siblings
 }
 
+/// The layout a table lands on from the sidebar picker (#151): its enabled
+/// default view, preferring Form, then List, then Table. `None` if the table
+/// has no enabled default (so it drops out of the picker rather than pointing
+/// at a dead layout). Custom layouts are never landing handles.
+fn landing_layout(layouts: &[LayoutMeta], table_id: i64) -> Option<&LayoutMeta> {
+    VIEWS.iter().find_map(|&v| {
+        layouts
+            .iter()
+            .find(|l| l.table_id == table_id && l.is_default && l.enabled && l.view == v)
+    })
+}
+
 /// Build the Layout-mode stepper: prev/next steps through the **logical layouts**
 /// (one per table, in picker order) while holding the current view, so the
 /// designer flips between layouts the way the record stepper flips records (#57).
@@ -184,9 +196,9 @@ pub(crate) fn view_label(view: &str) -> &'static str {
 
 impl Chrome {
     /// Build the shared chrome. `current` is the layout in focus (its view + table
-    /// drive the toggle and picker). Per #57 a table has one layout **per view**,
-    /// so the view toggle switches among sibling layout ids and the picker lists
-    /// one entry per table (its Form layout is the canonical handle).
+    /// drive the toggle and picker). The picker lists one entry per table (an
+    /// enabled default layout is the canonical handle, #151), and the view toggle
+    /// switches among that table's enabled default view siblings.
     pub(crate) fn build(sol: &Solution, mode: &'static str, current: Option<&LayoutMeta>) -> Self {
         Self::build_with_layouts(&sol.layouts().unwrap_or_default(), mode, current)
     }
@@ -199,29 +211,42 @@ impl Chrome {
         current: Option<&LayoutMeta>,
     ) -> Self {
         let current_table = current.map(|c| c.table_id);
-        let layouts = all
-            .iter()
-            .filter(|l| l.view == "form")
-            .map(|l| LayoutLink {
-                selected: current_table == Some(l.table_id),
-                id: l.id,
-                name: l.name.clone(),
-            })
-            .collect();
-        // The view toggle switches among the current table's per-view sibling
-        // layouts — each view is its own layout id now. It stays in the current
-        // mode, so Layout mode can design each view (Browse browses each).
+        // Picker: one entry per table that still has an enabled default view
+        // (#151). Prefer Form as the landing handle, else the first enabled
+        // default in view order — so a table never drops out of the picker just
+        // because its Form view got disabled (or, pre-#151, deleted).
+        let mut seen_tables: Vec<i64> = Vec::new();
+        let mut layouts: Vec<LayoutLink> = Vec::new();
+        for l in all {
+            if seen_tables.contains(&l.table_id) {
+                continue;
+            }
+            seen_tables.push(l.table_id);
+            if let Some(land) = landing_layout(all, l.table_id) {
+                layouts.push(LayoutLink {
+                    selected: current_table == Some(l.table_id),
+                    id: land.id,
+                    name: land.name.clone(),
+                });
+            }
+        }
+        // The view toggle switches among the current table's enabled default view
+        // siblings only — disabled views and custom layouts never appear as tabs
+        // (#151). It stays in the current mode, so Layout mode designs each view.
         let view_tabs = match current {
             Some(cur) => {
                 let siblings = layouts_for_table_in(all, cur.table_id);
                 VIEWS
                     .iter()
                     .filter_map(|&v| {
-                        siblings.iter().find(|l| l.view == v).map(|l| ViewTab {
-                            label: view_label(v),
-                            href: format!("/{mode}/{}", l.id),
-                            active: cur.view == v,
-                        })
+                        siblings
+                            .iter()
+                            .find(|l| l.view == v && l.is_default && l.enabled)
+                            .map(|l| ViewTab {
+                                label: view_label(v),
+                                href: format!("/{mode}/{}", l.id),
+                                active: cur.view == v,
+                            })
                     })
                     .collect()
             }

@@ -1522,6 +1522,22 @@ async fn disabling_form_falls_through_to_next_enabled_default() {
     assert!(html.contains("Contacts"), "picker still lists the table");
 }
 
+/// #152: with no browsable layout, home redirects to the schema builder rather
+/// than dead-ending on raw HTML.
+#[tokio::test]
+async fn home_redirects_to_schema_when_nothing_browsable() {
+    use axum::http::Request;
+    use tower::ServiceExt;
+    // A brand-new in-memory solution has no tables/layouts at all.
+    let state = state_for(Solution::open_in_memory().unwrap());
+    let resp = app(state)
+        .oneshot(Request::builder().uri("/").body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(resp.status().is_redirection());
+    assert_eq!(resp.headers().get("location").unwrap().to_str().unwrap(), "/schema");
+}
+
 /// #48 create: placing a shape POSTs `{partId,kind,x,y,w,h,props}`, persists a
 /// `meta_object`, and echoes back its `ObjectView` (with the server-derived
 /// shape_style) so the store can add it without a re-hydrate.

@@ -17,7 +17,10 @@
 
   export interface SchemaTableNodeData extends Record<string, unknown> {
     table: TableView;
+    /** Only primary/FK/referenced fields — see RelationshipsView's keyFieldRows (#142). */
     fields: SchemaGraphField[];
+    /** Count of this table's fields left out of `fields` because they aren't keys. */
+    hiddenFieldCount: number;
     relationshipCount: number;
     onTable: (id: number) => void;
     onField: (tableId: number, fieldId: number) => void;
@@ -61,8 +64,10 @@
   </header>
 
   <div class="tn-fields">
-    {#if data.fields.length === 0}
+    {#if data.fields.length === 0 && data.hiddenFieldCount === 0}
       <div class="tn-empty">No fields</div>
+    {:else if data.fields.length === 0}
+      <div class="tn-empty">No key fields ({data.hiddenFieldCount} not shown)</div>
     {:else}
       {#each data.fields as field, index (field.id)}
         <button type="button" class="tn-field nodrag nopan" onclick={(e) => openField(e, field.id)}>
@@ -120,6 +125,9 @@
           style={`top: ${handleTop(index)}`}
         />
       {/each}
+      {#if data.hiddenFieldCount > 0}
+        <div class="tn-more">+{data.hiddenFieldCount} more field{data.hiddenFieldCount === 1 ? '' : 's'}</div>
+      {/if}
     {/if}
   </div>
 </div>
@@ -250,6 +258,14 @@
     align-items: center;
     padding: 0 12px;
     font-size: 11.5px;
+    color: var(--rm-text-dim);
+  }
+  .tn-more {
+    height: 24px;
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    font-size: 11px;
     color: var(--rm-text-dim);
   }
   :global(.svelte-flow__handle.tn-handle) {

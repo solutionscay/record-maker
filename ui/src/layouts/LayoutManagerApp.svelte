@@ -81,6 +81,15 @@
     newOpen = false;
   }
 
+  // Every table auto-generates a Form/List/Table trio (#57) sharing the
+  // table's own name, so without this label a table's default layouts read
+  // as meaningless identical duplicate rows (#150).
+  function viewLabel(view: string): string {
+    if (view === 'form') return 'Form';
+    if (view === 'list') return 'List';
+    return 'Table';
+  }
+
   // ── drag-to-reorder ──────────────────────────────────────────────────────
   function onDragStart(id: number, e: DragEvent) {
     dragId = id;
@@ -147,6 +156,7 @@
       <div class="lm-colhead sc-colhead">
         <span aria-hidden="true"></span>
         <span class="sc-micro">Layout Name</span>
+        <span class="sc-micro">View</span>
         <span class="sc-micro">Associated Table</span>
         <span aria-hidden="true"></span>
       </div>
@@ -178,6 +188,7 @@
               {l.name}
             </button>
           {/if}
+          <span class="lm-view">{viewLabel(l.view)}</span>
           <span class="lm-table">{l.tableName}</span>
           <span class="lm-actions">
             <button
@@ -240,7 +251,7 @@
   .lm-colhead,
   .lm-row {
     display: grid;
-    grid-template-columns: 24px minmax(0, 1.4fr) minmax(0, 1.4fr) 68px;
+    grid-template-columns: 24px minmax(0, 1.4fr) 72px minmax(0, 1.4fr) 68px;
     align-items: center;
     gap: 12px;
     padding: 0 12px 0 18px;
@@ -286,6 +297,19 @@
   }
   .lm-rename {
     min-width: 0;
+  }
+  .lm-view {
+    justify-self: start;
+    height: 16px;
+    padding: 1px 6px 0;
+    border-radius: 4px;
+    background: rgba(10, 132, 255, 0.12);
+    color: var(--rm-accent);
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    line-height: 15px;
+    white-space: nowrap;
   }
   .lm-table {
     min-width: 0;

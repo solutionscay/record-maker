@@ -22,13 +22,11 @@
     onnew,
     onedit,
     ontable,
-    onfield,
   }: {
     store: SchemaStore;
     onnew: () => void;
     onedit: (id: number) => void;
     ontable: (id: number) => void;
-    onfield: (id: number, tableId?: number) => void;
   } = $props();
 
   const canCreate = $derived(store.tables.some((t) => (store.fieldsByTable[t.id] ?? []).length > 0));
@@ -143,7 +141,6 @@
           hiddenFieldCount: totalFieldCount - fields.length,
           relationshipCount: relationshipCount(table.id),
           onTable: ontable,
-          onField: (tableId: number, fieldId: number) => onfield(fieldId, tableId),
         },
         draggable: false,
       };

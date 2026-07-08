@@ -16,7 +16,7 @@
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 use record_maker_engine::Solution;
-use record_maker_server::{seed, serve, AppState};
+use record_maker_server::{serve, AppState};
 
 fn main() {
     // WebKitGTK's DMA-BUF renderer (default since 2.42) fails to create a device
@@ -69,8 +69,7 @@ fn main() {
             std::env::set_var("RM_UI_DIR", &ui_dir);
 
             // --- Open the solution + build the shared app state. ---
-            let mut sol = Solution::open(&data_dir).expect("open solution");
-            seed(&mut sol).expect("seed solution");
+            let sol = Solution::open(&data_dir).expect("open solution");
             let state = AppState::new(sol).with_ui_dir(ui_dir.to_string_lossy().to_string());
 
             // --- Bind the ephemeral loopback port NOW (fast, deterministic),

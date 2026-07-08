@@ -6,8 +6,8 @@
 //! This crate is a **library + thin bin**: the router, handlers, and state live
 //! here so both the standalone CLI (`src/main.rs`) and the Tauri desktop shell
 //! (#16) embed the *same* app. The public API is intentionally small — build an
-//! [`AppState`], call [`app`] for the router, [`seed`] for demo data, and
-//! [`serve`] to bind an ephemeral loopback port and learn the assigned address.
+//! [`AppState`], call [`app`] for the router, and [`serve`] to bind an
+//! ephemeral loopback port and learn the assigned address.
 
 use std::collections::HashSet;
 use std::future::IntoFuture;
@@ -25,14 +25,11 @@ use record_maker_engine::Solution;
 
 mod format;
 mod routes;
-mod seed;
 mod style;
 #[cfg(test)]
 mod tests;
 mod validate;
 mod viewmodel;
-
-pub use seed::seed;
 
 use routes::browse::{browse, design, index, layouts_page, schema_page};
 use routes::design::{

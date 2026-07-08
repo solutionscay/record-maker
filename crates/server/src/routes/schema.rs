@@ -146,7 +146,17 @@ fn table_schema_view(t: TableMeta) -> TableSchemaView {
     }
 }
 
-fn field_schema_view_with_options(f: FieldMeta, options: Value) -> FieldSchemaView {
+fn field_schema_view_with_options(f: FieldMeta, mut options: Value) -> FieldSchemaView {
+    if let Some(obj) = options.as_object_mut() {
+        if obj.get("system").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let validation = serde_json::json!({
+                "primary": true,
+                "required": true,
+                "unique": true
+            });
+            obj.insert("validation".to_string(), validation);
+        }
+    }
     FieldSchemaView {
         id: f.id,
         name: f.name,
@@ -397,7 +407,7 @@ pub(crate) async fn schema_fields(
     }
     let rels = relationships_by_source_field(&sol, table_id);
     let views: Vec<FieldSchemaView> = sol
-        .fields(table_id)
+        .all_fields(table_id)
         .unwrap()
         .into_iter()
         .map(|field| {
@@ -500,7 +510,8 @@ pub(crate) async fn reorder_schema_fields(
     if sol.table_by_id(table_id).unwrap().is_none() {
         return Err(AppError::not_found());
     }
-    let fields = sol.reorder_fields(table_id, &body.field_ids)?;
+    let _ = sol.reorder_fields(table_id, &body.field_ids)?;
+    let fields = sol.all_fields(table_id)?;
     Ok(Json(
         fields
             .into_iter()

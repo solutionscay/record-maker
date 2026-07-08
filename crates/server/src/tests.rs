@@ -466,8 +466,9 @@ async fn schema_table_and_field_routes_manage_metadata_and_physical_table() {
         get_body(state.clone(), &format!("/schema/tables/{table_id}/fields")).await;
     assert_eq!(status, StatusCode::OK, "{fields_body}");
     let fields: serde_json::Value = serde_json::from_str(&fields_body).unwrap();
-    let number_id = fields[0]["id"].as_i64().unwrap();
-    let total_id = fields[1]["id"].as_i64().unwrap();
+    // Index 0 is the system PK, index 1 is Number, index 2 is Total
+    let number_id = fields[1]["id"].as_i64().unwrap();
+    let total_id = fields[2]["id"].as_i64().unwrap();
 
     let (status, resp) = post_json_body(
         state.clone(),
@@ -538,7 +539,8 @@ async fn schema_table_and_field_routes_manage_metadata_and_physical_table() {
     .await;
     assert_eq!(status, StatusCode::OK, "{resp}");
     let ordered: serde_json::Value = serde_json::from_str(&resp).unwrap();
-    assert_eq!(ordered[0]["id"].as_i64(), Some(total_id));
+    // Index 0 is the system PK field. Reordered user fields start at index 1.
+    assert_eq!(ordered[1]["id"].as_i64(), Some(total_id));
 
     let (status, resp) = post_json_body(
         state.clone(),
@@ -906,8 +908,9 @@ async fn schema_relationship_routes_crud_and_validate_field_ownership() {
     let (_, fields_body) =
         get_body(state.clone(), &format!("/schema/tables/{invoices}/fields")).await;
     let fields: serde_json::Value = serde_json::from_str(&fields_body).unwrap();
+    // Index 0 is system PK, Index 1 is customer_id
     assert_eq!(
-        fields[0]["options"]["reference"]["name"].as_str(),
+        fields[1]["options"]["reference"]["name"].as_str(),
         Some("customer")
     );
 
@@ -929,8 +932,9 @@ async fn schema_relationship_routes_crud_and_validate_field_ownership() {
     let (_, fields_body) =
         get_body(state.clone(), &format!("/schema/tables/{invoices}/fields")).await;
     let fields: serde_json::Value = serde_json::from_str(&fields_body).unwrap();
+    // Index 0 is system PK, Index 1 is customer_id
     assert_eq!(
-        fields[0]["options"]["reference"]["name"].as_str(),
+        fields[1]["options"]["reference"]["name"].as_str(),
         Some("bill_to")
     );
 
@@ -947,7 +951,8 @@ async fn schema_relationship_routes_crud_and_validate_field_ownership() {
     assert_eq!(status, StatusCode::OK, "{resp}");
     let (_, fields_body) = get_body(state, &format!("/schema/tables/{invoices}/fields")).await;
     let fields: serde_json::Value = serde_json::from_str(&fields_body).unwrap();
-    assert!(fields[0]["options"].get("reference").is_none());
+    // Index 0 is system PK, Index 1 is customer_id
+    assert!(fields[1]["options"].get("reference").is_none());
 }
 
 /// #57: a table carries independent per-view layouts. The Browse view toggle

@@ -76,7 +76,7 @@
   <span
     class="fg-handle"
     class:disabled={!reorderable}
-    title={reorderable ? 'Drag to reorder' : 'Switch to Custom order to reorder'}
+    title={reorderable ? 'Drag to reorder' : (field.options?.system ? 'System field cannot be reordered' : 'Switch to Custom order to reorder')}
     draggable={reorderable}
     ondragstart={onDragStart}
     ondragend={ondragendrow}
@@ -119,7 +119,13 @@
   <span class="fg-notes" title={field.notes || 'No notes'}>{field.notes || 'No notes'}</span>
 
   <span class="fg-actions">
-    <button type="button" class="sc-btn sc-btn--icon sc-btn--ghost" title="Edit field" onclick={onedit}>
+    <button
+      type="button"
+      class="sc-btn sc-btn--icon sc-btn--ghost"
+      title={field.options?.system ? 'System primary key field is read-only' : 'Edit field'}
+      onclick={onedit}
+      disabled={field.options?.system}
+    >
       <Icon name="edit" />
     </button>
   </span>

@@ -439,8 +439,9 @@ export class SchemaStore {
             fieldIdMap.set(f.id, createdFields[i].id);
             persisted.add(f.id);
           });
-          if (fields.length > 0) {
-            await api.reorderFields(targetTableId, fields.map((f) => resolveField(f.id)));
+          const reorderIds = fields.filter((f) => !f.options?.system).map((f) => resolveField(f.id));
+          if (reorderIds.length > 0) {
+            await api.reorderFields(targetTableId, reorderIds);
           }
         }),
       );

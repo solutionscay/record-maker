@@ -121,7 +121,7 @@
           <FieldRow
             {field}
             badges={store.selectedTableId == null ? null : fieldBadgeInfo(store, store.selectedTableId, field)}
-            reorderable={canReorder}
+            reorderable={canReorder && !field.options?.system}
             active={field.id === openFieldId}
             dragging={field.id === dragId}
             dropBefore={overId === field.id && overPos === 'before' && dragId != null && dragId !== field.id}

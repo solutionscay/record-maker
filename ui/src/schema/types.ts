@@ -29,6 +29,7 @@ export interface FieldAutoEnterOptions {
 }
 
 export interface FieldOptions {
+  system?: boolean;
   validation?: FieldValidationOptions;
   /** A value the engine populates on create when the field is left empty. */
   autoEnter?: FieldAutoEnterOptions;

@@ -242,10 +242,6 @@
         <Controls showLock={false} />
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
       </SvelteFlow>
-      <div class="sc-empty rv-empty rv-empty--overlay">
-        <p class="sc-empty-title">No relationships defined</p>
-        <p class="sc-hint">In the Fields tab, turn on "References another field" for a field — its constraint is drawn here.</p>
-      </div>
     {:else}
       <SvelteFlow
         {nodes}

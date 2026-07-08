@@ -22,29 +22,16 @@
     /** Count of this table's fields left out of `fields` because they aren't keys. */
     hiddenFieldCount: number;
     relationshipCount: number;
-    onTable: (id: number) => void;
   }
 
-  let {
-    data,
-    selected = false,
-  }: {
-    data: SchemaTableNodeData;
-    selected?: boolean;
-  } = $props();
-
-  function openTable() {
-    data.onTable(data.table.id);
-  }
-
-  function onTableKeydown(event: KeyboardEvent) {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    openTable();
-  }
+  // The relationship graph is strictly a read-only picture of the schema's
+  // constraints — a table box is a representation, never a control: no click to
+  // open/edit the table, no selection. Relationships are defined only by field
+  // references in the Fields tab; this view never creates or edits anything.
+  let { data }: { data: SchemaTableNodeData } = $props();
 </script>
 
-<div class="tn" class:selected role="button" tabindex="0" onclick={openTable} onkeydown={onTableKeydown}>
+<div class="tn">
   <header class="tn-head">
     <span class="tn-title">{data.table.name}</span>
     <span class="tn-count">{data.relationshipCount}</span>
@@ -57,12 +44,7 @@
       <div class="tn-empty">No key fields ({data.hiddenFieldCount} not shown)</div>
     {:else}
       {#each data.fields as field (field.id)}
-        <!-- Purely informational (#148) — stop the click here so it doesn't
-             bubble up into the table box's own onclick and open the table
-             drawer instead. -->
-        <!-- svelte-ignore a11y_click_events_have_key_events -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="tn-field" onclick={(e) => e.stopPropagation()}>
+        <div class="tn-field">
           <Icon name={kindIcon(field.kind)} />
           <span class="tn-field-name">{field.name}</span>
           <span class="tn-kind">{kindLabel(field.kind)}</span>
@@ -112,15 +94,7 @@
     background: var(--rm-control-bg);
     box-shadow: var(--sc-shadow);
     color: var(--rm-text);
-    cursor: pointer;
-    transition:
-      border-color 0.12s ease,
-      box-shadow 0.12s ease;
-  }
-  .tn:hover,
-  .tn.selected {
-    border-color: var(--rm-accent);
-    box-shadow: var(--sc-ring);
+    cursor: default;
   }
   .tn-head {
     height: 36px;

@@ -10,6 +10,7 @@
     type NodeTypes,
   } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
+  import { untrack } from 'svelte';
   import type { SchemaStore } from './store.svelte';
   import { fieldBadgeInfo } from './fieldBadges';
   import SchemaRelationshipEdge, { type SchemaRelationshipEdgeData } from './SchemaRelationshipEdge.svelte';
@@ -124,11 +125,19 @@
 
   let nodes = $state<SchemaNode[]>([]);
 
+  // Sync store → graph nodes on STRUCTURAL changes only (tables/fields/
+  // relationships). The existing node list is read untracked so that dragging —
+  // which writes node positions back through `bind:nodes` — does NOT re-fire
+  // this effect. Re-firing mid-drag would rebuild every node object, and Svelte
+  // Flow would lose the box it's dragging (it snaps back / won't move); the
+  // self-write would also risk an effect-update loop. On a real structural
+  // change we still re-run, keeping each surviving box where the user left it.
   $effect(() => {
+    const current = untrack(() => nodes);
     nodes = layoutTables.map((table, index) => {
       const totalFieldCount = (store.fieldsByTable[table.id] ?? []).length;
       const fields = keyFieldRows(table);
-      const existingNode = nodes.find((n) => n.id === `table-${table.id}`);
+      const existingNode = current.find((n) => n.id === `table-${table.id}`);
       const position = existingNode ? existingNode.position : nodePosition(index);
       return {
         id: `table-${table.id}`,

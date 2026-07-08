@@ -424,8 +424,15 @@ mod tests {
                 config: r#"{"values":["Open","Closed"]}"#.into(),
             })
             .unwrap();
-        s.update_field_options(tid, fields[0].id, r#"{"validation":{"primary":true}}"#)
-            .unwrap();
+        // Required + unique (not primary): a primary field would auto-fill a
+        // UUID on insert (see the primary_key_autofills_uuid test), so it can no
+        // longer surface the "required"/"unique" messages this test checks.
+        s.update_field_options(
+            tid,
+            fields[0].id,
+            r#"{"validation":{"required":true,"unique":true}}"#,
+        )
+        .unwrap();
         s.update_field_options(
             tid,
             fields[1].id,

@@ -4,11 +4,14 @@
 //! field metadata. Physical identifiers (`t_<id>`/`f_<id>`) are id-derived and
 //! therefore safe to interpolate; all user *values* are bound as parameters.
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::{params, params_from_iter};
 
 use crate::model::{FieldMeta, TableMeta};
+use crate::options::FieldOptions;
 use crate::Solution;
 
 /// A row, with `cells` aligned to the field order passed to [`Solution::list_records`].
@@ -90,14 +93,41 @@ impl Solution {
     /// member-of-value-list — see [`crate::options`]) are enforced first; a
     /// rejected write fails with a downcastable [`crate::ValidationError`].
     pub fn insert_record(&self, table: &TableMeta, values: &[(&FieldMeta, String)]) -> Result<i64> {
-        self.validate_record_values(table, values, None)?;
-        if values.is_empty() {
+        // A Primary ID field is system-managed: auto-assign a UUID to any primary
+        // field left empty/absent on insert, so the key is never typed and its
+        // implied required + unique rules are satisfied automatically. Only on
+        // insert — a key is assigned once at creation, never regenerated.
+        let all_fields = self.fields(table.id)?;
+        let mut provided: HashMap<i64, String> =
+            values.iter().map(|(f, v)| (f.id, v.clone())).collect();
+        for field in &all_fields {
+            let is_primary = FieldOptions::parse(&field.options)
+                .validation
+                .map(|r| r.primary)
+                .unwrap_or(false);
+            let empty = provided
+                .get(&field.id)
+                .map(|v| v.trim().is_empty())
+                .unwrap_or(true);
+            if is_primary && empty {
+                provided.insert(field.id, self.generate_uuid()?);
+            }
+        }
+        // Rebuild in field order, keeping every column that was provided or
+        // auto-filled. Field refs come from `all_fields` (owned here).
+        let augmented: Vec<(&FieldMeta, String)> = all_fields
+            .iter()
+            .filter_map(|f| provided.get(&f.id).map(|v| (f, v.clone())))
+            .collect();
+
+        self.validate_record_values(table, &augmented, None)?;
+        if augmented.is_empty() {
             self.data
                 .execute(&format!("INSERT INTO {} DEFAULT VALUES", table.phys), [])?;
             return Ok(self.data.last_insert_rowid());
         }
-        let cols: Vec<&str> = values.iter().map(|(f, _)| f.phys.as_str()).collect();
-        let marks: Vec<String> = (1..=values.len()).map(|i| format!("?{i}")).collect();
+        let cols: Vec<&str> = augmented.iter().map(|(f, _)| f.phys.as_str()).collect();
+        let marks: Vec<String> = (1..=augmented.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
             table.phys,
@@ -106,9 +136,28 @@ impl Solution {
         );
         self.data.execute(
             &sql,
-            params_from_iter(values.iter().map(|(_, v)| v.clone())),
+            params_from_iter(augmented.iter().map(|(_, v)| v.clone())),
         )?;
         Ok(self.data.last_insert_rowid())
+    }
+
+    /// A random v4 UUID, sourced from SQLite's `randomblob` so the engine needs
+    /// no extra crate. Used to auto-assign Primary ID field values on insert.
+    fn generate_uuid(&self) -> Result<String> {
+        let hex: String =
+            self.data
+                .query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?;
+        let mut b = [0u8; 16];
+        for (i, byte) in b.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap_or(0);
+        }
+        b[6] = (b[6] & 0x0f) | 0x40; // version 4
+        b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
+        Ok(format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
+            b[14], b[15]
+        ))
     }
 
     /// Delete a row by its physical id.
@@ -270,6 +319,44 @@ mod tests {
         let recs = s.list_records(&table, &fields).unwrap();
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].cells[0], "Linus");
+    }
+
+    #[test]
+    fn primary_key_autofills_uuid_on_insert() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s
+            .create_table(
+                "Customers",
+                &[
+                    NewField { name: "Customer_ID".into(), kind: FieldKind::Text },
+                    NewField { name: "Name".into(), kind: FieldKind::Text },
+                ],
+            )
+            .unwrap();
+        let table = s.table_by_id(tid).unwrap().unwrap();
+        let fields = s.fields(tid).unwrap();
+        s.update_field_options(tid, fields[0].id, r#"{"validation":{"primary":true}}"#)
+            .unwrap();
+        let fields = s.fields(tid).unwrap();
+
+        // A blank New record (no submitted values) must succeed now: the empty
+        // primary auto-fills with a v4 UUID, satisfying its implied required+unique.
+        let id = s.insert_record(&table, &[]).unwrap();
+        let key = s.get_record(&table, &fields, id).unwrap().unwrap()[0].clone();
+        assert_eq!(key.len(), 36, "primary auto-filled a UUID, got {key:?}");
+        assert_eq!(key.as_bytes()[14], b'4', "version nibble");
+        assert!(matches!(key.as_bytes()[19], b'8' | b'9' | b'a' | b'b'), "variant nibble");
+
+        // Distinct keys per record.
+        let id2 = s.insert_record(&table, &[(&fields[1], "Bob".into())]).unwrap();
+        let key2 = s.get_record(&table, &fields, id2).unwrap().unwrap()[0].clone();
+        assert_ne!(key2, key);
+        assert!(!key2.is_empty());
+
+        // An explicitly supplied primary value is respected, not overwritten.
+        let id3 = s.insert_record(&table, &[(&fields[0], "CUST-1".into())]).unwrap();
+        let rec3 = s.get_record(&table, &fields, id3).unwrap().unwrap();
+        assert_eq!(rec3[0], "CUST-1");
     }
 
     #[test]

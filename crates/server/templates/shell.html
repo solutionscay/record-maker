@@ -698,9 +698,13 @@
       }
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
       var k = e.key.toLowerCase();
-      // Ctrl/⌘ A must never invoke the browser's page select-all. In Layout Mode
-      // the canvas interaction layer handles this same event as object select-all.
+      // Ctrl/⌘ A must never invoke the browser's page select-all — EXCEPT inside a
+      // real text control, where it must keep its normal "select all text"
+      // behaviour. Elsewhere it's swallowed (in Layout Mode the canvas interaction
+      // layer handles this same event as object select-all).
       if (k === 'a') {
+        var aEl = e.target;
+        if (aEl && aEl.closest && aEl.closest('input, textarea, select, [contenteditable="true"], .le-inline-text-editor')) return;
         e.preventDefault();
         return;
       }

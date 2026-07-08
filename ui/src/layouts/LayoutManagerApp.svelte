@@ -103,11 +103,6 @@
     return 'Table';
   }
 
-  function isPrimaryView(groupViews: LayoutManagerView[], viewId: number): boolean {
-    const target = groupViews.find((v) => v.enabled) ?? groupViews[0];
-    return target?.id === viewId;
-  }
-
   // Patch one view in place (from the Edit-views drawer's immediate toggle).
   function viewUpdated(updated: LayoutManagerView) {
     layouts = layouts.map((x) => (x.id === updated.id ? updated : x));
@@ -252,11 +247,9 @@
           </button>
           <span class="lm-pills">
             {#each group.views as v (v.id)}
-              {@const isPrimary = isPrimaryView(group.views, v.id)}
               <span
                 class="lm-pill"
                 class:off={!v.enabled}
-                class:primary={isPrimary}
               >
                 <Icon name={`view-${v.view}`} />
                 {viewLabel(v.view)}
@@ -547,12 +540,6 @@
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.02em;
-  }
-  .lm-pill.primary {
-    background: var(--rm-accent);
-    color: #fff;
-    border-color: transparent;
-    font-weight: 700;
   }
   .lm-pill.off {
     background: transparent;

@@ -21,8 +21,17 @@ export interface FieldValidationOptions {
   };
 }
 
+/** Auto-enter value source (#159/#160). Only the constant source exists today;
+ * the engine fills `value` on record create when the field is left empty. */
+export interface FieldAutoEnterOptions {
+  kind: 'constant';
+  value: string;
+}
+
 export interface FieldOptions {
   validation?: FieldValidationOptions;
+  /** A value the engine populates on create when the field is left empty. */
+  autoEnter?: FieldAutoEnterOptions;
   /** FK/reference constraint. Establishes a relationship edge from this field. */
   reference?: {
     name: string;

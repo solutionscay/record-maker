@@ -47,6 +47,9 @@ impl FieldMeta {
 pub struct FieldOptions {
     /// The `validation` sub-object, when present and well-formed.
     pub validation: Option<ValidationRules>,
+    /// The system primary key (#156): auto-minted UUID, value-immutable,
+    /// undeletable, fixed-kind. Set once at table creation; users never toggle it.
+    pub system: bool,
 }
 
 /// The `validation` rules of one field.
@@ -88,7 +91,10 @@ impl FieldOptions {
                 }),
                 member_of_value_list: v.get("memberOfValueList").and_then(Value::as_i64),
             });
-        FieldOptions { validation }
+        FieldOptions {
+            validation,
+            system: bool_rule(&value, "system"),
+        }
     }
 }
 

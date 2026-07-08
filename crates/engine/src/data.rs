@@ -93,23 +93,14 @@ impl Solution {
     /// member-of-value-list — see [`crate::options`]) are enforced first; a
     /// rejected write fails with a downcastable [`crate::ValidationError`].
     pub fn insert_record(&self, table: &TableMeta, values: &[(&FieldMeta, String)]) -> Result<i64> {
-        // A Primary ID field is system-managed: auto-assign a UUID to any primary
-        // field left empty/absent on insert, so the key is never typed and its
-        // implied required + unique rules are satisfied automatically. Only on
-        // insert — a key is assigned once at creation, never regenerated.
-        let all_fields = self.fields(table.id)?;
+        // The system primary key (#156) is minted here: every system field gets a
+        // fresh v4 UUID on insert, unconditionally (its value is system-managed, so
+        // any submitted value is ignored). Assigned once at creation, never on update.
+        let all_fields = self.all_fields(table.id)?;
         let mut provided: HashMap<i64, String> =
             values.iter().map(|(f, v)| (f.id, v.clone())).collect();
         for field in &all_fields {
-            let is_primary = FieldOptions::parse(&field.options)
-                .validation
-                .map(|r| r.primary)
-                .unwrap_or(false);
-            let empty = provided
-                .get(&field.id)
-                .map(|v| v.trim().is_empty())
-                .unwrap_or(true);
-            if is_primary && empty {
+            if FieldOptions::parse(&field.options).system {
                 provided.insert(field.id, self.generate_uuid()?);
             }
         }
@@ -209,6 +200,14 @@ impl Solution {
         id: i64,
         values: &[(&FieldMeta, String)],
     ) -> Result<()> {
+        // The system primary key (#156) is immutable — drop any system field from
+        // the write, even if a commit resubmits its value.
+        let values: Vec<(&FieldMeta, String)> = values
+            .iter()
+            .filter(|(f, _)| !FieldOptions::parse(&f.options).system)
+            .map(|(f, v)| (*f, v.clone()))
+            .collect();
+        let values = values.as_slice();
         self.validate_record_values(table, values, Some(id))?;
         if values.is_empty() {
             return Ok(());
@@ -288,7 +287,7 @@ mod tests {
         let table = s.table_by_name("Customers").unwrap().unwrap();
         assert_eq!(table.id, tid);
         let fields = s.fields(tid).unwrap();
-        assert_eq!(fields.len(), 2);
+        assert_eq!(fields.len(), 2); // user fields only — the system PK is separate (#156)
 
         // the physical table really exists in data.db
         let exists: i64 = s
@@ -322,41 +321,50 @@ mod tests {
     }
 
     #[test]
-    fn primary_key_autofills_uuid_on_insert() {
+    fn system_primary_key_mints_uuid_and_is_protected() {
         let mut s = Solution::open_in_memory().unwrap();
         let tid = s
-            .create_table(
-                "Customers",
-                &[
-                    NewField { name: "Customer_ID".into(), kind: FieldKind::Text },
-                    NewField { name: "Name".into(), kind: FieldKind::Text },
-                ],
-            )
+            .create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
             .unwrap();
         let table = s.table_by_id(tid).unwrap().unwrap();
-        let fields = s.fields(tid).unwrap();
-        s.update_field_options(tid, fields[0].id, r#"{"validation":{"primary":true}}"#)
-            .unwrap();
-        let fields = s.fields(tid).unwrap();
 
-        // A blank New record (no submitted values) must succeed now: the empty
-        // primary auto-fills with a v4 UUID, satisfying its implied required+unique.
+        // fields() is user-only; all_fields() adds the system PK named "ID" (#156).
+        assert_eq!(s.fields(tid).unwrap().len(), 1);
+        let all = s.all_fields(tid).unwrap();
+        assert_eq!(all.len(), 2);
+        let pk = all
+            .iter()
+            .find(|f| crate::options::FieldOptions::parse(&f.options).system)
+            .unwrap()
+            .clone();
+        let name = all.iter().find(|f| f.name == "Name").unwrap().clone();
+        assert_eq!(pk.name, "ID");
+        let pk_idx = all.iter().position(|f| f.id == pk.id).unwrap();
+        let name_idx = all.iter().position(|f| f.id == name.id).unwrap();
+
+        // A blank New record mints a fresh v4 UUID into the PK.
         let id = s.insert_record(&table, &[]).unwrap();
-        let key = s.get_record(&table, &fields, id).unwrap().unwrap()[0].clone();
-        assert_eq!(key.len(), 36, "primary auto-filled a UUID, got {key:?}");
-        assert_eq!(key.as_bytes()[14], b'4', "version nibble");
-        assert!(matches!(key.as_bytes()[19], b'8' | b'9' | b'a' | b'b'), "variant nibble");
+        let uid = s.get_record(&table, &all, id).unwrap().unwrap()[pk_idx].clone();
+        assert_eq!(uid.len(), 36, "system PK minted a UUID, got {uid:?}");
+        assert_eq!(uid.as_bytes()[14], b'4', "version nibble");
+        assert!(matches!(uid.as_bytes()[19], b'8' | b'9' | b'a' | b'b'), "variant nibble");
 
-        // Distinct keys per record.
-        let id2 = s.insert_record(&table, &[(&fields[1], "Bob".into())]).unwrap();
-        let key2 = s.get_record(&table, &fields, id2).unwrap().unwrap()[0].clone();
-        assert_ne!(key2, key);
-        assert!(!key2.is_empty());
+        // Distinct per record; a submitted user value is kept.
+        let id2 = s.insert_record(&table, &[(&name, "Bob".into())]).unwrap();
+        let rec2 = s.get_record(&table, &all, id2).unwrap().unwrap();
+        assert_ne!(rec2[pk_idx], uid);
+        assert_eq!(rec2[name_idx], "Bob");
 
-        // An explicitly supplied primary value is respected, not overwritten.
-        let id3 = s.insert_record(&table, &[(&fields[0], "CUST-1".into())]).unwrap();
-        let rec3 = s.get_record(&table, &fields, id3).unwrap().unwrap();
-        assert_eq!(rec3[0], "CUST-1");
+        // Immutable: update_record never rewrites the PK, even if resubmitted.
+        s.update_record(&table, id2, &[(&name, "Bobby".into()), (&pk, "hacked".into())])
+            .unwrap();
+        let rec2b = s.get_record(&table, &all, id2).unwrap().unwrap();
+        assert_eq!(rec2b[name_idx], "Bobby");
+        assert_ne!(rec2b[pk_idx], "hacked");
+
+        // Undeletable + fixed-kind.
+        assert!(s.delete_field(tid, pk.id).is_err());
+        assert!(s.retype_field(tid, pk.id, FieldKind::Number).is_err());
     }
 
     #[test]

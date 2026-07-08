@@ -5,7 +5,7 @@ use rusqlite::params;
 use rusqlite::types::ValueRef;
 use serde_json::Value;
 
-use crate::options::{FieldReference, FieldReferenceError};
+use crate::options::{FieldOptions, FieldReference, FieldReferenceError};
 use crate::Solution;
 
 /// Logical field type. Maps to a SQLite column affinity.
@@ -177,6 +177,32 @@ impl Solution {
             field_meta.push((fid, f.name.clone()));
         }
 
+        // System primary key (#156): every table carries one auto-minted, immutable
+        // UUID field. Created LAST so the user fields above keep their ids/positions,
+        // and deliberately NOT pushed into `field_meta`, so the default layouts don't
+        // place this read-only key. `system` in its options marks it undeletable /
+        // fixed-kind / value-immutable; the physical column is UNIQUE as a backstop.
+        let used: std::collections::HashSet<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        let pk_name = ["ID", "Record ID", "System ID", "UID"]
+            .into_iter()
+            .find(|n| !used.contains(n))
+            .unwrap_or("PK");
+        // Position -1 keeps the PK sorting first in `all_fields` and, crucially,
+        // out of the user field 0..n-1 sequence — so `add_field`'s MAX(position)+1
+        // and the user field indices/positions are exactly as they were pre-#156.
+        tx.execute(
+            "INSERT INTO meta_field(table_id, name, phys_name, kind, position, options) \
+             VALUES (?1, ?2, '', ?3, -1, '{\"system\":true}')",
+            params![table_id, pk_name, FieldKind::Text.as_str()],
+        )?;
+        let pk_id = tx.last_insert_rowid();
+        let pk_phys = format!("f_{pk_id}");
+        tx.execute(
+            "UPDATE meta_field SET phys_name=?1 WHERE id=?2",
+            params![pk_phys, pk_id],
+        )?;
+        col_defs.push(format!("{pk_phys} TEXT UNIQUE"));
+
         // Default per-view layouts (#21, #57): a Form layout (one body part + a
         // field object per field), cloned into independent List and Table layouts
         // — all in the same transaction, so table + layouts are created atomically.
@@ -332,8 +358,14 @@ impl Solution {
         let Some(field) = self.field_by_id(table_id, field_id)? else {
             return Ok(None);
         };
+        // The system primary key (#156) has a fixed kind — only its name is editable.
+        if FieldOptions::parse(&field.options).system && field.kind != kind {
+            bail!("the system primary key's type cannot be changed");
+        }
         if field.kind != kind {
-            let mut fields = self.fields(table_id)?;
+            // The rebuild must recreate EVERY physical column, including the
+            // system PK, so use all_fields (not the user-only fields).
+            let mut fields = self.all_fields(table_id)?;
             for f in &mut fields {
                 if f.id == field_id {
                     f.kind = kind;
@@ -391,8 +423,14 @@ impl Solution {
         let Some(field) = self.field_by_id(table_id, field_id)? else {
             return Ok(None);
         };
+        // The system primary key (#156) cannot be retyped.
+        if FieldOptions::parse(&field.options).system {
+            bail!("the system primary key's type cannot be changed");
+        }
         if field.kind != kind {
-            let mut fields = self.fields(table_id)?;
+            // The rebuild must recreate EVERY physical column, including the
+            // system PK, so use all_fields (not the user-only fields).
+            let mut fields = self.all_fields(table_id)?;
             for f in &mut fields {
                 if f.id == field_id {
                     f.kind = kind;
@@ -444,6 +482,10 @@ impl Solution {
         let Some(field) = self.field_by_id(table_id, field_id)? else {
             return Ok(0);
         };
+        // The system primary key (#156) is undeletable.
+        if FieldOptions::parse(&field.options).system {
+            bail!("the system primary key cannot be deleted");
+        }
         self.data
             .execute(
                 &format!("ALTER TABLE {} DROP COLUMN {}", table.phys, field.phys),
@@ -555,8 +597,11 @@ impl Solution {
         }
     }
 
-    /// Fields of a table, in display order.
-    pub fn fields(&self, table_id: i64) -> Result<Vec<FieldMeta>> {
+    /// Every field of a table INCLUDING the system primary key (#156), in display
+    /// order. Use this for physical operations (insert/select/table rebuild) and
+    /// the schema field list; use [`fields`](Self::fields) for the user-managed
+    /// fields that layouts and reordering operate on.
+    pub fn all_fields(&self, table_id: i64) -> Result<Vec<FieldMeta>> {
         let mut stmt = self.app.prepare(
             "SELECT id, name, notes, phys_name, kind, COALESCE(options, ''), position FROM meta_field \
              WHERE table_id=?1 ORDER BY position, id",
@@ -574,6 +619,17 @@ impl Solution {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The user-managed fields, in display order — EXCLUDES the system primary key
+    /// (#156). This is the field set layouts place, browse columns show, and
+    /// reordering operates on, so its shape is unchanged from before the system PK.
+    pub fn fields(&self, table_id: i64) -> Result<Vec<FieldMeta>> {
+        Ok(self
+            .all_fields(table_id)?
+            .into_iter()
+            .filter(|f| !FieldOptions::parse(&f.options).system)
+            .collect())
     }
 
     /// All value lists, in manager display order.

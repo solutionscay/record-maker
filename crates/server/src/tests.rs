@@ -562,7 +562,11 @@ async fn schema_table_and_field_routes_manage_metadata_and_physical_table() {
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
     };
-    assert_eq!(columns, vec!["id".to_string(), fields[0].phys.clone()]);
+    // Physical columns = the rowid `id` + every all_fields column (incl. the
+    // system PK, #156), in all_fields order (the order the retype rebuilt them).
+    let mut expected = vec!["id".to_string()];
+    expected.extend(sol.all_fields(table_id).unwrap().iter().map(|f| f.phys.clone()));
+    assert_eq!(columns, expected);
 }
 
 #[tokio::test]

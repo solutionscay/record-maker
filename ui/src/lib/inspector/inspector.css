@@ -29,19 +29,26 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 18px;
+  padding: 14px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 14px;
 }
+/* Fuller look: each section is a lifted card so the inspector reads as grouped
+   material, matching the left rail's zone cards. The old hairline separators
+   (.insp-div) are redundant between cards, so they collapse to nothing. */
 .insp-sec {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  padding: 14px 14px 15px;
+  border: 0.5px solid var(--rm-border);
+  border-radius: var(--rm-radius-lg);
+  background: var(--rm-card-bg);
+  box-shadow: var(--rm-elev-1);
 }
 .insp-div {
-  height: 0.5px;
-  background: var(--rm-border);
+  display: none;
 }
 .insp-row {
   display: flex;
@@ -69,13 +76,13 @@
   height: 26px;
   padding: 0;
   border: 0.5px solid var(--rm-border);
-  border-radius: 0;
+  border-radius: var(--rm-radius);
   background: var(--rm-control-bg);
   color: var(--rm-text);
   cursor: pointer;
   font-size: 13px;
   line-height: 1;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--rm-elev-1);
 }
 .ord-btn:hover:not(:disabled) {
   background: #f0f0f2;
@@ -99,11 +106,11 @@
   justify-content: center;
   padding: 0;
   border: 0.5px solid var(--rm-border);
-  border-radius: 0;
+  border-radius: var(--rm-radius);
   background: var(--rm-control-bg);
   color: var(--rm-text);
   cursor: pointer;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--rm-elev-1);
 }
 .arr-btn:hover:not(:disabled) {
   background: #f0f0f2;
@@ -120,14 +127,14 @@
   height: 28px;
   padding: 0 10px;
   border: 0.5px solid var(--rm-border);
-  border-radius: 0;
+  border-radius: var(--rm-radius);
   background: var(--rm-control-bg);
   color: var(--rm-text);
   cursor: pointer;
   font: inherit;
   font-size: 12px;
   font-weight: 650;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--rm-elev-1);
 }
 .grp-btn:hover:not(:disabled) {
   background: #f0f0f2;
@@ -142,17 +149,17 @@
   height: 26px;
   padding: 0;
   border: 1px solid var(--rm-border-strong);
-  border-radius: 0;
+  border-radius: var(--rm-radius);
   background: var(--rm-control-bg);
   cursor: pointer;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--rm-elev-1);
 }
 .swatch::-webkit-color-swatch-wrapper {
   padding: 0;
 }
 .swatch::-webkit-color-swatch {
   border: 0;
-  border-radius: 0;
+  border-radius: calc(var(--rm-radius) - 2px);
 }
 .swatch:disabled {
   opacity: 0.5;
@@ -254,11 +261,12 @@
   font-size: 13px;
   font-weight: 500;
   color: var(--rm-danger);
-  padding: 8px;
-  border-radius: 0;
+  padding: 9px;
+  border-radius: var(--rm-radius);
   border: 0.5px solid var(--rm-border);
   background: var(--rm-control-bg);
   cursor: pointer;
+  box-shadow: var(--rm-elev-1);
 }
 .insp-delete:hover:not(:disabled) {
   background: #fff5f5;
@@ -320,10 +328,10 @@
   color: var(--rm-text);
   padding: 5px 9px;
   border: 0.5px solid var(--rm-border);
-  border-radius: 0;
+  border-radius: var(--rm-radius);
   background: var(--rm-control-bg);
   cursor: pointer;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--rm-elev-1);
 }
 .fmt-add-btn:hover {
   background: #f0f0f2;

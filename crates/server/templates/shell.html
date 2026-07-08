@@ -17,12 +17,15 @@
     body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif;
            color: #1b1b1f; -webkit-font-smoothing: antialiased;
            user-select: none; -webkit-user-select: none;
-           --rm-toolbar-bg: #f6f6f7; --rm-sidebar-bg: #f0f0f2; --rm-inspector-bg: #f7f7f8;
-           --rm-workspace-bg: #e9e9ec; --rm-text: #1c1c1e; --rm-text-dim: #8a8a8e;
-           --rm-border: rgba(0,0,0,.09); --rm-border-strong: rgba(0,0,0,.16);
-           --rm-control-bg: #ffffff; --rm-segment-track: #e6e6e9; --rm-segment-active-bg: #ffffff;
+           --rm-toolbar-bg: #f4f4f6; --rm-sidebar-bg: #eaeaee; --rm-inspector-bg: #eeeef1;
+           --rm-workspace-bg: #e4e4e8; --rm-text: #1c1c1e; --rm-text-dim: #8a8a8e;
+           --rm-border: rgba(0,0,0,.12); --rm-border-strong: rgba(0,0,0,.2);
+           --rm-control-bg: #ffffff; --rm-segment-track: #e0e0e4; --rm-segment-active-bg: #ffffff;
            --rm-accent: #0a84ff; --rm-accent-soft: rgba(10,132,255,.12); --rm-danger: #ff453a;
-           --rm-shadow-card: 0 1px 3px rgba(0,0,0,.08), 0 8px 26px rgba(0,0,0,.07); }
+           --rm-shadow-card: 0 1px 3px rgba(0,0,0,.08), 0 8px 26px rgba(0,0,0,.07);
+           --rm-radius: 7px; --rm-radius-lg: 10px; --rm-card-bg: #fbfbfc;
+           --rm-elev-1: 0 1px 2px rgba(0,0,0,.07), 0 1px 1px rgba(0,0,0,.04);
+           --rm-elev-2: 0 1px 3px rgba(0,0,0,.1), 0 6px 16px rgba(0,0,0,.06); }
     input, textarea, select, [contenteditable="true"], .le-inline-text-editor {
       user-select: text; -webkit-user-select: text;
     }
@@ -47,8 +50,8 @@
     .brand .icon { width: 18px; height: 18px; display: block; color: var(--rm-accent); }
     .actions { display: flex; gap: 8px; margin-left: auto; }
     .act { display: inline-flex; align-items: center; gap: .3em; font-size: 12px; font-weight: 500;
-           padding: 5px 11px; border-radius: 0; border: .5px solid var(--rm-border);
-           background: var(--rm-control-bg); color: var(--rm-text); box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+           padding: 6px 12px; border-radius: var(--rm-radius); border: .5px solid var(--rm-border);
+           background: var(--rm-control-bg); color: var(--rm-text); box-shadow: var(--rm-elev-1); }
     .act:disabled { color: #b8b8bd; border-color: var(--rm-border); background: #f0f0f1; cursor: not-allowed; box-shadow: none; }
     /* Icon system (#72) — pixelarticons `<symbol>`s referenced by `<use>`, shared by
        the server chrome and the Svelte islands. An `em`-sized `currentColor` box, so
@@ -58,8 +61,8 @@
     .act .icon { vertical-align: -.12em; }
     /* Left source sidebar. */
     .sidebar { grid-area: rail; border-right: .5px solid var(--rm-border); background: var(--rm-sidebar-bg);
-               padding: 16px 14px; overflow: hidden auto; min-width: 0;
-               display: flex; flex-direction: column; gap: 20px; }
+               padding: 14px 13px; overflow: hidden auto; min-width: 0;
+               display: flex; flex-direction: column; gap: 14px; }
     /* Right Format inspector — the Svelte Inspector island mounts into
        #layout-inspector and owns its own header / body / footer padding. */
     .inspector { grid-area: inspector; border-left: .5px solid var(--rm-border); background: var(--rm-inspector-bg);
@@ -74,33 +77,37 @@
     .modes a.active { background: var(--rm-segment-active-bg); color: var(--rm-text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.14); }
     .modes .disabled { color: #bcbcc1; }
     .layout-select { width: 100%; font: inherit; font-size: 13px; font-weight: 500; color: var(--rm-text);
-                     padding: 8px 28px 8px 11px; border: .5px solid var(--rm-border); border-radius: 0;
-                     box-shadow: 0 1px 2px rgba(0,0,0,.05);
+                     padding: 8px 28px 8px 11px; border: .5px solid var(--rm-border); border-radius: var(--rm-radius);
+                     box-shadow: var(--rm-elev-1);
                      appearance: none; -webkit-appearance: none;
                      background-color: var(--rm-control-bg);
                      background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath d='M1 1.5 5 5.5 9 1.5' fill='none' stroke='%238a8a8e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
                      background-repeat: no-repeat; background-position: right 10px center; }
-    /* Record stepper — the flip-book pager, styled as a macOS card. */
+    /* Fuller look (#—): each labeled sidebar zone is a lifted card so the rail
+       reads as grouped material rather than loose controls on a flat panel. */
+    .rail-card { padding: 13px 13px 14px; border: .5px solid var(--rm-border);
+                 border-radius: var(--rm-radius-lg); background: var(--rm-card-bg);
+                 box-shadow: var(--rm-elev-1); display: flex; flex-direction: column; gap: 9px; }
+    /* Record stepper — the flip-book pager, styled as a card. */
     .stepper { display: flex; flex-direction: column; gap: 10px; align-items: stretch;
-               padding: 10px; border: .5px solid var(--rm-border); border-radius: 9px;
-               background: var(--rm-control-bg); box-shadow: 0 1px 2px rgba(0,0,0,.05); }
-    .step-row { display: flex; gap: 4px; justify-content: center; }
-    .step { display: inline-flex; flex: 1; min-width: 0; justify-content: center; padding: 5px 0;
-            border: .5px solid var(--rm-border); border-radius: 0; text-decoration: none;
-            color: var(--rm-text); background: var(--rm-control-bg); font-size: 12px; }
+               padding: 12px; border: .5px solid var(--rm-border); border-radius: var(--rm-radius-lg);
+               background: var(--rm-card-bg); box-shadow: var(--rm-elev-1); }
+    .step-row { display: flex; gap: 5px; justify-content: center; }
+    .step { display: inline-flex; flex: 1; min-width: 0; justify-content: center; padding: 6px 0;
+            border: .5px solid var(--rm-border); border-radius: var(--rm-radius); text-decoration: none;
+            color: var(--rm-text); background: var(--rm-control-bg); font-size: 12px; box-shadow: var(--rm-elev-1); }
     .step:hover { background: #f0f0f2; }
-    .step.off { color: #c9c9cd; border-color: var(--rm-border); background: #f6f6f7; cursor: default; }
+    .step.off { color: #c9c9cd; border-color: var(--rm-border); background: #f6f6f7; cursor: default; box-shadow: none; }
     .rec-jump { display: flex; flex-direction: column; align-items: center; margin: 0; gap: 2px; }
     .rec-num { width: 100%; text-align: center; font-variant-numeric: tabular-nums; font-size: 15px;
-               font-weight: 600; padding: 6px; border: .5px solid var(--rm-border); border-radius: 0;
-               background: var(--rm-control-bg); color: var(--rm-text); }
+               font-weight: 600; padding: 7px; border: .5px solid var(--rm-border); border-radius: var(--rm-radius);
+               background: var(--rm-control-bg); color: var(--rm-text); box-shadow: var(--rm-elev-1); }
     .rec-total { text-align: center; }
     .rec-tnum { font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
     /* Design-mode tool rail (#62) — the Svelte Create/Style/Zoom zones mount here,
        below the server-rendered Navigate zone. A divider + column gap separate the
        zones; the zone internals are styled by the Svelte component. */
-    .tool-rail { display: flex; flex-direction: column; gap: 20px;
-                 border-top: .5px solid var(--rm-border); padding-top: 16px; }
+    .tool-rail { display: flex; flex-direction: column; gap: 14px; }
     /* View selector — a macOS segmented control. */
     .view-switch { display: inline-flex; gap: 2px; padding: 2px; border: 0; border-radius: 7px;
                    overflow: visible; background: var(--rm-segment-track); }
@@ -127,8 +134,8 @@
     .statusbar { grid-area: status; border-top: .5px solid var(--rm-border); background: var(--rm-toolbar-bg);
                  padding: 6px 12px; font-size: 11.5px; color: var(--rm-text-dim);
                  display: flex; align-items: center; gap: 12px; }
-    .collapse { font-size: 11px; line-height: 1; padding: 3px 8px; border-radius: 0;
-                border: .5px solid var(--rm-border); background: var(--rm-control-bg); color: var(--rm-text); }
+    .collapse { font-size: 11px; line-height: 1; padding: 4px 9px; border-radius: var(--rm-radius);
+                border: .5px solid var(--rm-border); background: var(--rm-control-bg); color: var(--rm-text); box-shadow: var(--rm-elev-1); }
     .status-mode { font-weight: 600; color: var(--rm-text); }
     .status-edit { color: #b8860b; font-weight: 600; }
     /* Icon system (#72) — pixelarticons `<symbol>`s referenced by `<use>`, shared
@@ -337,7 +344,7 @@
         {% endmatch %}
       </nav>
 
-      <div>
+      <div class="rail-card">
         <span class="side-label">Layout</span>
         <select class="layout-select" onchange="if(this.value)location.href='/browse/'+this.value">
           {% for l in chrome.layouts %}

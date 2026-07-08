@@ -219,10 +219,17 @@
 <style>
   /* Rail tools live inside the server-styled `.sidebar`; reuse its `.side-label`
      vocabulary (a global class) and the shared --rm-* palette (defined on body). */
+  /* Fuller look: each rail zone (Tools / History / Zoom) is a lifted card so the
+     rail reads as grouped material, matching the server-rendered .rail-card. */
   .le-zone {
     display: flex;
     flex-direction: column;
     gap: 9px;
+    padding: 13px 13px 14px;
+    border: 0.5px solid var(--rm-border);
+    border-radius: var(--rm-radius-lg);
+    background: var(--rm-card-bg);
+    box-shadow: var(--rm-elev-1);
   }
   .le-tools {
     display: grid;
@@ -236,13 +243,13 @@
     height: 36px;
     padding: 0;
     border: 0.5px solid var(--rm-border);
-    border-radius: 0;
+    border-radius: var(--rm-radius);
     background: var(--rm-control-bg);
     color: var(--rm-text);
     cursor: pointer;
     font-size: 15px;
     line-height: 1;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+    box-shadow: var(--rm-elev-1);
   }
   .le-tools button:hover:not(.active) {
     background: #f0f0f2;

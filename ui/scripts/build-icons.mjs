@@ -71,6 +71,8 @@ const ICONS = {
   minus: 'minus',
   // Settings gear — used where a control represents options/details.
   settings: 'settings-cog-2',
+  // Close (X) — upper-right dismiss for the admin panes (schema / layouts).
+  close: 'close',
   // Edit drawer affordance for schema rows.
   edit: 'pencil',
   // Field-kind type glyphs for the searchable field pickers (FieldSelect.svelte,

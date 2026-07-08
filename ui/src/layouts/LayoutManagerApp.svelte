@@ -1,22 +1,23 @@
 <script lang="ts">
   // Layout Manager (#149/#151). Two kinds of layout:
   //  • Default — the Form/List/Table trio every table is born with (#57).
-  //    Grouped one row per table; each view is a toggle chip (enable/disable,
-  //    never delete). At least one view per table stays on (server-guarded).
+  //    Grouped one row per table; the enabled views show as pills and are edited
+  //    in a drawer of switches (enable/disable, never delete). At least one view
+  //    per table stays on (server-guarded).
   //  • Custom — anything made via "New layout". A standalone single-view
-  //    layout, freely renamed / deleted / drag-reordered.
-  // Actions commit immediately (no draft/save step), like the Tables tab.
+  //    layout, freely renamed / deleted.
+  // Both groups drag-reorder from their row handle only. Actions commit
+  // immediately (no draft/save step), like the Tables tab. Structure mirrors the
+  // schema builder: titled header, scrolling body, fixed footer with Done.
   import { onMount } from 'svelte';
   import Icon from '../lib/Icon.svelte';
-  import { confirmDanger } from './confirm';
   import NewLayoutDrawer from './NewLayoutDrawer.svelte';
+  import DefaultViewsDrawer from './DefaultViewsDrawer.svelte';
+  import CustomLayoutDrawer from './CustomLayoutDrawer.svelte';
   import {
-    deleteLayout,
     listLayouts,
     listTables,
-    renameLayout,
     reorderLayouts,
-    setLayoutEnabled,
     type LayoutManagerView,
     type TableOption,
   } from './persist';
@@ -26,9 +27,10 @@
   let loading = $state(true);
   let error = $state('');
   let newOpen = $state(false);
-  let renamingId = $state<number | null>(null);
-  let renameValue = $state('');
+  let editingTableId = $state<number | null>(null);
+  let editingCustomId = $state<number | null>(null);
   let dragId = $state<number | null>(null);
+  let dragTableId = $state<number | null>(null);
 
   const VIEW_ORDER: Record<string, number> = { form: 0, list: 1, table: 2 };
 
@@ -53,6 +55,17 @@
 
   // Custom layouts, in the global drag order.
   const customs = $derived(layouts.filter((l) => !l.isDefault));
+
+  // The group the "Edit views" drawer is editing, re-derived from live layouts so
+  // its switches reflect each immediate toggle.
+  const editingGroup = $derived(
+    editingTableId === null ? null : (defaultGroups.find((g) => g.tableId === editingTableId) ?? null),
+  );
+
+  // The custom layout the "Edit layout" drawer is editing.
+  const editingCustom = $derived(
+    editingCustomId === null ? null : (customs.find((l) => l.id === editingCustomId) ?? null),
+  );
 
   onMount(load);
 
@@ -90,42 +103,20 @@
     return 'Table';
   }
 
-  async function toggleView(l: LayoutManagerView) {
-    error = '';
-    try {
-      const updated = await setLayoutEnabled(l.id, !l.enabled);
-      layouts = layouts.map((x) => (x.id === l.id ? updated : x));
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    }
+  // Patch one view in place (from the Edit-views drawer's immediate toggle).
+  function viewUpdated(updated: LayoutManagerView) {
+    layouts = layouts.map((x) => (x.id === updated.id ? updated : x));
   }
 
-  function startRename(l: LayoutManagerView) {
-    renamingId = l.id;
-    renameValue = l.name;
+  // Patch a renamed custom layout in place (from the Edit-layout drawer).
+  function renamed(updated: LayoutManagerView) {
+    layouts = layouts.map((l) => (l.id === updated.id ? updated : l));
   }
 
-  async function commitRename(id: number) {
-    const name = renameValue.trim();
-    renamingId = null;
-    if (!name) return;
-    try {
-      const updated = await renameLayout(id, name);
-      layouts = layouts.map((l) => (l.id === id ? updated : l));
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    }
-  }
-
-  async function remove(l: LayoutManagerView) {
-    const ok = await confirmDanger(`Delete layout "${l.name}"? This cannot be undone.`, 'Delete layout');
-    if (!ok) return;
-    try {
-      await deleteLayout(l.id);
-      layouts = layouts.filter((x) => x.id !== l.id);
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    }
+  // Drop a deleted custom layout and close its drawer.
+  function deleted(id: number) {
+    layouts = layouts.filter((x) => x.id !== id);
+    editingCustomId = null;
   }
 
   function created(l: LayoutManagerView) {
@@ -133,14 +124,21 @@
     newOpen = false;
   }
 
-  // ── drag-to-reorder (custom layouts only) ────────────────────────────────
-  function onDragStart(id: number, e: DragEvent) {
-    dragId = id;
-    e.dataTransfer?.setData('text/plain', String(id));
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  // ── drag-to-reorder (handle-initiated only) ──────────────────────────────
+  // The drag starts on the .lm-handle (draggable), never the whole row. Use the
+  // parent row as the drag image so the ghost is the full row, not the grip.
+  function rowDragImage(e: DragEvent) {
+    const row = (e.currentTarget as HTMLElement).closest('.lm-row') as HTMLElement | null;
+    if (row && e.dataTransfer) e.dataTransfer.setDragImage(row, 16, Math.min(20, row.offsetHeight / 2));
   }
 
-  function onDragOver(overId: number, e: DragEvent) {
+  function onCustomDragStart(id: number, e: DragEvent) {
+    dragId = id;
+    e.dataTransfer?.setData('text/plain', `c:${id}`);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    rowDragImage(e);
+  }
+  function onCustomDragOver(overId: number, e: DragEvent) {
     e.preventDefault();
     if (dragId === null || dragId === overId) return;
     const order = customs.slice();
@@ -149,12 +147,33 @@
     if (from === -1 || to === -1) return;
     const [moved] = order.splice(from, 1);
     order.splice(to, 0, moved);
-    // Reassemble the full list: defaults keep their order, customs take the new one.
+    // Reassemble: defaults keep their order, customs take the new one.
     layouts = [...layouts.filter((l) => l.isDefault), ...order];
+  }
+
+  function onDefaultDragStart(tableId: number, e: DragEvent) {
+    dragTableId = tableId;
+    e.dataTransfer?.setData('text/plain', `d:${tableId}`);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    rowDragImage(e);
+  }
+  function onDefaultDragOver(overTableId: number, e: DragEvent) {
+    e.preventDefault();
+    if (dragTableId === null || dragTableId === overTableId) return;
+    const order = defaultGroups.map((g) => g.tableId);
+    const from = order.indexOf(dragTableId);
+    const to = order.indexOf(overTableId);
+    if (from === -1 || to === -1) return;
+    const [moved] = order.splice(from, 1);
+    order.splice(to, 0, moved);
+    // Each table's trio moves as a contiguous block; customs keep their order.
+    const reordered = order.flatMap((tid) => layouts.filter((l) => l.isDefault && l.tableId === tid));
+    layouts = [...reordered, ...layouts.filter((l) => !l.isDefault)];
   }
 
   async function onDragEnd() {
     dragId = null;
+    dragTableId = null;
     try {
       layouts = await reorderLayouts(layouts.map((l) => l.id));
     } catch (e) {
@@ -167,7 +186,7 @@
 <div class="lm">
   <header class="sc-viewhead lm-head">
     <div class="lm-title">
-      <span class="sc-micro">Layouts</span>
+      <span class="lm-apptitle">Manage Layouts</span>
       <span class="sc-count">
         {defaultGroups.length} {defaultGroups.length === 1 ? 'table' : 'tables'}{customs.length > 0
           ? ` · ${customs.length} custom`
@@ -184,15 +203,13 @@
       >
         <Icon name="plus" />New layout
       </button>
-      <button type="button" class="sc-btn" onclick={done}>Done</button>
+      <button type="button" class="lm-x" title="Close" aria-label="Close" onclick={done}>
+        <Icon name="close" />
+      </button>
     </div>
   </header>
 
-  {#if error}
-    <p class="sc-note lm-error">{error}</p>
-  {/if}
-
-  <div class="lm-list">
+  <div class="lm-body">
     {#if loading}
       <p class="sc-note sc-hint">Loading layouts...</p>
     {:else if layouts.length === 0}
@@ -201,44 +218,56 @@
         <p class="sc-hint">Create a table first, then add layouts for it here.</p>
       </div>
     {:else}
-      <!-- Default layouts: one row per table, views as toggle chips. -->
-      <div class="lm-colhead lm-colhead--default sc-colhead">
+      <!-- Default layouts: one row per table, views as pills, edited in a drawer. -->
+      <div class="lm-section">Default layouts</div>
+      <div class="lm-colhead sc-colhead">
+        <span aria-hidden="true"></span>
         <span class="sc-micro">Table</span>
         <span class="sc-micro">Views</span>
         <span aria-hidden="true"></span>
+        <span aria-hidden="true"></span>
       </div>
       {#each defaultGroups as group (group.tableId)}
-        <div class="lm-row lm-row--default">
-          <button
-            type="button"
-            class="lm-name"
-            onclick={() => openDefault(group)}
-            title="Open in Layout Mode"
-          >
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="lm-row"
+          class:dragging={dragTableId === group.tableId}
+          ondragover={(e) => onDefaultDragOver(group.tableId, e)}
+        >
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <span
+            class="lm-handle"
+            title="Drag to reorder"
+            draggable="true"
+            ondragstart={(e) => onDefaultDragStart(group.tableId, e)}
+            ondragend={onDragEnd}
+          ></span>
+          <button type="button" class="lm-name" onclick={() => openDefault(group)} title="Open in Layout Mode">
             {group.tableName}
           </button>
-          <span class="lm-chips">
+          <span class="lm-pills">
             {#each group.views as v (v.id)}
-              <button
-                type="button"
-                class="lm-chip"
-                class:on={v.enabled}
-                onclick={() => toggleView(v)}
-                title={v.enabled ? `Disable ${viewLabel(v.view)} view` : `Enable ${viewLabel(v.view)} view`}
-                aria-pressed={v.enabled}
-              >
-                {viewLabel(v.view)}
-              </button>
+              <span class="lm-pill" class:off={!v.enabled}>{viewLabel(v.view)}</span>
             {/each}
           </span>
-          <span class="lm-hint">default layout</span>
+          <span aria-hidden="true"></span>
+          <span class="lm-actions">
+            <button
+              type="button"
+              class="sc-btn sc-btn--icon sc-btn--ghost"
+              title="Edit views"
+              onclick={() => (editingTableId = group.tableId)}
+            >
+              <Icon name="edit" />
+            </button>
+          </span>
         </div>
       {/each}
 
       <!-- Custom layouts: standalone, renamable, deletable, reorderable. -->
       {#if customs.length > 0}
         <div class="lm-section">Custom layouts</div>
-        <div class="lm-colhead lm-colhead--custom sc-colhead">
+        <div class="lm-colhead sc-colhead">
           <span aria-hidden="true"></span>
           <span class="sc-micro">Layout Name</span>
           <span class="sc-micro">View</span>
@@ -248,49 +277,31 @@
         {#each customs as l (l.id)}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
-            class="lm-row lm-row--custom"
+            class="lm-row"
             class:dragging={dragId === l.id}
-            draggable="true"
-            ondragstart={(e) => onDragStart(l.id, e)}
-            ondragover={(e) => onDragOver(l.id, e)}
-            ondragend={onDragEnd}
+            ondragover={(e) => onCustomDragOver(l.id, e)}
           >
-            <span class="lm-handle" title="Drag to reorder" aria-hidden="true"></span>
-            {#if renamingId === l.id}
-              <!-- svelte-ignore a11y_autofocus -->
-              <input
-                class="sc-cell lm-rename"
-                bind:value={renameValue}
-                onblur={() => commitRename(l.id)}
-                onkeydown={(e) => {
-                  if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur();
-                  if (e.key === 'Escape') renamingId = null;
-                }}
-                autofocus
-              />
-            {:else}
-              <button type="button" class="lm-name" onclick={() => openLayout(l.id)} title="Open in Layout Mode">
-                {l.name}
-              </button>
-            {/if}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <span
+              class="lm-handle"
+              title="Drag to reorder"
+              draggable="true"
+              ondragstart={(e) => onCustomDragStart(l.id, e)}
+              ondragend={onDragEnd}
+            ></span>
+            <button type="button" class="lm-name" onclick={() => openLayout(l.id)} title="Open in Layout Mode">
+              {l.name}
+            </button>
             <span class="lm-view">{viewLabel(l.view)}</span>
             <span class="lm-table">{l.tableName}</span>
             <span class="lm-actions">
               <button
                 type="button"
                 class="sc-btn sc-btn--icon sc-btn--ghost"
-                title="Rename"
-                onclick={() => startRename(l)}
+                title="Edit layout"
+                onclick={() => (editingCustomId = l.id)}
               >
                 <Icon name="edit" />
-              </button>
-              <button
-                type="button"
-                class="sc-btn sc-btn--icon sc-btn--ghost sc-btn--danger"
-                title="Delete"
-                onclick={() => remove(l)}
-              >
-                <Icon name="delete" />
               </button>
             </span>
           </div>
@@ -298,44 +309,146 @@
       {/if}
     {/if}
   </div>
-</div>
 
-{#if newOpen}
-  <NewLayoutDrawer {tables} onclose={() => (newOpen = false)} oncreate={created} />
-{/if}
+  {#if error}
+    <div class="lm-error" role="alert">
+      <svg class="lm-error-ico" aria-hidden="true"><use href="#icon-find" /></svg>
+      <span>{error}</span>
+      <button type="button" class="lm-error-x" title="Dismiss" onclick={() => (error = '')}>
+        <svg class="lm-error-ico" aria-hidden="true"><use href="#icon-minus" /></svg>
+      </button>
+    </div>
+  {/if}
+
+  {#if newOpen}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="lm-scrim" onclick={() => (newOpen = false)}></div>
+    <NewLayoutDrawer {tables} onclose={() => (newOpen = false)} oncreate={created} />
+  {:else if editingGroup}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="lm-scrim" onclick={() => (editingTableId = null)}></div>
+    <DefaultViewsDrawer
+      tableName={editingGroup.tableName}
+      views={editingGroup.views}
+      onclose={() => (editingTableId = null)}
+      onupdated={viewUpdated}
+    />
+  {:else if editingCustom}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="lm-scrim" onclick={() => (editingCustomId = null)}></div>
+    <CustomLayoutDrawer
+      layout={editingCustom}
+      onclose={() => (editingCustomId = null)}
+      onrenamed={renamed}
+      ondeleted={deleted}
+    />
+  {/if}
+</div>
 
 <style>
   .lm {
     position: relative;
     height: 100%;
     min-height: 0;
-    overflow: auto;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
+    background: var(--rm-control-bg);
   }
   .lm-head {
-    position: sticky;
-    top: 0;
-    z-index: 2;
+    flex: none;
   }
   .lm-title {
     display: flex;
     align-items: baseline;
     gap: 10px;
   }
+  .lm-apptitle {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--rm-text);
+  }
   .lm-head-actions {
     display: flex;
+    align-items: center;
     gap: 8px;
   }
-  .lm-error {
-    color: var(--rm-danger);
+  /* Upper-right close (X) — dismisses the pane, like the classic Manage dialogs. */
+  .lm-x {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0.5px solid var(--rm-border);
+    border-radius: var(--rm-radius);
+    background: var(--rm-control-bg);
+    color: var(--rm-text-dim);
+    cursor: pointer;
+    box-shadow: var(--rm-elev-1);
+    transition:
+      background 0.12s ease,
+      color 0.12s ease,
+      border-color 0.12s ease;
   }
-  .lm-list {
+  .lm-x:hover {
+    color: var(--rm-text);
+    border-color: var(--rm-border-strong);
+  }
+  .lm-x :global(.icon) {
+    width: 15px;
+    height: 15px;
+  }
+  .lm-body {
     flex: 1 1 auto;
     min-height: 0;
+    overflow: auto;
   }
 
-  /* Section divider between defaults and customs. */
+  /* Floating error toast — same pattern as the schema builder's .sb-error. */
+  .lm-error {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: min(38rem, calc(100vw - 2rem));
+    padding: 9px 10px 9px 14px;
+    border-radius: 9px;
+    background: var(--rm-danger);
+    color: #fff;
+    font-size: 12.5px;
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.22);
+  }
+  .lm-error-ico {
+    width: 1em;
+    height: 1em;
+    fill: currentColor;
+    flex: none;
+  }
+  .lm-error-x {
+    margin-left: 4px;
+    padding: 2px;
+    border: 0;
+    border-radius: 0;
+    background: rgba(255, 255, 255, 0.18);
+    color: #fff;
+    line-height: 0;
+    cursor: pointer;
+    transition: background 0.12s ease;
+  }
+  .lm-error-x:hover {
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  /* Section divider (Default / Custom). */
   .lm-section {
     padding: 9px 18px;
     font-size: 11px;
@@ -348,21 +461,17 @@
     border-bottom: 0.5px solid var(--rm-border);
   }
 
+  /* One shared column grid for BOTH groups, so their columns line up:
+     handle · name · view(s) · associated table · actions. */
   .lm-colhead,
   .lm-row {
     display: grid;
+    grid-template-columns: 24px minmax(0, 1.4fr) minmax(0, 1.7fr) minmax(0, 1.3fr) 72px;
     align-items: center;
     gap: 12px;
-    padding: 0 12px 0 18px;
+    padding: 0 12px 0 14px;
   }
-  .lm-colhead--default,
-  .lm-row--default {
-    grid-template-columns: minmax(0, 1.1fr) minmax(0, 2fr) 110px;
-  }
-  .lm-colhead--custom,
-  .lm-row--custom {
-    grid-template-columns: 24px minmax(0, 1.4fr) 72px minmax(0, 1.4fr) 68px;
-  }
+  /* the colhead's sticky/height/border/bg come from .sc-colhead */
   .lm-row {
     min-height: var(--sc-row-h);
     border-bottom: 0.5px solid var(--rm-border);
@@ -383,6 +492,9 @@
     background-size: 4px 4px;
     background-repeat: repeat;
   }
+  .lm-handle:active {
+    cursor: grabbing;
+  }
   .lm-name {
     min-width: 0;
     text-align: left;
@@ -402,43 +514,29 @@
     color: var(--rm-accent);
     text-decoration: underline;
   }
-  .lm-rename {
-    min-width: 0;
-  }
 
-  /* Toggle chips (default rows). */
-  .lm-chips {
+  /* Default-row view pills — static display of enabled/disabled state; editing
+     happens in the Edit-views drawer (the pencil). */
+  .lm-pills {
     display: flex;
     gap: 6px;
   }
-  .lm-chip {
+  .lm-pill {
     height: 22px;
     padding: 0 10px;
+    display: inline-flex;
+    align-items: center;
     border-radius: 11px;
-    border: 0.5px solid var(--rm-border);
-    background: var(--rm-control-bg);
-    color: var(--rm-text-dim);
-    font: inherit;
+    border: 0.5px solid transparent;
+    background: var(--rm-accent);
+    color: #fff;
     font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.02em;
-    cursor: pointer;
-    transition:
-      background 0.12s ease,
-      color 0.12s ease,
-      border-color 0.12s ease;
   }
-  .lm-chip:hover {
-    border-color: var(--rm-accent);
-  }
-  .lm-chip.on {
-    background: var(--rm-accent);
-    border-color: transparent;
-    color: #fff;
-  }
-  .lm-hint {
-    justify-self: end;
-    font-size: 11px;
+  .lm-pill.off {
+    background: var(--rm-control-bg);
+    border-color: var(--rm-border);
     color: var(--rm-text-dim);
   }
 
@@ -468,5 +566,12 @@
     display: flex;
     justify-content: flex-end;
     gap: 2px;
+  }
+
+  .lm-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 15;
+    background: rgba(20, 22, 28, 0.14);
   }
 </style>

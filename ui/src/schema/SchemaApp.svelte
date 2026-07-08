@@ -99,11 +99,15 @@
 
 <div class="sb">
   <header class="sb-head">
+    <span class="sb-apptitle">Manage Database</span>
     <nav class="sb-tabs" aria-label="Schema sections">
       <button type="button" class="sb-tab" class:active={tab === 'tables'} onclick={goTables}>Tables</button>
       <button type="button" class="sb-tab" class:active={tab === 'fields'} onclick={goFields}>Fields</button>
       <button type="button" class="sb-tab" class:active={tab === 'relationships'} onclick={goRelationships}>Relationships</button>
     </nav>
+    <button type="button" class="sb-x" title="Close" aria-label="Close" onclick={done}>
+      <svg class="icon" aria-hidden="true"><use href="#icon-close" /></svg>
+    </button>
   </header>
 
   <div class="sb-body">
@@ -139,7 +143,6 @@
     <button type="button" class="sc-btn sc-btn--primary" onclick={saveSchema} disabled={!store.hasChanges || store.saving}>
       {store.saving ? 'Saving...' : 'Save'}
     </button>
-    <button type="button" class="sc-btn" onclick={done}>Done</button>
   </footer>
 </div>
 
@@ -165,11 +168,46 @@
   }
   .sb-head {
     flex: none;
-    display: flex;
-    justify-content: center;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
     padding: 10px 16px;
     border-bottom: 0.5px solid var(--rm-border);
     background: var(--rm-toolbar-bg);
+  }
+  .sb-apptitle {
+    justify-self: start;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--rm-text);
+  }
+  /* Upper-right close (X) — dismisses the pane, like the classic Manage dialogs. */
+  .sb-x {
+    justify-self: end;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0.5px solid var(--rm-border);
+    border-radius: var(--rm-radius);
+    background: var(--rm-control-bg);
+    color: var(--rm-text-dim);
+    cursor: pointer;
+    box-shadow: var(--rm-elev-1);
+    transition:
+      background 0.12s ease,
+      color 0.12s ease,
+      border-color 0.12s ease;
+  }
+  .sb-x:hover {
+    color: var(--rm-text);
+    border-color: var(--rm-border-strong);
+  }
+  .sb-x .icon {
+    width: 15px;
+    height: 15px;
   }
   .sb-tabs {
     display: inline-flex;

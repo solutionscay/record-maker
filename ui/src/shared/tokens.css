@@ -10,19 +10,27 @@
  * Declared on `body` — exactly where shell.html declares them — so specificity
  * and inheritance are identical whichever copy loads first. */
 body {
-  --rm-toolbar-bg: #f6f6f7;
-  --rm-sidebar-bg: #f0f0f2;
-  --rm-inspector-bg: #f7f7f8;
-  --rm-workspace-bg: #e9e9ec;
+  --rm-toolbar-bg: #f4f4f6;
+  --rm-sidebar-bg: #eaeaee;
+  --rm-inspector-bg: #eeeef1;
+  --rm-workspace-bg: #e4e4e8;
   --rm-text: #1c1c1e;
   --rm-text-dim: #8a8a8e;
-  --rm-border: rgba(0, 0, 0, 0.09);
-  --rm-border-strong: rgba(0, 0, 0, 0.16);
+  --rm-border: rgba(0, 0, 0, 0.12);
+  --rm-border-strong: rgba(0, 0, 0, 0.2);
   --rm-control-bg: #ffffff;
-  --rm-segment-track: #e6e6e9;
+  --rm-segment-track: #e0e0e4;
   --rm-segment-active-bg: #ffffff;
   --rm-accent: #0a84ff;
   --rm-accent-soft: rgba(10, 132, 255, 0.12);
   --rm-danger: #ff453a;
   --rm-shadow-card: 0 1px 3px rgba(0, 0, 0, 0.08), 0 8px 26px rgba(0, 0, 0, 0.07);
+  /* Fuller-look design vocabulary (rounded + elevated): controls round to match
+   * the already-rounded segmented tabs/stepper; each labeled zone becomes a
+   * lifted card so panels read as layered material, not loose outlines. */
+  --rm-radius: 7px;
+  --rm-radius-lg: 10px;
+  --rm-card-bg: #fbfbfc;
+  --rm-elev-1: 0 1px 2px rgba(0, 0, 0, 0.07), 0 1px 1px rgba(0, 0, 0, 0.04);
+  --rm-elev-2: 0 1px 3px rgba(0, 0, 0, 0.1), 0 6px 16px rgba(0, 0, 0, 0.06);
 }

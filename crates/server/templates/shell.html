@@ -692,6 +692,7 @@
           danger: true
         }).then(function (ok) {
           if (ok) {
+            window.schemaAllowNavigation = true;
             window.location.href = url;
           }
         });

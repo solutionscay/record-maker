@@ -16,7 +16,7 @@
 
   onMount(() => {
     function handleBeforeUnload(e: BeforeUnloadEvent) {
-      if (store.hasChanges) {
+      if (store.hasChanges && !(window as any).schemaAllowNavigation) {
         e.preventDefault();
         e.returnValue = '';
       }
@@ -118,6 +118,7 @@
       );
       if (!ok) return;
     }
+    (window as any).schemaAllowNavigation = true;
     window.location.href = '/';
   }
 </script>

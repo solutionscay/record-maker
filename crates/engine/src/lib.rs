@@ -21,8 +21,8 @@ pub use layout::{
     PartMeta, RestoreObject, RestoreResult,
 };
 pub use model::{
-    FieldKind, FieldMeta, NewField, NewRelationship, NewValueList, RelationshipMeta, TableMeta,
-    ValueListItem, ValueListMeta,
+    Cardinality, FieldKind, FieldMeta, NewField, NewRelationship, NewValueList, RelationshipMeta,
+    TableMeta, ValueListItem, ValueListMeta,
 };
 pub use options::{
     FieldOptions, FieldReference, FieldReferenceError, RangeRule, ValidationError, ValidationRules,

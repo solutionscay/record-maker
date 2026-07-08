@@ -92,6 +92,17 @@ pub struct FieldMeta {
     pub position: i64,
 }
 
+/// Traversal cardinality of a relationship route: whether following it yields
+/// at most one record or a set. Derived from which side holds the FK, never
+/// stored — see [`RelationshipMeta::forward_cardinality`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cardinality {
+    /// At most one record (the FK holds a single parent key).
+    ToOne,
+    /// A set of records (many children may share a parent key).
+    ToMany,
+}
+
 /// Metadata for a named foreign-key relationship between two user tables.
 #[derive(Debug, Clone)]
 pub struct RelationshipMeta {
@@ -105,6 +116,27 @@ pub struct RelationshipMeta {
     pub from_field: i64,
     /// Key field on [`RelationshipMeta::to_table`].
     pub to_field: i64,
+    /// Referential flag (#110): a portal anchored here may create related
+    /// records. Only meaningful for a direct anchor; the CRUD engine enforces
+    /// direct-only. Defaults to the safe state (`false`).
+    pub allow_create: bool,
+    /// Referential flag (#110): a portal anchored here may delete (unlink) the
+    /// nearest related record. Defaults to the safe state (`false`).
+    pub allow_delete: bool,
+}
+
+impl RelationshipMeta {
+    /// Cardinality of following the declared direction (FK owner → referenced
+    /// parent): at most one record, since the FK holds a single parent key.
+    pub const fn forward_cardinality(&self) -> Cardinality {
+        Cardinality::ToOne
+    }
+
+    /// Cardinality of following the reverse direction (referenced parent → FK
+    /// owners): a set, since many children may reference the same parent key.
+    pub const fn reverse_cardinality(&self) -> Cardinality {
+        Cardinality::ToMany
+    }
 }
 
 /// A relationship to create or replace.
@@ -902,7 +934,7 @@ impl Solution {
     /// All declared relationships, ordered by source table then name.
     pub fn relationships(&self) -> Result<Vec<RelationshipMeta>> {
         let mut stmt = self.app.prepare(
-            "SELECT id, name, from_table, to_table, from_field, to_field \
+            "SELECT id, name, from_table, to_table, from_field, to_field, allow_create, allow_delete \
              FROM meta_relationship ORDER BY from_table, name, id",
         )?;
         let rows = stmt.query_map([], relationship_from_row)?;
@@ -912,7 +944,7 @@ impl Solution {
     /// Declared relationships whose FK/source side is `from_table`.
     pub fn relationships_from_table(&self, from_table: i64) -> Result<Vec<RelationshipMeta>> {
         let mut stmt = self.app.prepare(
-            "SELECT id, name, from_table, to_table, from_field, to_field \
+            "SELECT id, name, from_table, to_table, from_field, to_field, allow_create, allow_delete \
              FROM meta_relationship WHERE from_table=?1 ORDER BY from_table, name, id",
         )?;
         let rows = stmt.query_map(params![from_table], relationship_from_row)?;
@@ -922,7 +954,7 @@ impl Solution {
     /// Look up one relationship by id.
     pub fn relationship_by_id(&self, id: i64) -> Result<Option<RelationshipMeta>> {
         let mut stmt = self.app.prepare(
-            "SELECT id, name, from_table, to_table, from_field, to_field \
+            "SELECT id, name, from_table, to_table, from_field, to_field, allow_create, allow_delete \
              FROM meta_relationship WHERE id=?1",
         )?;
         let mut rows = stmt.query_map(params![id], relationship_from_row)?;
@@ -967,6 +999,10 @@ impl Solution {
             to_table: rel.to_table,
             from_field: rel.from_field,
             to_field: rel.to_field,
+            // New relationships default to the safe state (no create/delete);
+            // the referential flags are set separately on the graph connector.
+            allow_create: false,
+            allow_delete: false,
         };
         stamp_reference(&tx, &source, Some(&saved))?;
         tx.commit()?;
@@ -1005,6 +1041,10 @@ impl Solution {
             to_table: rel.to_table,
             from_field: rel.from_field,
             to_field: rel.to_field,
+            // Structural update leaves the referential flags untouched — they
+            // are owned by the graph connector drawer (#110), not the FK edit.
+            allow_create: old.allow_create,
+            allow_delete: old.allow_delete,
         };
         let tx = self.app.transaction()?;
         tx.execute(
@@ -1042,6 +1082,30 @@ impl Solution {
         }
         tx.commit()?;
         Ok(n)
+    }
+
+    /// Set the referential (create/delete) flags on a relationship (#110).
+    ///
+    /// These are the portal CRUD anchor permissions, owned by the relationship
+    /// (one permission, no per-portal flag) and edited on the graph connector
+    /// drawer — kept separate from [`Self::update_relationship`] so a structural
+    /// FK edit never clobbers them and the flag edit never touches structure.
+    /// Returns the updated relationship, or `None` when no such relationship
+    /// exists.
+    pub fn set_relationship_referential(
+        &mut self,
+        id: i64,
+        allow_create: bool,
+        allow_delete: bool,
+    ) -> Result<Option<RelationshipMeta>> {
+        let n = self.app.execute(
+            "UPDATE meta_relationship SET allow_create=?1, allow_delete=?2 WHERE id=?3",
+            params![allow_create, allow_delete, id],
+        )?;
+        if n == 0 {
+            return Ok(None);
+        }
+        self.relationship_by_id(id)
     }
 
     /// Atomically align a field's reference constraint with the relationship
@@ -1160,6 +1224,8 @@ fn relationship_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Relationsh
         to_table: row.get(3)?,
         from_field: row.get(4)?,
         to_field: row.get(5)?,
+        allow_create: row.get(6)?,
+        allow_delete: row.get(7)?,
     })
 }
 
@@ -1250,7 +1316,9 @@ fn value_ref_to_string(v: ValueRef<'_>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::{FieldKind, NewField, NewRelationship, NewValueList, Solution, ValueListItem};
+    use crate::{
+        Cardinality, FieldKind, NewField, NewRelationship, NewValueList, Solution, ValueListItem,
+    };
 
     #[test]
     fn field_kind_str_parse_and_sql_type_round_trip() {
@@ -1710,6 +1778,93 @@ mod tests {
         assert_eq!(renamed.name, "bill_to");
         assert_eq!(s.delete_relationship(rel.id).unwrap(), 1);
         assert!(s.relationships().unwrap().is_empty());
+    }
+
+    #[test]
+    fn relationship_carries_referential_flags_and_derived_cardinality() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let customers = s
+            .create_table(
+                "Customers",
+                &[NewField {
+                    name: "Id".into(),
+                    kind: FieldKind::Number,
+                }],
+            )
+            .unwrap();
+        let invoices = s
+            .create_table(
+                "Invoices",
+                &[NewField {
+                    name: "Customer Id".into(),
+                    kind: FieldKind::Number,
+                }],
+            )
+            .unwrap();
+        let customer_id = s.fields(customers).unwrap()[0].id;
+        let invoice_customer_id = s.fields(invoices).unwrap()[0].id;
+
+        let rel = s
+            .create_relationship(&NewRelationship {
+                name: "customer".into(),
+                from_table: invoices,
+                to_table: customers,
+                from_field: invoice_customer_id,
+                to_field: customer_id,
+            })
+            .unwrap()
+            .unwrap();
+
+        // New relationships default to the safe state (no create/delete).
+        assert!(!rel.allow_create);
+        assert!(!rel.allow_delete);
+
+        // Cardinality is derived from the FK side: forward (child → parent) is
+        // to-one, reverse (parent → children) is to-many.
+        assert_eq!(rel.forward_cardinality(), Cardinality::ToOne);
+        assert_eq!(rel.reverse_cardinality(), Cardinality::ToMany);
+
+        // Flags persist through a dedicated setter and survive a reload.
+        let updated = s
+            .set_relationship_referential(rel.id, true, true)
+            .unwrap()
+            .unwrap();
+        assert!(updated.allow_create);
+        assert!(updated.allow_delete);
+        let reloaded = s.relationship_by_id(rel.id).unwrap().unwrap();
+        assert!(reloaded.allow_create);
+        assert!(reloaded.allow_delete);
+
+        // A structural FK edit leaves the referential flags untouched.
+        let renamed = s
+            .update_relationship(
+                rel.id,
+                &NewRelationship {
+                    name: "bill_to".into(),
+                    from_table: invoices,
+                    to_table: customers,
+                    from_field: invoice_customer_id,
+                    to_field: customer_id,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert!(renamed.allow_create);
+        assert!(renamed.allow_delete);
+
+        // Turning a flag back off persists too.
+        let cleared = s
+            .set_relationship_referential(rel.id, false, true)
+            .unwrap()
+            .unwrap();
+        assert!(!cleared.allow_create);
+        assert!(cleared.allow_delete);
+
+        // Setting flags on a missing relationship yields None.
+        assert!(s
+            .set_relationship_referential(999_999, true, true)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

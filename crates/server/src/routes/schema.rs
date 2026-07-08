@@ -8,9 +8,9 @@ use axum::{
     Json,
 };
 use record_maker_engine::{
-    options::with_reference, FieldKind, FieldMeta, FieldReference, FieldReferenceError, NewField,
-    NewRelationship, NewValueList, RelationshipMeta, Solution, TableMeta, ValueListItem,
-    ValueListMeta,
+    options::with_reference, Cardinality, FieldKind, FieldMeta, FieldReference,
+    FieldReferenceError, NewField, NewRelationship, NewValueList, RelationshipMeta, Solution,
+    TableMeta, ValueListItem, ValueListMeta,
 };
 use serde_json::Value;
 
@@ -50,6 +50,13 @@ pub(crate) struct RelationshipSchemaView {
     to_table: i64,
     from_field: i64,
     to_field: i64,
+    /// Portal CRUD anchor permissions (#110).
+    allow_create: bool,
+    allow_delete: bool,
+    /// Derived traversal cardinality: forward (FK owner → parent) is always
+    /// "one", reverse (parent → children) is always "many".
+    forward_cardinality: String,
+    reverse_cardinality: String,
 }
 
 #[derive(serde::Serialize)]
@@ -146,6 +153,15 @@ pub(crate) struct RelationshipBody {
     to_field: i64,
 }
 
+/// Body for setting the referential (create/delete) permission flags on an
+/// existing relationship (#110).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RelationshipReferentialBody {
+    allow_create: bool,
+    allow_delete: bool,
+}
+
 fn table_schema_view(t: TableMeta) -> TableSchemaView {
     TableSchemaView {
         id: t.id,
@@ -180,7 +196,17 @@ fn field_schema_view_with_options(f: FieldMeta, mut options: Value) -> FieldSche
     }
 }
 
+fn cardinality_str(c: Cardinality) -> String {
+    match c {
+        Cardinality::ToOne => "one",
+        Cardinality::ToMany => "many",
+    }
+    .to_string()
+}
+
 fn relationship_schema_view(r: RelationshipMeta) -> RelationshipSchemaView {
+    let forward_cardinality = cardinality_str(r.forward_cardinality());
+    let reverse_cardinality = cardinality_str(r.reverse_cardinality());
     RelationshipSchemaView {
         id: r.id,
         name: r.name,
@@ -188,6 +214,10 @@ fn relationship_schema_view(r: RelationshipMeta) -> RelationshipSchemaView {
         to_table: r.to_table,
         from_field: r.from_field,
         to_field: r.to_field,
+        allow_create: r.allow_create,
+        allow_delete: r.allow_delete,
+        forward_cardinality,
+        reverse_cardinality,
     }
 }
 
@@ -608,6 +638,21 @@ pub(crate) async fn update_schema_relationship(
     // side moved) and stamps the new one, transactionally with the row (#134).
     let rel = sol
         .update_relationship(id, &rel)?
+        .ok_or_else(AppError::not_found)?;
+    Ok(Json(relationship_schema_view(rel)))
+}
+
+pub(crate) async fn set_schema_relationship_referential(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<RelationshipReferentialBody>,
+) -> AppResult<Json<RelationshipSchemaView>> {
+    let mut sol = st.sol.lock().unwrap();
+    // Referential flags are a permission on the relationship (#110), edited on
+    // the graph connector drawer — set independently of the FK structure so a
+    // structural edit never clobbers them and vice versa.
+    let rel = sol
+        .set_relationship_referential(id, body.allow_create, body.allow_delete)?
         .ok_or_else(AppError::not_found)?;
     Ok(Json(relationship_schema_view(rel)))
 }

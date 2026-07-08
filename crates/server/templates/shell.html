@@ -680,6 +680,26 @@
     LID = "{{ lid }}";
     {% when None %}
     {% endmatch %}
+
+    function navigateWithSchemaGuard(url) {
+      if (MODE === 'schema' && window.schemaHasChanges && window.schemaHasChanges()) {
+        var summary = window.schemaChangeSummary ? window.schemaChangeSummary() : 'You have unsaved changes';
+        window.appConfirm({
+          title: 'Unsaved schema changes',
+          message: 'You have unsaved changes: ' + summary + '. If you leave now, your changes will be discarded.',
+          confirmLabel: 'Discard changes',
+          cancelLabel: 'Keep editing',
+          danger: true
+        }).then(function (ok) {
+          if (ok) {
+            window.location.href = url;
+          }
+        });
+      } else {
+        window.location.href = url;
+      }
+    }
+
     document.addEventListener('keydown', function (e) {
       // Ctrl/⌘ Shift D — open the schema builder. Global entry for now; a proper
       // menu entry replaces it later (#113). Handled before the no-shift guard
@@ -693,7 +713,7 @@
       // schema-builder binding above; a proper menu entry replaces both later.
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'l') {
         e.preventDefault();
-        if (MODE !== 'layouts') window.location.href = '/layouts';
+        if (MODE !== 'layouts') navigateWithSchemaGuard('/layouts');
         return;
       }
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
@@ -739,7 +759,7 @@
       e.preventDefault();
       var dest = k === 'l' ? 'design' : 'browse';
       if (MODE === dest) return; // already in that mode
-      window.location.href = '/' + dest + '/' + LID;
+      navigateWithSchemaGuard('/' + dest + '/' + LID);
     });
     // Show the platform-correct modifier symbol in keyboard hints.
     if (/Mac|iPhone|iPad/.test(navigator.platform)) {

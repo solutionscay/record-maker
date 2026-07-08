@@ -8,9 +8,31 @@
   import FieldDrawer from './FieldDrawer.svelte';
   import RelationshipsView from './RelationshipsView.svelte';
   import NoTablesEmpty from './NoTablesEmpty.svelte';
+  import { confirmDanger } from './confirm';
+  import { onMount } from 'svelte';
 
   const store = new SchemaStore();
   void store.load();
+
+  onMount(() => {
+    function handleBeforeUnload(e: BeforeUnloadEvent) {
+      if (store.hasChanges) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    // Expose dirty guard for global mode-switching shortcuts (#164)
+    (window as any).schemaHasChanges = () => store.hasChanges;
+    (window as any).schemaChangeSummary = () => store.changeSummary;
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      delete (window as any).schemaHasChanges;
+      delete (window as any).schemaChangeSummary;
+    };
+  });
 
   type Tab = 'tables' | 'fields' | 'relationships';
   let tab = $state<Tab>('tables');
@@ -72,20 +94,42 @@
     if (ok) closeDrawers();
   }
 
-  function discard() {
+  async function discard() {
+    if (store.hasChanges) {
+      const ok = await confirmDanger(
+        'Are you sure you want to discard all unsaved schema changes? This cannot be undone.',
+        'Discard changes?',
+        'Discard changes',
+        'Keep editing',
+      );
+      if (!ok) return;
+    }
     store.discardChanges();
     closeDrawers();
   }
 
-  function done() {
-    if (store.hasChanges && !window.confirm('Discard unsaved schema changes?')) return;
+  async function done() {
+    if (store.hasChanges) {
+      const ok = await confirmDanger(
+        `You have unsaved changes: ${store.changeSummary}. If you leave now, your changes will be discarded.`,
+        'Unsaved schema changes',
+        'Discard changes',
+        'Keep editing',
+      );
+      if (!ok) return;
+    }
     window.location.href = '/';
   }
 </script>
 
 <div class="sb">
   <header class="sb-head">
-    <span class="sb-apptitle">Manage Database</span>
+    <span class="sb-apptitle">
+      Manage Database
+      {#if store.hasChanges}
+        <span class="sb-apptitle-dot" title="Unsaved changes"></span>
+      {/if}
+    </span>
     <nav class="sb-tabs" aria-label="Schema sections">
       <button type="button" class="sb-tab" class:active={tab === 'tables'} onclick={goTables}>Tables</button>
       <button type="button" class="sb-tab" class:active={tab === 'fields'} onclick={goFields}>Fields</button>
@@ -122,7 +166,12 @@
   </div>
 
   <footer class="sb-foot">
-    <span class="sc-hint sb-status">{store.changeSummary}</span>
+    <span class="sc-hint sb-status" class:sb-status--dirty={store.hasChanges}>
+      {#if store.hasChanges}
+        <span class="sb-status-dot"></span>
+      {/if}
+      {store.changeSummary}
+    </span>
     <button type="button" class="sc-btn" onclick={discard} disabled={!store.hasChanges || store.saving}>Discard</button>
     <button type="button" class="sc-btn sc-btn--primary" onclick={saveSchema} disabled={!store.hasChanges || store.saving}>
       {store.saving ? 'Saving...' : 'Save'}
@@ -164,6 +213,17 @@
     font-size: 13px;
     font-weight: 700;
     color: var(--rm-text);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .sb-apptitle-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #ff9f0a;
+    box-shadow: 0 0 6px rgba(255, 159, 10, 0.6);
+    display: inline-block;
   }
   /* Upper-right close (X) — dismisses the pane, like the classic Manage dialogs. */
   .sb-x {
@@ -244,6 +304,24 @@
   }
   .sb-status {
     margin-right: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .sb-status--dirty {
+    color: #ff9f0a;
+    font-weight: 500;
+  }
+  .sb-status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #ff9f0a;
+    animation: sb-pulse 2s infinite ease-in-out;
+  }
+  @keyframes sb-pulse {
+    0%, 100% { opacity: 0.5; }
+    50% { opacity: 1; }
   }
   .sb-scrim {
     position: absolute;

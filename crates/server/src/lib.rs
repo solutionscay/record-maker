@@ -48,9 +48,10 @@ use routes::records::{create_record, delete_record, open_record, revert_record, 
 use routes::schema::{
     create_schema_field, create_schema_relationship, create_schema_table, create_value_list,
     delete_schema_field, delete_schema_relationship, delete_schema_table, delete_value_list,
-    duplicate_value_list, rename_schema_table, reorder_schema_fields, schema_fields,
-    schema_relationships, schema_tables, update_schema_field, update_schema_relationship,
-    update_schema_table, update_value_list, value_list_items, value_lists,
+    duplicate_value_list, rename_schema_table, reorder_schema_fields, reorder_schema_tables,
+    schema_fields, schema_relationships, schema_tables, update_schema_field,
+    update_schema_relationship, update_schema_table, update_value_list, value_list_items,
+    value_lists,
 };
 
 /// Default UI asset base directory (relative to the working directory). Used by
@@ -214,6 +215,7 @@ pub fn app(state: AppState) -> Router {
             "/schema/tables",
             get(schema_tables).post(create_schema_table),
         )
+        .route("/schema/tables/order", post(reorder_schema_tables))
         .route("/schema/tables/:table_id", post(update_schema_table))
         .route("/schema/tables/:table_id/rename", post(rename_schema_table))
         .route("/schema/tables/:table_id/delete", post(delete_schema_table))

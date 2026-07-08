@@ -3,7 +3,7 @@
 // (FieldGrid/FieldRow), so the two views can't drift out of sync on what
 // counts as a primary/required/unique/key/fk field.
 import type { SchemaStore } from './store.svelte';
-import type { FieldView } from './types';
+import type { FieldAutoEnterOptions, FieldView } from './types';
 
 export interface FieldBadgeInfo {
   primary: boolean;
@@ -13,6 +13,7 @@ export interface FieldBadgeInfo {
   fkNames: string[];
   /** Names of relationships where this field is referenced by another field. */
   keyNames: string[];
+  autoEnter: FieldAutoEnterOptions | null;
 }
 
 function tableName(store: SchemaStore, id: number): string {
@@ -32,5 +33,6 @@ export function fieldBadgeInfo(store: SchemaStore, tableId: number, field: Field
     unique: field.options?.validation?.unique ?? false,
     fkNames: from.map((r) => `${r.name} -> ${tableName(store, r.toTable)}.${fieldName(store, r.toTable, r.toField)}`),
     keyNames: to.map((r) => `${tableName(store, r.fromTable)}.${fieldName(store, r.fromTable, r.fromField)} -> ${r.name}`),
+    autoEnter: field.options?.autoEnter ?? null,
   };
 }

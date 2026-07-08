@@ -23,6 +23,7 @@ pub(crate) struct TableSchemaView {
     name: String,
     notes: String,
     phys: String,
+    position: i64,
 }
 
 #[derive(serde::Serialize)]
@@ -121,6 +122,12 @@ pub(crate) struct FieldOrderBody {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct TableOrderBody {
+    table_ids: Vec<i64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct RelationshipBody {
     name: String,
     from_table: i64,
@@ -135,6 +142,7 @@ fn table_schema_view(t: TableMeta) -> TableSchemaView {
         name: t.name,
         notes: t.notes,
         phys: t.phys,
+        position: t.position,
     }
 }
 
@@ -497,6 +505,20 @@ pub(crate) async fn reorder_schema_fields(
         fields
             .into_iter()
             .map(|field| field_schema_view_for_table(&sol, table_id, field))
+            .collect(),
+    ))
+}
+
+pub(crate) async fn reorder_schema_tables(
+    State(st): State<AppState>,
+    Json(body): Json<TableOrderBody>,
+) -> AppResult<Json<Vec<TableSchemaView>>> {
+    let mut sol = st.sol.lock().unwrap();
+    let tables = sol.reorder_tables(&body.table_ids)?;
+    Ok(Json(
+        tables
+            .into_iter()
+            .map(table_schema_view)
             .collect(),
     ))
 }

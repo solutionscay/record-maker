@@ -71,6 +71,7 @@ pub struct TableMeta {
     pub notes: String,
     /// Physical table name in data.db (always `t_<id>` — a safe identifier).
     pub phys: String,
+    pub position: i64,
 }
 
 /// Metadata for a field on a user table.
@@ -147,9 +148,12 @@ impl Solution {
     /// only place we interpolate identifiers into SQL strings.
     pub fn create_table(&mut self, name: &str, fields: &[NewField]) -> Result<i64> {
         let tx = self.app.transaction()?;
+        let next_pos: i64 = tx
+            .query_row("SELECT COALESCE(MAX(position), 0) + 1 FROM meta_table", [], |r| r.get(0))
+            .context("get next table position")?;
         tx.execute(
-            "INSERT INTO meta_table(name, phys_name) VALUES (?1, '')",
-            params![name],
+            "INSERT INTO meta_table(name, phys_name, position) VALUES (?1, '', ?2)",
+            params![name, next_pos],
         )
         .context("insert meta_table")?;
         let table_id = tx.last_insert_rowid();
@@ -474,6 +478,34 @@ impl Solution {
         self.fields(table_id)
     }
 
+    /// Reorder the flat tables list (#162): `table_ids` must include
+    /// every table in the solution, exactly once.
+    pub fn reorder_tables(&mut self, table_ids: &[i64]) -> Result<Vec<TableMeta>> {
+        let current = self.tables()?;
+        if current.len() != table_ids.len() {
+            bail!("table order must include every table exactly once");
+        }
+        for t in &current {
+            if !table_ids.contains(&t.id) {
+                bail!("table order must include every table exactly once");
+            }
+        }
+        for id in table_ids {
+            if table_ids.iter().filter(|other| *other == id).count() != 1 {
+                bail!("table order must not contain duplicates");
+            }
+        }
+        let tx = self.app.transaction()?;
+        for (position, table_id) in table_ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE meta_table SET position=?1 WHERE id=?2",
+                params![position as i64, table_id],
+            )?;
+        }
+        tx.commit()?;
+        self.tables()
+    }
+
     /// Delete a field from metadata and from the physical data table.
     pub fn delete_field(&mut self, table_id: i64, field_id: i64) -> Result<usize> {
         let Some(table) = self.table_by_id(table_id)? else {
@@ -519,17 +551,18 @@ impl Solution {
         Ok(n)
     }
 
-    /// All defined tables, by name.
+    /// All defined tables, by position and id.
     pub fn tables(&self) -> Result<Vec<TableMeta>> {
         let mut stmt = self
             .app
-            .prepare("SELECT id, name, notes, phys_name FROM meta_table ORDER BY name")?;
+            .prepare("SELECT id, name, notes, phys_name, position FROM meta_table ORDER BY position, id")?;
         let rows = stmt.query_map([], |r| {
             Ok(TableMeta {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 notes: r.get(2)?,
                 phys: r.get(3)?,
+                position: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -539,13 +572,14 @@ impl Solution {
     pub fn table_by_name(&self, name: &str) -> Result<Option<TableMeta>> {
         let mut stmt = self
             .app
-            .prepare("SELECT id, name, notes, phys_name FROM meta_table WHERE name=?1")?;
+            .prepare("SELECT id, name, notes, phys_name, position FROM meta_table WHERE name=?1")?;
         let mut rows = stmt.query_map(params![name], |r| {
             Ok(TableMeta {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 notes: r.get(2)?,
                 phys: r.get(3)?,
+                position: r.get(4)?,
             })
         })?;
         match rows.next() {
@@ -558,13 +592,14 @@ impl Solution {
     pub fn table_by_id(&self, id: i64) -> Result<Option<TableMeta>> {
         let mut stmt = self
             .app
-            .prepare("SELECT id, name, notes, phys_name FROM meta_table WHERE id=?1")?;
+            .prepare("SELECT id, name, notes, phys_name, position FROM meta_table WHERE id=?1")?;
         let mut rows = stmt.query_map(params![id], |r| {
             Ok(TableMeta {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 notes: r.get(2)?,
                 phys: r.get(3)?,
+                position: r.get(4)?,
             })
         })?;
         match rows.next() {
@@ -808,27 +843,28 @@ impl Solution {
 
     fn field_table_by_field_id(&self, field_id: i64) -> Result<Option<(TableMeta, FieldMeta)>> {
         let mut stmt = self.app.prepare(
-            "SELECT t.id, t.name, COALESCE(t.notes, ''), t.phys_name, \
+            "SELECT t.id, t.name, COALESCE(t.notes, ''), t.phys_name, t.position, \
                     f.id, f.name, COALESCE(f.notes, ''), f.phys_name, f.kind, COALESCE(f.options, ''), f.position \
              FROM meta_field f JOIN meta_table t ON t.id=f.table_id WHERE f.id=?1",
         )?;
         let mut rows = stmt.query_map(params![field_id], |r| {
-            let kind_s: String = r.get(8)?;
+            let kind_s: String = r.get(9)?;
             Ok((
                 TableMeta {
                     id: r.get(0)?,
                     name: r.get(1)?,
                     notes: r.get(2)?,
                     phys: r.get(3)?,
+                    position: r.get(4)?,
                 },
                 FieldMeta {
-                    id: r.get(4)?,
-                    name: r.get(5)?,
-                    notes: r.get(6)?,
-                    phys: r.get(7)?,
+                    id: r.get(5)?,
+                    name: r.get(6)?,
+                    notes: r.get(7)?,
+                    phys: r.get(8)?,
                     kind: FieldKind::parse(&kind_s).unwrap_or(FieldKind::Text),
-                    options: r.get(9)?,
-                    position: r.get(10)?,
+                    options: r.get(10)?,
+                    position: r.get(11)?,
                 },
             ))
         })?;
@@ -1649,5 +1685,34 @@ mod tests {
         assert_eq!(renamed.name, "bill_to");
         assert_eq!(s.delete_relationship(rel.id).unwrap(), 1);
         assert!(s.relationships().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reorder_tables_persists_order_and_validates_set() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let a = s.create_table("A", &[]).unwrap();
+        let b = s.create_table("B", &[]).unwrap();
+        let c = s.create_table("C", &[]).unwrap();
+
+        let initial = s.tables().unwrap();
+        assert_eq!(initial[0].id, a);
+        assert_eq!(initial[1].id, b);
+        assert_eq!(initial[2].id, c);
+
+        let reordered = s.reorder_tables(&[c, a, b]).unwrap();
+        assert_eq!(reordered[0].id, c);
+        assert_eq!(reordered[1].id, a);
+        assert_eq!(reordered[2].id, b);
+
+        // Fetch again to verify persistence
+        let fetched = s.tables().unwrap();
+        assert_eq!(fetched[0].id, c);
+        assert_eq!(fetched[1].id, a);
+        assert_eq!(fetched[2].id, b);
+
+        // Validation checks
+        assert!(s.reorder_tables(&[a]).is_err());
+        assert!(s.reorder_tables(&[a, a, b]).is_err());
+        assert!(s.reorder_tables(&[a, b, 9999]).is_err());
     }
 }

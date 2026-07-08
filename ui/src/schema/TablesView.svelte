@@ -15,6 +15,40 @@
     onnew: () => void;
     onedit: (id: number) => void;
   } = $props();
+
+  let dragId = $state<number | null>(null);
+  let overId = $state<number | null>(null);
+  let overPos = $state<'before' | 'after'>('before');
+
+  function onDragStart(id: number) {
+    dragId = id;
+  }
+  function onDragOver(id: number, pos: 'before' | 'after') {
+    if (dragId == null) return;
+    if (id !== overId) overId = id;
+    if (pos !== overPos) overPos = pos;
+  }
+  function onDragEnd() {
+    dragId = null;
+    overId = null;
+  }
+  function onDrop() {
+    const from = dragId;
+    const target = overId;
+    const pos = overPos;
+    dragId = null;
+    overId = null;
+    if (from == null || target == null || from === target) return;
+
+    const ids = store.tables.map((t) => t.id);
+    const fromIdx = ids.indexOf(from);
+    if (fromIdx < 0) return;
+    ids.splice(fromIdx, 1);
+    let targetIdx = ids.indexOf(target);
+    if (targetIdx < 0) targetIdx = ids.length - 1;
+    ids.splice(pos === 'after' ? targetIdx + 1 : targetIdx, 0, from);
+    store.reorderTables(ids);
+  }
 </script>
 
 <div class="tv">
@@ -41,8 +75,51 @@
     {/if}
 
     {#each store.tables as table (table.id)}
-      <div class="tv-row">
-        <svg class="tv-ico" aria-hidden="true"><use href="#icon-app" /></svg>
+      {@const isDragging = dragId === table.id}
+      {@const isDropBefore = overId === table.id && overPos === 'before' && dragId != null && dragId !== table.id}
+      {@const isDropAfter = overId === table.id && overPos === 'after' && dragId != null && dragId !== table.id}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="tv-row"
+        class:dragging={isDragging}
+        ondragover={(e) => {
+          e.preventDefault();
+          if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+          const r = e.currentTarget.getBoundingClientRect();
+          onDragOver(table.id, e.clientY < r.top + r.height / 2 ? 'before' : 'after');
+        }}
+        ondrop={(e) => {
+          e.preventDefault();
+          onDrop();
+        }}
+      >
+        {#if isDropBefore}<div class="tv-dropline top"></div>{/if}
+        {#if isDropAfter}<div class="tv-dropline bottom"></div>{/if}
+
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <span
+          class="tv-handle"
+          title="Drag to reorder"
+          draggable="true"
+          ondragstart={(e) => {
+            e.dataTransfer?.setData('text/plain', String(table.id));
+            if (e.dataTransfer) {
+              e.dataTransfer.effectAllowed = 'move';
+              const rowEl = e.currentTarget.closest('.tv-row');
+              if (rowEl) {
+                const r = rowEl.getBoundingClientRect();
+                e.dataTransfer.setDragImage(rowEl, e.clientX - r.left, e.clientY - r.top);
+              }
+            }
+            onDragStart(table.id);
+          }}
+          ondragend={onDragEnd}
+          onclick={(e) => e.stopPropagation()}
+          aria-hidden="true"
+        >
+          <svg class="tv-handle-ico" viewBox="0 0 16 16"><circle cx="6" cy="4" r="1" /><circle cx="10" cy="4" r="1" /><circle cx="6" cy="8" r="1" /><circle cx="10" cy="8" r="1" /><circle cx="6" cy="12" r="1" /><circle cx="10" cy="12" r="1" /></svg>
+        </span>
+
         <span class="tv-name">{table.name}</span>
         <span class="tv-notes" title={table.notes || 'No notes'}>{table.notes || 'No notes'}</span>
         <span class="tv-actions">
@@ -91,6 +168,7 @@
     padding: 0 12px 0 18px;
   }
   .tv-row {
+    position: relative;
     min-height: var(--sc-row-h);
     border-bottom: 0.5px solid var(--rm-border);
     transition: background 0.12s ease;
@@ -98,7 +176,58 @@
   .tv-row:hover {
     background: rgba(0, 0, 0, 0.02);
   }
-  .tv-ico,
+  .tv-row.dragging {
+    opacity: 0.35;
+  }
+  .tv-handle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 24px;
+    width: 24px;
+    cursor: grab;
+    color: var(--rm-text-dim);
+    border-radius: 5px;
+    transition:
+      background 0.12s ease,
+      color 0.12s ease;
+  }
+  .tv-handle:hover {
+    background: rgba(0, 0, 0, 0.06);
+    color: var(--rm-text);
+  }
+  .tv-handle-ico {
+    width: 16px;
+    height: 16px;
+    fill: currentColor;
+    opacity: 0.6;
+  }
+  .tv-dropline {
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    height: 2px;
+    background: var(--rm-accent);
+    border-radius: 2px;
+    z-index: 3;
+    pointer-events: none;
+  }
+  .tv-dropline::before {
+    content: '';
+    position: absolute;
+    left: -3px;
+    top: -2px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--rm-accent);
+  }
+  .tv-dropline.top {
+    top: -1px;
+  }
+  .tv-dropline.bottom {
+    bottom: -1px;
+  }
   .tv-chev {
     width: 15px;
     height: 15px;

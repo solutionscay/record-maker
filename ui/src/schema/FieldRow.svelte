@@ -105,6 +105,9 @@
     {#if badges?.unique}
       <span class="fg-badge fg-badge--unique" title="Unique">UNIQ</span>
     {/if}
+    {#if badges?.autoEnter}
+      <span class="fg-badge fg-badge--auto" title={`Auto-enter: constant "${badges.autoEnter.value}"`}>AUTO</span>
+    {/if}
     {#if badges && badges.keyNames.length > 0}
       <span class="fg-badge" title={`Referenced by ${badges.keyNames.join(', ')}`}>KEY</span>
     {/if}
@@ -248,6 +251,11 @@
     border-color: transparent;
     background: rgba(52, 199, 89, 0.14);
     color: #247a38;
+  }
+  .fg-badge--auto {
+    border-color: transparent;
+    background: var(--rm-accent-soft, rgba(10, 132, 255, 0.12));
+    color: #174ea6;
   }
   .fg-type {
     display: inline-flex;

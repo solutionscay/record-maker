@@ -185,7 +185,14 @@ export class SchemaStore {
       return this.fail(`A table named "${cleanName}" already exists.`);
     }
     if (id == null) {
-      const table: TableView = { id: this.nextId(), name: cleanName, notes: notes.trim(), phys: '' };
+      const nextPos = Math.max(0, ...this.tables.map((t) => t.position)) + 1;
+      const table: TableView = {
+        id: this.nextId(),
+        name: cleanName,
+        notes: notes.trim(),
+        phys: '',
+        position: nextPos,
+      };
       this.tables = [...this.tables, table];
       this.fieldsByTable = { ...this.fieldsByTable, [table.id]: [] };
       this.selectedTableId = table.id;
@@ -309,6 +316,12 @@ export class SchemaStore {
       ...this.fieldsByTable,
       [tableId]: fieldIds.map((id, position) => ({ ...byId.get(id)!, position })),
     };
+  }
+
+  reorderTables(tableIds: number[]): void {
+    const byId = new Map(this.tables.map((t) => [t.id, t]));
+    if (tableIds.length !== this.tables.length || tableIds.some((id) => !byId.has(id))) return;
+    this.tables = tableIds.map((id, position) => ({ ...byId.get(id)!, position }));
   }
 
   // ── relationship draft mutations ────────────────────────────────────────
@@ -472,6 +485,10 @@ export class SchemaStore {
           .filter((r) => r.id < 0)
           .map((rel) => api.createRelationship(this.relationshipBody(rel, resolveTable, resolveField))),
       );
+
+      if (this.tables.length > 0) {
+        await api.reorderTables(this.tables.map((t) => resolveTable(t.id)));
+      }
 
       // Reload rather than patching the baseline from responses: on any failure
       // above the draft must stay intact and the baseline must stay the server's

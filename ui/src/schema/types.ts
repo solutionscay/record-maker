@@ -51,6 +51,7 @@ export interface TableView {
   name: string;
   notes: string;
   phys: string;
+  position: number;
 }
 
 /** A field on a table — mirrors the server's `FieldSchemaView`. `position` is the

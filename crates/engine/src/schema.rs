@@ -54,6 +54,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0011_layout_default_enabled",
         include_str!("migrations/0011_layout_default_enabled.sql"),
     ),
+    (
+        "0012_table_position",
+        include_str!("migrations/0012_table_position.sql"),
+    ),
 ];
 
 /// Schema version this build targets (the number of migrations defined).

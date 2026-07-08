@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Handle, Position } from '@xyflow/svelte';
-  import type { FieldKind, TableView } from './types';
+  import type { FieldAutoEnterOptions, FieldKind, TableView } from './types';
   import { kindIcon, kindLabel } from './types';
   import Icon from '../lib/Icon.svelte';
 
@@ -13,6 +13,7 @@
     unique: boolean;
     fkNames: string[];
     keyNames: string[];
+    autoEnter: FieldAutoEnterOptions | null;
   }
 
   export interface SchemaTableNodeData extends Record<string, unknown> {

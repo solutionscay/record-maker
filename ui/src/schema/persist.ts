@@ -32,6 +32,9 @@ export const renameTable = (id: number, name: string): Promise<TableView> =>
 
 export const deleteTable = (id: number): Promise<void> => postVoid(`/schema/tables/${id}/delete`);
 
+export const reorderTables = (tableIds: number[]): Promise<TableView[]> =>
+  postJson('/schema/tables/order', { tableIds });
+
 // ── fields ──────────────────────────────────────────────────────────────────
 
 export const listFields = (tableId: number): Promise<FieldView[]> =>

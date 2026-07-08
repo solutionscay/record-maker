@@ -570,6 +570,45 @@ async fn schema_table_and_field_routes_manage_metadata_and_physical_table() {
 }
 
 #[tokio::test]
+async fn schema_tables_reorder_endpoint() {
+    let state = state_for(Solution::open_in_memory().unwrap());
+    
+    // Create Table A
+    let (status, resp) = post_json_body(
+        state.clone(),
+        "/schema/tables",
+        &serde_json::json!({"name": "A", "notes": ""}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    let table_a = serde_json::from_str::<serde_json::Value>(&resp).unwrap();
+    let id_a = table_a["id"].as_i64().unwrap();
+
+    // Create Table B
+    let (status, resp) = post_json_body(
+        state.clone(),
+        "/schema/tables",
+        &serde_json::json!({"name": "B", "notes": ""}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    let table_b = serde_json::from_str::<serde_json::Value>(&resp).unwrap();
+    let id_b = table_b["id"].as_i64().unwrap();
+
+    // Reorder: B then A
+    let (status, resp) = post_json_body(
+        state.clone(),
+        "/schema/tables/order",
+        &serde_json::json!({"tableIds": [id_b, id_a]}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    let ordered: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(ordered[0]["id"].as_i64(), Some(id_b));
+    assert_eq!(ordered[1]["id"].as_i64(), Some(id_a));
+}
+
+#[tokio::test]
 async fn value_list_routes_crud_and_resolve_items() {
     let state = state_for(Solution::open_in_memory().unwrap());
     let create = serde_json::json!({

@@ -12,14 +12,12 @@
     onswitch,
     onedit,
     onnew,
-    onnotables,
     openFieldId,
   }: {
     store: SchemaStore;
     onswitch: (id: number) => void;
     onedit: (id: number) => void;
     onnew: () => void;
-    onnotables: () => void;
     openFieldId: number | null;
   } = $props();
 
@@ -68,14 +66,9 @@
   }
 </script>
 
-{#if store.tables.length === 0}
-  <div class="fg-blank">
-    <p class="sc-empty-title">No tables yet</p>
-    <p class="sc-hint">Create a table before defining fields.</p>
-    <button type="button" class="sc-btn" onclick={onnotables}>Go to Tables</button>
-  </div>
-{:else}
-  <div class="fg">
+<!-- FieldGrid renders only when a table exists (SchemaApp shows the shared
+     NoTablesEmpty otherwise), so there is no per-tab no-tables state here. -->
+<div class="fg">
     <header class="sc-viewhead fg-head">
       <div class="fg-group">
         <label class="sc-micro" for="fg-table">Table</label>
@@ -142,8 +135,7 @@
         {/each}
       </div>
     </div>
-  </div>
-{/if}
+</div>
 
 <style>
   .fg {
@@ -184,17 +176,5 @@
     align-items: center;
     gap: 12px;
     padding: 0 18px;
-  }
-  .fg-blank {
-    margin: auto;
-    padding: 3rem;
-    text-align: center;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-  }
-  .fg-blank .sc-btn {
-    margin-top: 6px;
   }
 </style>

@@ -23,7 +23,6 @@
   let name = $state('');
   let kind = $state<FieldKind>('text');
   let notes = $state('');
-  let primary = $state(false);
   let required = $state(false);
   let unique = $state(false);
   let memberOfEnabled = $state(false);
@@ -64,7 +63,6 @@
       name = field?.name ?? '';
       kind = field?.kind ?? 'text';
       notes = field?.notes ?? '';
-      primary = field?.options?.validation?.primary ?? false;
       required = field?.options?.validation?.required ?? false;
       unique = field?.options?.validation?.unique ?? false;
       memberOfValueList = field?.options?.validation?.memberOfValueList ?? store.valueLists[0]?.id ?? null;
@@ -101,9 +99,8 @@
 
   function optionsDraft(): FieldOptions {
     const validation: NonNullable<FieldOptions['validation']> = {};
-    if (primary) validation.primary = true;
-    if (primary || required) validation.required = true;
-    if (primary || unique) validation.unique = true;
+    if (required) validation.required = true;
+    if (unique) validation.unique = true;
     if (memberOfEnabled && memberOfValueList != null) validation.memberOfValueList = memberOfValueList;
     if (hasRange && (rangeMin.trim() || rangeMax.trim())) {
       validation.range = {};
@@ -172,23 +169,16 @@
   <section class="fd-section" aria-labelledby="fd-validation">
     <span id="fd-validation" class="sc-micro fd-label">Validation</span>
     <label class="fd-switch">
-      <span class="fd-switch-text">Primary ID</span>
-      <span class="fd-toggle">
-        <input type="checkbox" bind:checked={primary} />
-        <span class="fd-track"><span class="fd-knob"></span></span>
-      </span>
-    </label>
-    <label class="fd-switch">
       <span class="fd-switch-text">Required</span>
       <span class="fd-toggle">
-        <input type="checkbox" checked={primary || required} disabled={primary} onchange={(e) => (required = e.currentTarget.checked)} />
+        <input type="checkbox" bind:checked={required} />
         <span class="fd-track"><span class="fd-knob"></span></span>
       </span>
     </label>
     <label class="fd-switch">
       <span class="fd-switch-text">Unique</span>
       <span class="fd-toggle">
-        <input type="checkbox" checked={primary || unique} disabled={primary} onchange={(e) => (unique = e.currentTarget.checked)} />
+        <input type="checkbox" bind:checked={unique} />
         <span class="fd-track"><span class="fd-knob"></span></span>
       </span>
     </label>

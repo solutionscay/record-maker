@@ -120,9 +120,11 @@ export class CanvasInteraction {
     const inEditable = !!target?.closest('input, textarea, select, [contenteditable="true"]');
     const doc = this.#ctx.doc;
 
-    // Cmd/Ctrl+A selects every layout object. Native page/text select-all is
-    // never useful in Layout Mode, including while focus is in the inspector.
+    // Cmd/Ctrl+A selects every layout object — but only when focus is on the
+    // canvas, not in a text control. Inside an input / textarea / inline text
+    // editor it must keep its normal "select all text" behaviour.
     if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'a') {
+      if (inEditable) return;
       e.preventDefault();
       this.#transform.selectAllObjects();
       return;

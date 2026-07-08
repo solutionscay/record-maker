@@ -64,6 +64,16 @@
           {#if field.fkNames.length > 0}
             <span class="tn-badge tn-badge--fk" title={`References ${field.fkNames.join(', ')}`}>fk</span>
           {/if}
+          <!-- One handle pair per side, nested in the (position:relative) row so
+               Svelte Flow anchors the connector at THIS field's vertical center
+               (#166, reinstating pre-#147 per-field attachment) — no fragile
+               header/row pixel math. Each side carries a source+target pair
+               (#139) so an edge attaches to whichever side faces the other table;
+               the edge picks the id in RelationshipsView. -->
+          <Handle type="source" id={`source-${field.id}-left`} position={Position.Left} class="tn-handle tn-handle--source" />
+          <Handle type="target" id={`target-${field.id}-left`} position={Position.Left} class="tn-handle tn-handle--target" />
+          <Handle type="target" id={`target-${field.id}-right`} position={Position.Right} class="tn-handle tn-handle--target" />
+          <Handle type="source" id={`source-${field.id}-right`} position={Position.Right} class="tn-handle tn-handle--source" />
         </div>
       {/each}
       {#if data.hiddenFieldCount > 0}
@@ -71,17 +81,6 @@
       {/if}
     {/if}
   </div>
-  <!-- One handle quartet per box, not per field row (#147) — a relationship
-       connects at the vertical center of the table regardless of which field
-       it references, like a classic ER diagram, instead of jogging to
-       whichever row the field happens to land on. Both sides carry a
-       target+source pair (#139) so an edge can attach to whichever side
-       actually faces the other table. No `top` override: Svelte Flow centers
-       Left/Right handles vertically by default. -->
-  <Handle type="source" id="source-left" position={Position.Left} class="tn-handle tn-handle--source" />
-  <Handle type="target" id="target-left" position={Position.Left} class="tn-handle tn-handle--target" />
-  <Handle type="target" id="target-right" position={Position.Right} class="tn-handle tn-handle--target" />
-  <Handle type="source" id="source-right" position={Position.Right} class="tn-handle tn-handle--source" />
 </div>
 
 <style>

@@ -75,6 +75,10 @@ const ICONS = {
   close: 'close',
   // Edit drawer affordance for schema rows.
   edit: 'pencil',
+  // Layout view modes (LayoutManagerApp.svelte).
+  'view-form': 'card',
+  'view-list': 'bulletlist',
+  'view-table': 'grid-3x3',
   // Field-kind type glyphs for the searchable field pickers (FieldSelect.svelte,
   // #79). One per FieldKind::as_str value the server sends on FieldChoice.kind.
   'type-text': 'text-start-t',

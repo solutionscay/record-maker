@@ -48,6 +48,8 @@ export class SchemaStore {
   relationships = $state<RelationshipView[]>([]);
   /** Existing relationships deleted in the draft. */
   deletedRelationshipIds = $state<number[]>([]);
+  /** Existing fields deleted in the draft, applied (column dropped) on save. */
+  deletedFields = $state<{ tableId: number; fieldId: number }[]>([]);
   /** Value lists available for member-of-list field validation. */
   valueLists = $state<ValueListView[]>([]);
   /** True during the initial full schema load. */
@@ -81,7 +83,8 @@ export class SchemaStore {
       !sameJson(this.tables, this.baseTables) ||
       !sameJson(this.fieldsByTable, this.baseFieldsByTable) ||
       !sameJson(this.relationships, this.baseRelationships) ||
-      this.deletedRelationshipIds.length > 0,
+      this.deletedRelationshipIds.length > 0 ||
+      this.deletedFields.length > 0,
   );
 
   /** Memoized change summary — same caching rationale as `#hasChanges`. */
@@ -95,7 +98,7 @@ export class SchemaStore {
           .flat()
           .find((b) => b.id === f.id);
         return !sameJson(f, base);
-      }).length;
+      }).length + this.deletedFields.length;
     const relDelta =
       this.relationships.filter((r) => !sameJson(r, this.baseRelationships.find((b) => b.id === r.id))).length +
       this.deletedRelationshipIds.length;
@@ -156,6 +159,7 @@ export class SchemaStore {
       this.relationships = loaded.relationships.map(cloneRelationship);
       this.valueLists = loaded.valueLists.map(cloneValueList);
       this.deletedRelationshipIds = [];
+      this.deletedFields = [];
       if (this.selectedTableId != null && !this.tables.some((t) => t.id === this.selectedTableId)) {
         this.selectedTableId = null;
       }
@@ -169,6 +173,7 @@ export class SchemaStore {
     this.relationships = this.baseRelationships.map(cloneRelationship);
     this.valueLists = this.baseValueLists.map(cloneValueList);
     this.deletedRelationshipIds = [];
+    this.deletedFields = [];
     this.error = null;
   }
 
@@ -292,16 +297,26 @@ export class SchemaStore {
   }
 
   deleteFieldDraft(tableId: number, fieldId: number): boolean {
-    if (fieldId > 0) {
-      this.error = 'Existing fields cannot be deleted until schema impact review is available.';
+    const field = this.fieldById(tableId, fieldId);
+    if (field?.options?.system) {
+      this.error = 'The system primary key cannot be deleted.';
       return false;
+    }
+    // Remove every relationship the field participates in (as FK or target),
+    // tracking persisted ones for deletion so the server's field-delete cascade
+    // has nothing left to drop. deleteRelationshipDraft handles both sides.
+    for (const rel of this.relationships.filter((r) => r.fromField === fieldId || r.toField === fieldId)) {
+      this.deleteRelationshipDraft(rel.id);
     }
     const fields = this.fieldsByTable[tableId] ?? [];
     this.fieldsByTable = {
       ...this.fieldsByTable,
       [tableId]: fields.filter((f) => f.id !== fieldId).map((f, i) => ({ ...f, position: i })),
     };
-    this.relationships = this.relationships.filter((r) => r.fromField !== fieldId && r.toField !== fieldId);
+    // Persisted fields are dropped on save; unsaved (negative-id) ones just vanish.
+    if (fieldId > 0 && !this.deletedFields.some((d) => d.fieldId === fieldId)) {
+      this.deletedFields = [...this.deletedFields, { tableId, fieldId }];
+    }
     this.error = null;
     return true;
   }
@@ -391,6 +406,11 @@ export class SchemaStore {
       // still completes before the next (renames land before creates, creates
       // fill the id maps before anything resolves through them).
       await Promise.all(this.deletedRelationshipIds.map((id) => api.deleteRelationship(id)));
+
+      // Field deletes run after relationship deletes so the server-side
+      // field-delete cascade (which also clears meta_relationship rows) finds
+      // them already gone; the drop is idempotent from the client's view.
+      await Promise.all(this.deletedFields.map((d) => api.deleteField(d.tableId, d.fieldId)));
 
       await Promise.all(
         this.tables

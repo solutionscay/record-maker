@@ -103,6 +103,11 @@
     return 'Table';
   }
 
+  function isPrimaryView(groupViews: LayoutManagerView[], viewId: number): boolean {
+    const target = groupViews.find((v) => v.enabled) ?? groupViews[0];
+    return target?.id === viewId;
+  }
+
   // Patch one view in place (from the Edit-views drawer's immediate toggle).
   function viewUpdated(updated: LayoutManagerView) {
     layouts = layouts.map((x) => (x.id === updated.id ? updated : x));
@@ -247,7 +252,15 @@
           </button>
           <span class="lm-pills">
             {#each group.views as v (v.id)}
-              <span class="lm-pill" class:off={!v.enabled}>{viewLabel(v.view)}</span>
+              {@const isPrimary = isPrimaryView(group.views, v.id)}
+              <span
+                class="lm-pill"
+                class:off={!v.enabled}
+                class:primary={isPrimary}
+              >
+                <Icon name={`view-${v.view}`} />
+                {viewLabel(v.view)}
+              </span>
             {/each}
           </span>
           <span aria-hidden="true"></span>
@@ -523,21 +536,35 @@
   }
   .lm-pill {
     height: 22px;
-    padding: 0 10px;
+    padding: 0 8px;
     display: inline-flex;
     align-items: center;
-    border-radius: 11px;
-    border: 0.5px solid transparent;
-    background: var(--rm-accent);
-    color: #fff;
+    gap: 5px;
+    border-radius: var(--rm-radius, 5px);
+    border: 0.5px solid rgba(10, 132, 255, 0.15);
+    background: rgba(10, 132, 255, 0.1);
+    color: var(--rm-accent);
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.02em;
   }
+  .lm-pill.primary {
+    background: var(--rm-accent);
+    color: #fff;
+    border-color: transparent;
+    font-weight: 700;
+  }
   .lm-pill.off {
-    background: var(--rm-control-bg);
+    background: transparent;
     border-color: var(--rm-border);
+    border-style: dashed;
     color: var(--rm-text-dim);
+    font-weight: 500;
+  }
+  .lm-pill :global(.icon) {
+    width: 12px;
+    height: 12px;
+    fill: currentColor;
   }
 
   /* Custom-row cells. */

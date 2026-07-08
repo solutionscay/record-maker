@@ -6,6 +6,7 @@
   import { FIELD_KINDS, kindIcon, kindLabel } from './types';
   import Icon from '../lib/Icon.svelte';
   import SchemaDrawer from './SchemaDrawer.svelte';
+  import { confirmDanger } from './confirm';
   import { untrack } from 'svelte';
 
   let {
@@ -133,8 +134,28 @@
     if (saved) onclose();
   }
 
-  function remove() {
-    if (field && store.deleteFieldDraft(tableId, field.id)) onclose();
+  async function remove() {
+    if (!field) return;
+    // Unsaved draft field — nothing is persisted, so drop it without ceremony.
+    if (field.id < 0) {
+      if (store.deleteFieldDraft(tableId, field.id)) onclose();
+      return;
+    }
+    // Existing field: warn about the data loss and any relationships it feeds
+    // before the drop is scheduled for the next schema Save.
+    const rels = store.relationships.filter(
+      (r) =>
+        (r.fromTable === tableId && r.fromField === field.id) ||
+        (r.toTable === tableId && r.toField === field.id),
+    );
+    let message = `Delete the field "${field.name}" and all of its data? The column is dropped when you save your schema changes.`;
+    if (rels.length > 0) {
+      const names = rels.map((r) => `"${r.name}"`).join(', ');
+      const one = rels.length === 1;
+      message += ` It is used by ${one ? 'the relationship' : 'the relationships'} ${names} — ${one ? 'that relationship is' : 'those relationships are'} removed and records linked through ${one ? 'it' : 'them'} are orphaned.`;
+    }
+    const ok = await confirmDanger(message, 'Delete field?', 'Delete field');
+    if (ok && store.deleteFieldDraft(tableId, field.id)) onclose();
   }
 </script>
 
@@ -154,8 +175,12 @@
         type="button"
         class="sc-btn sc-btn--danger fd-delete"
         onclick={remove}
-        disabled={field.id > 0}
-        title={field.id > 0 ? 'Deletion needs impact review before it is enabled' : 'Delete draft field'}
+        disabled={field.options?.system}
+        title={field.options?.system
+          ? 'The system primary key cannot be deleted'
+          : field.id > 0
+            ? 'Delete field'
+            : 'Delete draft field'}
       >
         <Icon name="delete" />Delete field
       </button>

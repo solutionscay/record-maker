@@ -19,7 +19,9 @@ pub mod schema;
 pub use data::Record;
 pub use db::Solution;
 pub use path::{HopDirection, PathError, ResolvedRoute, RouteClass, RouteHop};
-pub use related::RelatedCrudError;
+pub use related::{
+    FilterClause, FilterOp, FilterOperand, RelatedCrudError, RelatedFilter,
+};
 pub use layout::{
     LayoutMeta, NewObject, ObjectCapabilities, ObjectGroup, ObjectKind, ObjectMeta, PartKind,
     PartMeta, RestoreObject, RestoreResult,

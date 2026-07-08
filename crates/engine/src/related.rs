@@ -70,22 +70,186 @@ impl std::fmt::Display for RelatedCrudError {
 
 impl std::error::Error for RelatedCrudError {}
 
+/// A **display-only** refinement (#112) layered on a related-data route.
+///
+/// A read-time predicate that narrows *which* related records are shown, and
+/// nothing else. It is a conjunction (AND) of [`FilterClause`]s evaluated over
+/// the terminal record set produced by the route (#11). An empty filter passes
+/// every record through.
+///
+/// By construction the filter touches only [`Solution::read_related_records_filtered`];
+/// create / update / delete never consult it, so a row created through the
+/// anchor that the filter would exclude is still a real, editable record via its
+/// route — it simply does not display. That is honest and expected: membership
+/// is defined solely by the route's FK equality; the filter is a lens over the
+/// read.
+///
+/// It is persisted per-use on the portal/source object props, never on the
+/// catalogued relationship — hence it is passed in at read time rather than read
+/// off the [`ResolvedRoute`].
+#[derive(Debug, Clone, Default)]
+pub struct RelatedFilter {
+    /// Conjunctive clauses; all must hold for a record to display. Empty ⇒ no
+    /// refinement (every record passes).
+    pub clauses: Vec<FilterClause>,
+}
+
+impl RelatedFilter {
+    /// A filter that narrows nothing (passes every record).
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Whether this filter refines anything at all.
+    pub fn is_empty(&self) -> bool {
+        self.clauses.is_empty()
+    }
+}
+
+/// One predicate in a [`RelatedFilter`]: a user field on the route's terminal
+/// table, an operator, and the right-hand operand it is compared against.
+#[derive(Debug, Clone)]
+pub struct FilterClause {
+    /// A user field on the route's *terminal* table whose value is tested.
+    pub field_id: i64,
+    /// The comparison operator.
+    pub op: FilterOp,
+    /// What the terminal field's value is compared against.
+    pub rhs: FilterOperand,
+}
+
+/// The comparison operators a filter clause may use. Deliberately narrow —
+/// equality plus the ordered comparisons; a full expression language is future
+/// work (#108).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// The right-hand side of a [`FilterClause`].
+#[derive(Debug, Clone)]
+pub enum FilterOperand {
+    /// A literal comparison value.
+    Value(String),
+    /// A field on the *base* (parent) record, read once per base record; lets a
+    /// portal filter its related rows against a value on the record it hangs
+    /// off (e.g. show only children whose `status` equals the parent's `stage`).
+    ParentField(i64),
+}
+
+/// Compare `lhs` against `rhs` under `op`. Both operands parse to `f64` ⇒ an
+/// ordered numeric comparison (so numeric/bool ranges work); otherwise a
+/// byte-wise string comparison. A non-orderable result (NaN) never matches.
+fn filter_matches(lhs: &str, op: FilterOp, rhs: &str) -> bool {
+    use std::cmp::Ordering::*;
+    let ord = match (lhs.parse::<f64>(), rhs.parse::<f64>()) {
+        (Ok(a), Ok(b)) => a.partial_cmp(&b),
+        _ => Some(lhs.cmp(rhs)),
+    };
+    let Some(ord) = ord else { return false };
+    match op {
+        FilterOp::Eq => ord == Equal,
+        FilterOp::Ne => ord != Equal,
+        FilterOp::Lt => ord == Less,
+        FilterOp::Le => ord != Greater,
+        FilterOp::Gt => ord == Greater,
+        FilterOp::Ge => ord != Less,
+    }
+}
+
 impl Solution {
     /// **Read** the related record set for `route` from base record `base_id`,
     /// as full [`Record`]s of the terminal table (user fields, in field order),
     /// each addressable for edit. Membership is exactly the route's resolved set
     /// (#11); ordering follows the terminal table's id order.
     pub fn read_related_records(&self, route: &ResolvedRoute, base_id: i64) -> Result<Vec<Record>> {
+        self.read_related_records_filtered(route, base_id, &RelatedFilter::none())
+    }
+
+    /// **Read** the related record set for `route` from base record `base_id`,
+    /// narrowed by a **display-only** `filter` (#112).
+    ///
+    /// The route's FK-equality set (#11) defines membership; `filter` is a
+    /// conjunctive, read-time lens that hides records not satisfying every
+    /// clause. It **never** participates in create / update / delete — those
+    /// verbs do not call this method and are structurally unable to consult the
+    /// filter. An empty filter is exactly [`read_related_records`].
+    ///
+    /// Each clause names a user field on the terminal table; a
+    /// [`FilterOperand::ParentField`] compares against a field on the base
+    /// record, read once. An unknown terminal-field id is an error (a malformed
+    /// filter), not a silent all-exclude.
+    pub fn read_related_records_filtered(
+        &self,
+        route: &ResolvedRoute,
+        base_id: i64,
+        filter: &RelatedFilter,
+    ) -> Result<Vec<Record>> {
         let ids = self.route_record_set(route, base_id)?;
         let table = self.related_table(route.terminal_table)?;
         let fields = self.fields(table.id)?;
+        let plan = self.compile_filter(route, base_id, &fields, filter)?;
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             if let Some(cells) = self.get_record(&table, &fields, id)? {
-                out.push(Record { id, cells });
+                if plan.iter().all(|(idx, op, rhs)| {
+                    cells
+                        .get(*idx)
+                        .is_some_and(|lhs| filter_matches(lhs, *op, rhs))
+                }) {
+                    out.push(Record { id, cells });
+                }
             }
         }
         Ok(out)
+    }
+
+    /// Resolve a [`RelatedFilter`] against the terminal `fields` (in cell order)
+    /// and the base record, into `(cell_index, op, rhs_value)` tuples ready to
+    /// test each terminal row. Parent-field operands are read once here.
+    fn compile_filter(
+        &self,
+        route: &ResolvedRoute,
+        base_id: i64,
+        fields: &[FieldMeta],
+        filter: &RelatedFilter,
+    ) -> Result<Vec<(usize, FilterOp, String)>> {
+        let mut plan = Vec::with_capacity(filter.clauses.len());
+        for clause in &filter.clauses {
+            let idx = fields
+                .iter()
+                .position(|f| f.id == clause.field_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "filter field {} is not a user field on the terminal table",
+                        clause.field_id
+                    )
+                })?;
+            let rhs = match &clause.rhs {
+                FilterOperand::Value(v) => v.clone(),
+                FilterOperand::ParentField(field_id) => {
+                    self.base_field_value(route.base_table, *field_id, base_id)?
+                }
+            };
+            plan.push((idx, clause.op, rhs));
+        }
+        Ok(plan)
+    }
+
+    /// The value of a field on the base (parent) record; empty string when the
+    /// row or value is absent. Used to resolve [`FilterOperand::ParentField`].
+    fn base_field_value(&self, table_id: i64, field_id: i64, row_id: i64) -> Result<String> {
+        let table = self.related_table(table_id)?;
+        let field = self.related_field(table_id, field_id)?;
+        Ok(self
+            .get_record(&table, std::slice::from_ref(&field), row_id)?
+            .and_then(|cells| cells.into_iter().next())
+            .unwrap_or_default())
     }
 
     /// **Create** a related record through `route` from base record `base_id`.
@@ -352,7 +516,9 @@ impl Solution {
 mod tests {
     use crate::options::FieldOptions;
     use crate::path::RouteClass;
-    use crate::related::RelatedCrudError;
+    use crate::related::{
+        FilterClause, FilterOp, FilterOperand, RelatedCrudError, RelatedFilter,
+    };
     use crate::{FieldKind, NewField, NewRelationship, Solution};
 
     fn field_id(s: &Solution, table_id: i64, name: &str) -> i64 {
@@ -796,5 +962,190 @@ mod tests {
         assert!(s.read_related_records(&route, inv).unwrap().is_empty());
         let c_tbl = s.table_by_id(customers).unwrap().unwrap();
         assert!(s.get_record(&c_tbl, &[], new_cust).unwrap().is_some());
+    }
+
+    // --- #112: display-only filter ----------------------------------------
+
+    #[test]
+    fn filter_narrows_read_but_never_crud() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let (invoices, customers, rel) = invoice_customer(&mut s);
+        s.set_relationship_referential(rel, true, true).unwrap();
+        let (ada, _) = a_customer(&s, customers, "Ada");
+        let route = s.resolve_path(customers, "customer").unwrap();
+        let total = field(&s, invoices, "Total");
+
+        // Two of Ada's invoices; one is below the filter threshold.
+        let small = s
+            .create_related_record(&route, ada, &[(&total, "42".into())], None)
+            .unwrap();
+        let big = s
+            .create_related_record(&route, ada, &[(&total, "100".into())], None)
+            .unwrap();
+
+        // An empty filter passes everything (identical to the plain read).
+        let all = s
+            .read_related_records_filtered(&route, ada, &RelatedFilter::none())
+            .unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(s.read_related_records(&route, ada).unwrap().len(), 2);
+
+        // Total > 50 hides the small invoice from the read set.
+        let filter = RelatedFilter {
+            clauses: vec![FilterClause {
+                field_id: total.id,
+                op: FilterOp::Gt,
+                rhs: FilterOperand::Value("50".into()),
+            }],
+        };
+        let shown = s
+            .read_related_records_filtered(&route, ada, &filter)
+            .unwrap();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].id, big);
+
+        // The excluded row is still a real, editable record via its route: the
+        // filter changed the READ only. Membership (the unfiltered read) is
+        // unchanged, and update still reaches the hidden row.
+        assert!(s
+            .read_related_records(&route, ada)
+            .unwrap()
+            .iter()
+            .any(|r| r.id == small));
+        s.update_related_record(&route, small, &[(&total, "43".into())])
+            .unwrap();
+        assert_eq!(
+            fk_of(&s, invoices, "Total", small).parse::<f64>().unwrap(),
+            43.0
+        );
+
+        // Deleting the visible row is unaffected by the filter, and deleting the
+        // filtered-out row still works (delete never consults the filter).
+        s.delete_related_record(&route, ada, small).unwrap();
+        assert_eq!(s.read_related_records(&route, ada).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn filter_compares_against_parent_field() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let (invoices, customers, rel) = invoice_customer(&mut s);
+        s.set_relationship_referential(rel, true, true).unwrap();
+        // A per-customer threshold field on the parent (base) table.
+        s.add_field(
+            customers,
+            &NewField { name: "MinTotal".into(), kind: FieldKind::Number },
+        )
+        .unwrap();
+        let (ada, _) = a_customer(&s, customers, "Ada");
+        let min = field(&s, customers, "MinTotal");
+        s.update_record(
+            &s.table_by_id(customers).unwrap().unwrap(),
+            ada,
+            &[(&min, "50".into())],
+        )
+        .unwrap();
+
+        let route = s.resolve_path(customers, "customer").unwrap();
+        let total = field(&s, invoices, "Total");
+        s.create_related_record(&route, ada, &[(&total, "42".into())], None)
+            .unwrap();
+        let big = s
+            .create_related_record(&route, ada, &[(&total, "100".into())], None)
+            .unwrap();
+
+        // Show only invoices whose Total >= the parent customer's MinTotal.
+        let filter = RelatedFilter {
+            clauses: vec![FilterClause {
+                field_id: total.id,
+                op: FilterOp::Ge,
+                rhs: FilterOperand::ParentField(min.id),
+            }],
+        };
+        let shown = s
+            .read_related_records_filtered(&route, ada, &filter)
+            .unwrap();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].id, big);
+    }
+
+    #[test]
+    fn filter_conjunction_and_string_equality() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let (invoices, customers, rel) = invoice_customer(&mut s);
+        s.set_relationship_referential(rel, true, true).unwrap();
+        s.add_field(
+            invoices,
+            &NewField { name: "Status".into(), kind: FieldKind::Text },
+        )
+        .unwrap();
+        let (ada, _) = a_customer(&s, customers, "Ada");
+        let route = s.resolve_path(customers, "customer").unwrap();
+        let total = field(&s, invoices, "Total");
+        let status = field(&s, invoices, "Status");
+
+        let want = s
+            .create_related_record(
+                &route,
+                ada,
+                &[(&total, "100".into()), (&status, "open".into())],
+                None,
+            )
+            .unwrap();
+        // Right status, too small.
+        s.create_related_record(
+            &route,
+            ada,
+            &[(&total, "10".into()), (&status, "open".into())],
+            None,
+        )
+        .unwrap();
+        // Big enough, wrong status.
+        s.create_related_record(
+            &route,
+            ada,
+            &[(&total, "200".into()), (&status, "paid".into())],
+            None,
+        )
+        .unwrap();
+
+        let filter = RelatedFilter {
+            clauses: vec![
+                FilterClause {
+                    field_id: status.id,
+                    op: FilterOp::Eq,
+                    rhs: FilterOperand::Value("open".into()),
+                },
+                FilterClause {
+                    field_id: total.id,
+                    op: FilterOp::Ge,
+                    rhs: FilterOperand::Value("50".into()),
+                },
+            ],
+        };
+        let shown = s
+            .read_related_records_filtered(&route, ada, &filter)
+            .unwrap();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].id, want);
+    }
+
+    #[test]
+    fn filter_unknown_terminal_field_errs() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let (_invoices, customers, rel) = invoice_customer(&mut s);
+        s.set_relationship_referential(rel, true, true).unwrap();
+        let (ada, _) = a_customer(&s, customers, "Ada");
+        let route = s.resolve_path(customers, "customer").unwrap();
+
+        let filter = RelatedFilter {
+            clauses: vec![FilterClause {
+                field_id: 999_999,
+                op: FilterOp::Eq,
+                rhs: FilterOperand::Value("x".into()),
+            }],
+        };
+        assert!(s
+            .read_related_records_filtered(&route, ada, &filter)
+            .is_err());
     }
 }

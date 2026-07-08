@@ -107,6 +107,8 @@
   }
 
   function nodeX(tableId: number): number {
+    const node = nodes.find((n) => n.id === `table-${tableId}`);
+    if (node) return node.position.x;
     const index = layoutTables.findIndex((t) => t.id === tableId);
     return index === -1 ? 0 : nodePosition(index).x;
   }
@@ -120,24 +122,28 @@
     );
   }
 
-  const nodes = $derived.by<SchemaNode[]>(() =>
-    layoutTables.map((table, index) => {
+  let nodes = $state<SchemaNode[]>([]);
+
+  $effect(() => {
+    nodes = layoutTables.map((table, index) => {
       const totalFieldCount = (store.fieldsByTable[table.id] ?? []).length;
       const fields = keyFieldRows(table);
+      const existingNode = nodes.find((n) => n.id === `table-${table.id}`);
+      const position = existingNode ? existingNode.position : nodePosition(index);
       return {
         id: `table-${table.id}`,
         type: 'schemaTable',
-        position: nodePosition(index),
+        position,
         data: {
           table,
           fields,
           hiddenFieldCount: totalFieldCount - fields.length,
           relationshipCount: relationshipCount(table.id),
         },
-        draggable: false,
+        draggable: true,
       };
-    }),
-  );
+    });
+  });
 
   const edges = $derived.by<SchemaEdge[]>(() =>
     store.relationships.filter(validRelationship).map((rel) => {
@@ -208,13 +214,13 @@
       <p class="sc-note sc-hint">Loading relationships...</p>
     {:else if !hasAnyFields}
       <SvelteFlow
-        {nodes}
+        bind:nodes
         edges={[]}
         {nodeTypes}
         {edgeTypes}
         fitView
         fitViewOptions={{ padding: 0.28, maxZoom: 1 }}
-        nodesDraggable={false}
+        nodesDraggable={true}
         nodesConnectable={false}
         elementsSelectable={false}
         deleteKey={null}
@@ -228,13 +234,13 @@
       </div>
     {:else if store.relationships.length === 0}
       <SvelteFlow
-        {nodes}
+        bind:nodes
         edges={[]}
         {nodeTypes}
         {edgeTypes}
         fitView
         fitViewOptions={{ padding: 0.28, maxZoom: 1 }}
-        nodesDraggable={false}
+        nodesDraggable={true}
         nodesConnectable={false}
         elementsSelectable={false}
         deleteKey={null}
@@ -244,13 +250,13 @@
       </SvelteFlow>
     {:else}
       <SvelteFlow
-        {nodes}
+        bind:nodes
         {edges}
         {nodeTypes}
         {edgeTypes}
         fitView
         fitViewOptions={{ padding: 0.18, maxZoom: 1 }}
-        nodesDraggable={false}
+        nodesDraggable={true}
         nodesConnectable={false}
         elementsSelectable={false}
         deleteKey={null}

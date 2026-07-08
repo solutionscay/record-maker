@@ -171,21 +171,33 @@
 
   <section class="fd-section" aria-labelledby="fd-validation">
     <span id="fd-validation" class="sc-micro fd-label">Validation</span>
-    <label class="fd-check">
-      <input type="checkbox" bind:checked={primary} />
-      <span>Primary ID</span>
+    <label class="fd-switch">
+      <span class="fd-switch-text">Primary ID</span>
+      <span class="fd-toggle">
+        <input type="checkbox" bind:checked={primary} />
+        <span class="fd-track"><span class="fd-knob"></span></span>
+      </span>
     </label>
-    <label class="fd-check">
-      <input type="checkbox" checked={primary || required} disabled={primary} onchange={(e) => (required = e.currentTarget.checked)} />
-      <span>Required</span>
+    <label class="fd-switch">
+      <span class="fd-switch-text">Required</span>
+      <span class="fd-toggle">
+        <input type="checkbox" checked={primary || required} disabled={primary} onchange={(e) => (required = e.currentTarget.checked)} />
+        <span class="fd-track"><span class="fd-knob"></span></span>
+      </span>
     </label>
-    <label class="fd-check">
-      <input type="checkbox" checked={primary || unique} disabled={primary} onchange={(e) => (unique = e.currentTarget.checked)} />
-      <span>Unique</span>
+    <label class="fd-switch">
+      <span class="fd-switch-text">Unique</span>
+      <span class="fd-toggle">
+        <input type="checkbox" checked={primary || unique} disabled={primary} onchange={(e) => (unique = e.currentTarget.checked)} />
+        <span class="fd-track"><span class="fd-knob"></span></span>
+      </span>
     </label>
-    <label class="fd-check">
-      <input type="checkbox" bind:checked={memberOfEnabled} disabled={store.valueLists.length === 0} />
-      <span>Member of value list</span>
+    <label class="fd-switch">
+      <span class="fd-switch-text">Member of value list</span>
+      <span class="fd-toggle">
+        <input type="checkbox" bind:checked={memberOfEnabled} disabled={store.valueLists.length === 0} />
+        <span class="fd-track"><span class="fd-knob"></span></span>
+      </span>
     </label>
     {#if memberOfEnabled}
       <label>
@@ -218,9 +230,12 @@
 
   <section class="fd-section" aria-labelledby="fd-reference">
     <span id="fd-reference" class="sc-micro fd-label">Reference</span>
-    <label class="fd-check">
-      <input type="checkbox" bind:checked={referenceEnabled} />
-      <span>References another field</span>
+    <label class="fd-switch">
+      <span class="fd-switch-text">References another field</span>
+      <span class="fd-toggle">
+        <input type="checkbox" bind:checked={referenceEnabled} />
+        <span class="fd-track"><span class="fd-knob"></span></span>
+      </span>
     </label>
     {#if referenceEnabled}
       <div class="fd-ref">
@@ -306,18 +321,61 @@
   .fd-section {
     margin-top: 16px;
   }
-  .fd-check {
-    height: 28px;
+  /* Validation / reference options as iOS-style switches (label left, toggle
+     right) — same geometry as the layout drawers' switches. */
+  .fd-switch {
+    min-height: 32px;
     display: flex;
     align-items: center;
-    gap: 8px;
+    justify-content: space-between;
+    gap: 12px;
     font-size: 13px;
     color: var(--rm-text);
+    cursor: pointer;
   }
-  .fd-check input {
-    width: 14px;
-    height: 14px;
-    accent-color: var(--rm-accent);
+  .fd-switch:has(input:disabled) {
+    cursor: not-allowed;
+  }
+  .fd-switch-text {
+    min-width: 0;
+  }
+  .fd-toggle {
+    position: relative;
+    display: inline-flex;
+    flex: none;
+  }
+  .fd-toggle input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+  .fd-track {
+    width: 36px;
+    height: 21px;
+    border-radius: 21px;
+    background: var(--rm-segment-track);
+    transition: background 0.15s ease;
+  }
+  .fd-knob {
+    position: absolute;
+    width: 17px;
+    height: 17px;
+    border-radius: 50%;
+    background: #fff;
+    top: 2px;
+    left: 2px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    transition: left 0.15s ease;
+  }
+  .fd-toggle input:checked + .fd-track {
+    background: var(--rm-accent);
+  }
+  .fd-toggle input:checked + .fd-track .fd-knob {
+    left: 17px;
+  }
+  .fd-toggle:has(input:disabled) .fd-track {
+    opacity: 0.55;
   }
   .fd-range {
     display: grid;

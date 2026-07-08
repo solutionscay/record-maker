@@ -224,7 +224,7 @@
     border-radius: 50%;
     background: #ff9f0a;
     box-shadow: 0 0 6px #ff9f0a;
-    display: inline-block;
+    display: block;
   }
   .sb-apptitle-dot::after {
     content: '';
@@ -333,7 +333,7 @@
     border-radius: 50%;
     background: #ff9f0a;
     box-shadow: 0 0 6px #ff9f0a;
-    display: inline-block;
+    display: block;
   }
   .sb-status-dot::after {
     content: '';

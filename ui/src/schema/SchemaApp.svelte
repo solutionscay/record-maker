@@ -7,7 +7,6 @@
   import FieldGrid from './FieldGrid.svelte';
   import FieldDrawer from './FieldDrawer.svelte';
   import RelationshipsView from './RelationshipsView.svelte';
-  import RelationshipDrawer from './RelationshipDrawer.svelte';
 
   const store = new SchemaStore();
   void store.load();
@@ -17,19 +16,14 @@
 
   let tableDrawerId = $state<number | null | undefined>(undefined);
   let fieldDrawer = $state<{ tableId: number; id: number | null } | null>(null);
-  let relationshipDrawerId = $state<number | null | undefined>(undefined);
 
   const tableDrawerOpen = $derived(tableDrawerId !== undefined);
   const drawerTable = $derived(tableDrawerId == null ? null : (store.tableById(tableDrawerId) ?? null));
   const drawerField = $derived(fieldDrawer?.id == null ? null : store.fieldById(fieldDrawer.tableId, fieldDrawer.id));
-  const drawerRelationship = $derived(
-    relationshipDrawerId == null ? null : (store.relationships.find((r) => r.id === relationshipDrawerId) ?? null),
-  );
 
   function closeDrawers() {
     tableDrawerId = undefined;
     fieldDrawer = null;
-    relationshipDrawerId = undefined;
   }
 
   function openTable(id: number) {
@@ -72,15 +66,6 @@
     store.selectTable(tableId);
     fieldDrawer = { tableId, id };
   }
-  function newRelationship() {
-    closeDrawers();
-    relationshipDrawerId = null;
-  }
-  function editRelationship(id: number) {
-    closeDrawers();
-    relationshipDrawerId = id;
-  }
-
   async function saveSchema() {
     const ok = await store.saveAll();
     if (ok) closeDrawers();
@@ -116,7 +101,7 @@
     {:else if tab === 'fields'}
       <FieldGrid {store} onswitch={openTable} onedit={editField} onnew={newField} onnotables={goTables} openFieldId={fieldDrawer?.id ?? null} />
     {:else}
-      <RelationshipsView {store} onnew={newRelationship} onedit={editRelationship} ontable={editTable} />
+      <RelationshipsView {store} />
     {/if}
 
     {#if tableDrawerOpen}
@@ -129,11 +114,6 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="sb-scrim" onclick={closeDrawers}></div>
       <FieldDrawer {store} tableId={fieldDrawer.tableId} field={drawerField} onclose={closeDrawers} />
-    {:else if relationshipDrawerId !== undefined}
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="sb-scrim" onclick={closeDrawers}></div>
-      <RelationshipDrawer {store} relationship={drawerRelationship} onclose={closeDrawers} />
     {/if}
   </div>
 

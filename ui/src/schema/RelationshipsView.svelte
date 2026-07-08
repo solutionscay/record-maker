@@ -11,25 +11,18 @@
   } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import type { SchemaStore } from './store.svelte';
-  import Icon from '../lib/Icon.svelte';
   import { fieldBadgeInfo } from './fieldBadges';
   import SchemaRelationshipEdge, { type SchemaRelationshipEdgeData } from './SchemaRelationshipEdge.svelte';
   import SchemaTableNode, { type SchemaGraphField, type SchemaTableNodeData } from './SchemaTableNode.svelte';
   import type { RelationshipView, TableView } from './types';
 
-  let {
-    store,
-    onnew,
-    onedit,
-    ontable,
-  }: {
-    store: SchemaStore;
-    onnew: () => void;
-    onedit: (id: number) => void;
-    ontable: (id: number) => void;
-  } = $props();
+  // Strictly a read-only diagram of the schema's constraints (#142+). It never
+  // creates or edits anything: no "new relationship", no opening a table or a
+  // relationship to edit. Relationships are defined solely by field references
+  // in the Fields tab; this view only draws the constraints they produce.
+  let { store }: { store: SchemaStore } = $props();
 
-  const canCreate = $derived(store.tables.some((t) => (store.fieldsByTable[t.id] ?? []).length > 0));
+  const hasAnyFields = $derived(store.tables.some((t) => (store.fieldsByTable[t.id] ?? []).length > 0));
 
   const nodeTypes: NodeTypes = { schemaTable: SchemaTableNode };
   const edgeTypes: EdgeTypes = { schemaRelationship: SchemaRelationshipEdge };
@@ -140,7 +133,6 @@
           fields,
           hiddenFieldCount: totalFieldCount - fields.length,
           relationshipCount: relationshipCount(table.id),
-          onTable: ontable,
         },
         draggable: false,
       };
@@ -177,10 +169,6 @@
       };
     }),
   );
-
-  function openEdge(edge: SchemaEdge) {
-    if (edge.data) onedit(edge.data.relationshipId);
-  }
 </script>
 
 <div class="rv">
@@ -212,9 +200,7 @@
       <span class="sc-micro">Relationships</span>
       <span class="sc-count">{store.relationships.length} defined</span>
     </div>
-    <button type="button" class="sc-btn sc-btn--primary" onclick={onnew} disabled={!canCreate}>
-      <Icon name="plus" />New relationship
-    </button>
+    <span class="sc-hint rv-note">Read-only — relationships come from field references</span>
   </header>
 
   <div class="rv-graph">
@@ -223,9 +209,9 @@
     {:else if store.tables.length === 0}
       <div class="sc-empty rv-empty">
         <p class="sc-empty-title">No tables yet</p>
-        <p class="sc-hint">Create tables and fields before viewing relationships.</p>
+        <p class="sc-hint">Tables and their relationships appear here once defined.</p>
       </div>
-    {:else if !canCreate}
+    {:else if !hasAnyFields}
       <SvelteFlow
         {nodes}
         edges={[]}
@@ -235,16 +221,15 @@
         fitViewOptions={{ padding: 0.28, maxZoom: 1 }}
         nodesDraggable={false}
         nodesConnectable={false}
-        elementsSelectable
+        elementsSelectable={false}
         deleteKey={null}
-        onnodeclick={({ node }) => ontable(node.data.table.id)}
       >
-        <Controls />
+        <Controls showLock={false} />
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
       </SvelteFlow>
       <div class="sc-empty rv-empty rv-empty--overlay">
-        <p class="sc-empty-title">No fields available</p>
-        <p class="sc-hint">Create fields before defining relationships.</p>
+        <p class="sc-empty-title">No fields yet</p>
+        <p class="sc-hint">Add fields to your tables — a field that references another appears here as a relationship.</p>
       </div>
     {:else if store.relationships.length === 0}
       <SvelteFlow
@@ -256,19 +241,15 @@
         fitViewOptions={{ padding: 0.28, maxZoom: 1 }}
         nodesDraggable={false}
         nodesConnectable={false}
-        elementsSelectable
+        elementsSelectable={false}
         deleteKey={null}
-        onnodeclick={({ node }) => ontable(node.data.table.id)}
       >
-        <Controls />
+        <Controls showLock={false} />
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
       </SvelteFlow>
       <div class="sc-empty rv-empty rv-empty--overlay">
-        <p class="sc-empty-title">No relationships yet</p>
-        <p class="sc-hint">Connect a source field to a target field. The graph will show that edge here.</p>
-        <button type="button" class="sc-btn sc-btn--primary" onclick={onnew}>
-          <Icon name="plus" />New relationship
-        </button>
+        <p class="sc-empty-title">No relationships defined</p>
+        <p class="sc-hint">In the Fields tab, turn on "References another field" for a field — its constraint is drawn here.</p>
       </div>
     {:else}
       <SvelteFlow
@@ -280,12 +261,10 @@
         fitViewOptions={{ padding: 0.18, maxZoom: 1 }}
         nodesDraggable={false}
         nodesConnectable={false}
-        elementsSelectable
+        elementsSelectable={false}
         deleteKey={null}
-        onnodeclick={({ node }) => ontable(node.data.table.id)}
-        onedgeclick={({ edge }) => openEdge(edge)}
       >
-        <Controls />
+        <Controls showLock={false} />
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
       </SvelteFlow>
     {/if}

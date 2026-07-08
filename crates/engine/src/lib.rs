@@ -12,17 +12,23 @@ pub mod db;
 pub mod layout;
 pub mod model;
 pub mod options;
+pub mod path;
+pub mod related;
 pub mod schema;
 
 pub use data::Record;
 pub use db::Solution;
+pub use path::{HopDirection, PathError, ResolvedRoute, RouteClass, RouteHop};
+pub use related::{
+    FilterClause, FilterOp, FilterOperand, RelatedCrudError, RelatedFilter,
+};
 pub use layout::{
     LayoutMeta, NewObject, ObjectCapabilities, ObjectGroup, ObjectKind, ObjectMeta, PartKind,
     PartMeta, RestoreObject, RestoreResult,
 };
 pub use model::{
-    FieldKind, FieldMeta, NewField, NewRelationship, NewValueList, RelationshipMeta, TableMeta,
-    ValueListItem, ValueListMeta,
+    Cardinality, FieldKind, FieldMeta, NewField, NewRelationship, NewValueList, RelationshipMeta,
+    TableMeta, ValueListItem, ValueListMeta,
 };
 pub use options::{
     FieldOptions, FieldReference, FieldReferenceError, RangeRule, ValidationError, ValidationRules,

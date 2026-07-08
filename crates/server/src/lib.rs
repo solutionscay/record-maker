@@ -49,9 +49,9 @@ use routes::schema::{
     create_schema_field, create_schema_relationship, create_schema_table, create_value_list,
     delete_schema_field, delete_schema_relationship, delete_schema_table, delete_value_list,
     duplicate_value_list, rename_schema_table, reorder_schema_fields, reorder_schema_tables,
-    schema_fields, schema_relationships, schema_tables, set_schema_table_graph_position,
-    update_schema_field, update_schema_relationship, update_schema_table, update_value_list,
-    value_list_items, value_lists,
+    schema_fields, schema_relationships, schema_tables, set_schema_relationship_referential,
+    set_schema_table_graph_position, update_schema_field, update_schema_relationship,
+    update_schema_table, update_value_list, value_list_items, value_lists,
 };
 
 /// Default UI asset base directory (relative to the working directory). Used by
@@ -246,6 +246,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/schema/relationships/:id",
             post(update_schema_relationship),
+        )
+        .route(
+            "/schema/relationships/:id/referential",
+            post(set_schema_relationship_referential),
         )
         .route(
             "/schema/relationships/:id/delete",

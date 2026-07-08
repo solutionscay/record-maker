@@ -914,6 +914,33 @@ async fn schema_relationship_routes_crud_and_validate_field_ownership() {
         Some("customer")
     );
 
+    // #110: referential flags default to the safe state and cardinality is
+    // derived from the FK side (forward to-one, reverse to-many).
+    assert_eq!(rel["allowCreate"].as_bool(), Some(false));
+    assert_eq!(rel["allowDelete"].as_bool(), Some(false));
+    assert_eq!(rel["forwardCardinality"].as_str(), Some("one"));
+    assert_eq!(rel["reverseCardinality"].as_str(), Some("many"));
+
+    // The referential route sets the flags on the existing relationship.
+    let (status, resp) = post_json_body(
+        state.clone(),
+        &format!("/schema/relationships/{rel_id}/referential"),
+        &serde_json::json!({ "allowCreate": true, "allowDelete": true }).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    let updated: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(updated["allowCreate"].as_bool(), Some(true));
+    assert_eq!(updated["allowDelete"].as_bool(), Some(true));
+    // Setting flags on a missing relationship is a 404.
+    let (status, _) = post_json_body(
+        state.clone(),
+        "/schema/relationships/999999/referential",
+        &serde_json::json!({ "allowCreate": true, "allowDelete": false }).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
     let update = serde_json::json!({
         "name": "bill_to",
         "fromTable": invoices,
@@ -929,6 +956,10 @@ async fn schema_relationship_routes_crud_and_validate_field_ownership() {
     .await;
     assert_eq!(status, StatusCode::OK, "{resp}");
     assert!(resp.contains(r#""name":"bill_to""#));
+    // #110: a structural FK edit must not clobber the referential flags.
+    let renamed: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(renamed["allowCreate"].as_bool(), Some(true));
+    assert_eq!(renamed["allowDelete"].as_bool(), Some(true));
     let (_, fields_body) =
         get_body(state.clone(), &format!("/schema/tables/{invoices}/fields")).await;
     let fields: serde_json::Value = serde_json::from_str(&fields_body).unwrap();

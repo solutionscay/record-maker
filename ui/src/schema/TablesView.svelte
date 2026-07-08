@@ -28,14 +28,6 @@
   <div class="tv-list">
     {#if store.loading}
       <p class="sc-note sc-hint">Loading tables...</p>
-    {:else if store.tables.length === 0}
-      <div class="sc-empty tv-empty">
-        <p class="sc-empty-title">No tables yet</p>
-        <p class="sc-hint">Create your first table to start defining fields.</p>
-        <button type="button" class="sc-btn sc-btn--primary" onclick={onnew}>
-          <Icon name="plus" />New table
-        </button>
-      </div>
     {/if}
 
     {#if !store.loading && store.tables.length > 0}
@@ -89,9 +81,6 @@
   .tv-list {
     flex: 1 1 auto;
     min-height: 0;
-  }
-  .tv-empty .sc-btn {
-    margin-top: 6px;
   }
   .tv-colhead,
   .tv-row {

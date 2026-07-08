@@ -7,6 +7,7 @@
   import FieldGrid from './FieldGrid.svelte';
   import FieldDrawer from './FieldDrawer.svelte';
   import RelationshipsView from './RelationshipsView.svelte';
+  import NoTablesEmpty from './NoTablesEmpty.svelte';
 
   const store = new SchemaStore();
   void store.load();
@@ -96,10 +97,13 @@
   </header>
 
   <div class="sb-body">
-    {#if tab === 'tables'}
+    {#if !store.loading && store.tables.length === 0}
+      <!-- One shared empty state across all three tabs until a table exists. -->
+      <NoTablesEmpty onnew={newTable} />
+    {:else if tab === 'tables'}
       <TablesView {store} onopen={openTable} onnew={newTable} onedit={editTable} />
     {:else if tab === 'fields'}
-      <FieldGrid {store} onswitch={openTable} onedit={editField} onnew={newField} onnotables={goTables} openFieldId={fieldDrawer?.id ?? null} />
+      <FieldGrid {store} onswitch={openTable} onedit={editField} onnew={newField} openFieldId={fieldDrawer?.id ?? null} />
     {:else}
       <RelationshipsView {store} />
     {/if}

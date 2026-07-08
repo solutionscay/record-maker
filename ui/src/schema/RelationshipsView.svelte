@@ -206,11 +206,6 @@
   <div class="rv-graph">
     {#if store.loading}
       <p class="sc-note sc-hint">Loading relationships...</p>
-    {:else if store.tables.length === 0}
-      <div class="sc-empty rv-empty">
-        <p class="sc-empty-title">No tables yet</p>
-        <p class="sc-hint">Tables and their relationships appear here once defined.</p>
-      </div>
     {:else if !hasAnyFields}
       <SvelteFlow
         {nodes}

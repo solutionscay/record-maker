@@ -218,12 +218,26 @@
     gap: 6px;
   }
   .sb-apptitle-dot {
+    position: relative;
     width: 7px;
     height: 7px;
     border-radius: 50%;
     background: #ff9f0a;
-    box-shadow: 0 0 6px rgba(255, 159, 10, 0.6);
+    box-shadow: 0 0 6px #ff9f0a;
     display: inline-block;
+  }
+  .sb-apptitle-dot::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #ff9f0a;
+    box-shadow: 0 0 8px #ff9f0a;
+    animation: sb-pulse 2.2s infinite ease-out;
   }
   /* Upper-right close (X) — dismisses the pane, like the classic Manage dialogs. */
   .sb-x {
@@ -313,15 +327,38 @@
     font-weight: 500;
   }
   .sb-status-dot {
-    width: 6px;
-    height: 6px;
+    position: relative;
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
     background: #ff9f0a;
-    animation: sb-pulse 2s infinite ease-in-out;
+    box-shadow: 0 0 6px #ff9f0a;
+    display: inline-block;
+  }
+  .sb-status-dot::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #ff9f0a;
+    box-shadow: 0 0 8px #ff9f0a;
+    animation: sb-pulse 2.2s infinite ease-out;
   }
   @keyframes sb-pulse {
-    0%, 100% { opacity: 0.5; }
-    50% { opacity: 1; }
+    0% {
+      transform: translate(-50%, -50%) scale(1);
+      opacity: 1;
+      box-shadow: 0 0 4px rgba(255, 159, 10, 0.8);
+    }
+    100% {
+      transform: translate(-50%, -50%) scale(2.8);
+      opacity: 0;
+      box-shadow: 0 0 16px rgba(255, 159, 10, 0);
+    }
   }
   .sb-scrim {
     position: absolute;

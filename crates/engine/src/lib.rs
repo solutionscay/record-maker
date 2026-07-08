@@ -12,10 +12,12 @@ pub mod db;
 pub mod layout;
 pub mod model;
 pub mod options;
+pub mod path;
 pub mod schema;
 
 pub use data::Record;
 pub use db::Solution;
+pub use path::{HopDirection, PathError, ResolvedRoute, RouteClass, RouteHop};
 pub use layout::{
     LayoutMeta, NewObject, ObjectCapabilities, ObjectGroup, ObjectKind, ObjectMeta, PartKind,
     PartMeta, RestoreObject, RestoreResult,

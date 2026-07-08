@@ -1688,6 +1688,35 @@ mod tests {
     }
 
     #[test]
+    fn delete_field_cascades_the_relationships_it_participates_in() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let customers = s
+            .create_table("Customers", &[NewField { name: "Ref".into(), kind: FieldKind::Number }])
+            .unwrap();
+        let invoices = s
+            .create_table("Invoices", &[NewField { name: "Customer Ref".into(), kind: FieldKind::Number }])
+            .unwrap();
+        let customer_ref = s.fields(customers).unwrap()[0].id;
+        let invoice_ref = s.fields(invoices).unwrap()[0].id;
+        s.create_relationship(&NewRelationship {
+            name: "customer".into(),
+            from_table: invoices,
+            to_table: customers,
+            from_field: invoice_ref,
+            to_field: customer_ref,
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(s.relationships().unwrap().len(), 1);
+
+        // Dropping the target field (the referenced key) removes the relationship
+        // too — the guarantee the Field drawer's delete warning makes to the user.
+        assert_eq!(s.delete_field(customers, customer_ref).unwrap(), 1);
+        assert!(s.relationships().unwrap().is_empty());
+        assert!(s.field_by_id(customers, customer_ref).unwrap().is_none());
+    }
+
+    #[test]
     fn reorder_tables_persists_order_and_validates_set() {
         let mut s = Solution::open_in_memory().unwrap();
         let a = s.create_table("A", &[]).unwrap();

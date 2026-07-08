@@ -72,6 +72,10 @@ pub struct TableMeta {
     /// Physical table name in data.db (always `t_<id>` — a safe identifier).
     pub phys: String,
     pub position: i64,
+    /// Saved x/y of this table's box in the Relationships graph (#142 follow-up),
+    /// or `None` when the box has never been dragged (falls back to grid layout).
+    pub graph_x: Option<f64>,
+    pub graph_y: Option<f64>,
 }
 
 /// Metadata for a field on a user table.
@@ -555,7 +559,7 @@ impl Solution {
     pub fn tables(&self) -> Result<Vec<TableMeta>> {
         let mut stmt = self
             .app
-            .prepare("SELECT id, name, notes, phys_name, position FROM meta_table ORDER BY position, id")?;
+            .prepare("SELECT id, name, notes, phys_name, position, graph_x, graph_y FROM meta_table ORDER BY position, id")?;
         let rows = stmt.query_map([], |r| {
             Ok(TableMeta {
                 id: r.get(0)?,
@@ -563,6 +567,8 @@ impl Solution {
                 notes: r.get(2)?,
                 phys: r.get(3)?,
                 position: r.get(4)?,
+                graph_x: r.get(5)?,
+                graph_y: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -572,7 +578,7 @@ impl Solution {
     pub fn table_by_name(&self, name: &str) -> Result<Option<TableMeta>> {
         let mut stmt = self
             .app
-            .prepare("SELECT id, name, notes, phys_name, position FROM meta_table WHERE name=?1")?;
+            .prepare("SELECT id, name, notes, phys_name, position, graph_x, graph_y FROM meta_table WHERE name=?1")?;
         let mut rows = stmt.query_map(params![name], |r| {
             Ok(TableMeta {
                 id: r.get(0)?,
@@ -580,6 +586,8 @@ impl Solution {
                 notes: r.get(2)?,
                 phys: r.get(3)?,
                 position: r.get(4)?,
+                graph_x: r.get(5)?,
+                graph_y: r.get(6)?,
             })
         })?;
         match rows.next() {
@@ -592,7 +600,7 @@ impl Solution {
     pub fn table_by_id(&self, id: i64) -> Result<Option<TableMeta>> {
         let mut stmt = self
             .app
-            .prepare("SELECT id, name, notes, phys_name, position FROM meta_table WHERE id=?1")?;
+            .prepare("SELECT id, name, notes, phys_name, position, graph_x, graph_y FROM meta_table WHERE id=?1")?;
         let mut rows = stmt.query_map(params![id], |r| {
             Ok(TableMeta {
                 id: r.get(0)?,
@@ -600,12 +608,26 @@ impl Solution {
                 notes: r.get(2)?,
                 phys: r.get(3)?,
                 position: r.get(4)?,
+                graph_x: r.get(5)?,
+                graph_y: r.get(6)?,
             })
         })?;
         match rows.next() {
             Some(r) => Ok(Some(r?)),
             None => Ok(None),
         }
+    }
+
+    /// Persist a table box's position in the Relationships graph (#142 follow-up).
+    /// A pure view-state write — separate from the schema draft, so arranging the
+    /// diagram is immediate and never marks the schema dirty. Returns the number
+    /// of rows updated (0 if `table_id` is unknown).
+    pub fn set_table_graph_position(&mut self, table_id: i64, x: f64, y: f64) -> Result<usize> {
+        let n = self.app.execute(
+            "UPDATE meta_table SET graph_x=?1, graph_y=?2 WHERE id=?3",
+            params![x, y, table_id],
+        )?;
+        Ok(n)
     }
 
     /// Look up a field by id, scoped to its table.
@@ -844,7 +866,8 @@ impl Solution {
     fn field_table_by_field_id(&self, field_id: i64) -> Result<Option<(TableMeta, FieldMeta)>> {
         let mut stmt = self.app.prepare(
             "SELECT t.id, t.name, COALESCE(t.notes, ''), t.phys_name, t.position, \
-                    f.id, f.name, COALESCE(f.notes, ''), f.phys_name, f.kind, COALESCE(f.options, ''), f.position \
+                    f.id, f.name, COALESCE(f.notes, ''), f.phys_name, f.kind, COALESCE(f.options, ''), f.position, \
+                    t.graph_x, t.graph_y \
              FROM meta_field f JOIN meta_table t ON t.id=f.table_id WHERE f.id=?1",
         )?;
         let mut rows = stmt.query_map(params![field_id], |r| {
@@ -856,6 +879,8 @@ impl Solution {
                     notes: r.get(2)?,
                     phys: r.get(3)?,
                     position: r.get(4)?,
+                    graph_x: r.get(12)?,
+                    graph_y: r.get(13)?,
                 },
                 FieldMeta {
                     id: r.get(5)?,
@@ -1714,6 +1739,27 @@ mod tests {
         assert_eq!(s.delete_field(customers, customer_ref).unwrap(), 1);
         assert!(s.relationships().unwrap().is_empty());
         assert!(s.field_by_id(customers, customer_ref).unwrap().is_none());
+    }
+
+    #[test]
+    fn table_graph_position_round_trips_and_defaults_to_none() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s.create_table("T", &[]).unwrap();
+        // Fresh table has no saved graph coords — falls back to grid layout.
+        let t = s.table_by_id(tid).unwrap().unwrap();
+        assert_eq!(t.graph_x, None);
+        assert_eq!(t.graph_y, None);
+
+        assert_eq!(s.set_table_graph_position(tid, 147.5, 110.0).unwrap(), 1);
+        let t = s.table_by_id(tid).unwrap().unwrap();
+        assert_eq!(t.graph_x, Some(147.5));
+        assert_eq!(t.graph_y, Some(110.0));
+        // Also surfaced by the list query the graph loads from.
+        let listed = s.tables().unwrap().into_iter().find(|t| t.id == tid).unwrap();
+        assert_eq!((listed.graph_x, listed.graph_y), (Some(147.5), Some(110.0)));
+
+        // Unknown table updates nothing.
+        assert_eq!(s.set_table_graph_position(999_999, 1.0, 2.0).unwrap(), 0);
     }
 
     #[test]

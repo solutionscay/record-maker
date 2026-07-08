@@ -24,6 +24,9 @@ pub(crate) struct TableSchemaView {
     notes: String,
     phys: String,
     position: i64,
+    /// Saved Relationships-graph box position, or null until first dragged.
+    graph_x: Option<f64>,
+    graph_y: Option<f64>,
 }
 
 #[derive(serde::Serialize)]
@@ -128,6 +131,13 @@ pub(crate) struct TableOrderBody {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct GraphPositionBody {
+    x: f64,
+    y: f64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct RelationshipBody {
     name: String,
     from_table: i64,
@@ -143,6 +153,8 @@ fn table_schema_view(t: TableMeta) -> TableSchemaView {
         notes: t.notes,
         phys: t.phys,
         position: t.position,
+        graph_x: t.graph_x,
+        graph_y: t.graph_y,
     }
 }
 
@@ -540,6 +552,21 @@ pub(crate) async fn delete_schema_field(
 ) -> AppResult<StatusCode> {
     let mut sol = st.sol.lock().unwrap();
     if sol.delete_field(table_id, field_id)? == 0 {
+        return Err(AppError::not_found());
+    }
+    Ok(StatusCode::OK)
+}
+
+/// Save a table box's Relationships-graph position (#142 follow-up). A pure
+/// view-state write, persisted immediately on drag-stop — independent of the
+/// schema draft's Save.
+pub(crate) async fn set_schema_table_graph_position(
+    State(st): State<AppState>,
+    Path(table_id): Path<i64>,
+    Json(body): Json<GraphPositionBody>,
+) -> AppResult<StatusCode> {
+    let mut sol = st.sol.lock().unwrap();
+    if sol.set_table_graph_position(table_id, body.x, body.y)? == 0 {
         return Err(AppError::not_found());
     }
     Ok(StatusCode::OK)

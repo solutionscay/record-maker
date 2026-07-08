@@ -99,6 +99,12 @@
     return ordered;
   });
 
+  // A box the user has arranged carries saved coords (#142 follow-up); fall back
+  // to the computed grid until it's first dragged.
+  function savedPosition(table: TableView): { x: number; y: number } | null {
+    return table.graphX != null && table.graphY != null ? { x: table.graphX, y: table.graphY } : null;
+  }
+
   function nodePosition(index: number): { x: number; y: number } {
     const columns = Math.max(1, Math.min(3, Math.ceil(Math.sqrt(Math.max(1, store.tables.length)))));
     return {
@@ -138,7 +144,7 @@
       const totalFieldCount = (store.fieldsByTable[table.id] ?? []).length;
       const fields = keyFieldRows(table);
       const existingNode = current.find((n) => n.id === `table-${table.id}`);
-      const position = existingNode ? existingNode.position : nodePosition(index);
+      const position = existingNode ? existingNode.position : (savedPosition(table) ?? nodePosition(index));
       return {
         id: `table-${table.id}`,
         type: 'schemaTable',
@@ -153,6 +159,15 @@
       };
     });
   });
+
+  // Persist a box's new spot the moment the user drops it (view-state, saved
+  // immediately — not part of the schema draft's Save).
+  function onNodeDragStop({ nodes: dragged }: { nodes: SchemaNode[] }) {
+    for (const n of dragged) {
+      const tableId = Number(n.id.replace('table-', ''));
+      if (Number.isFinite(tableId)) store.persistGraphPosition(tableId, n.position.x, n.position.y);
+    }
+  }
 
   const edges = $derived.by<SchemaEdge[]>(() =>
     store.relationships.filter(validRelationship).map((rel) => {
@@ -233,6 +248,7 @@
         nodesConnectable={false}
         elementsSelectable={false}
         deleteKey={null}
+        onnodedragstop={onNodeDragStop}
       >
         <Controls showLock={false} />
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
@@ -253,6 +269,7 @@
         nodesConnectable={false}
         elementsSelectable={false}
         deleteKey={null}
+        onnodedragstop={onNodeDragStop}
       >
         <Controls showLock={false} />
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
@@ -269,6 +286,7 @@
         nodesConnectable={false}
         elementsSelectable={false}
         deleteKey={null}
+        onnodedragstop={onNodeDragStop}
       >
         <Controls showLock={false} />
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />

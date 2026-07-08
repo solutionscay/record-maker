@@ -58,6 +58,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0012_table_position",
         include_str!("migrations/0012_table_position.sql"),
     ),
+    (
+        "0013_table_graph_pos",
+        include_str!("migrations/0013_table_graph_pos.sql"),
+    ),
 ];
 
 /// Schema version this build targets (the number of migrations defined).

@@ -228,6 +228,17 @@ export class SchemaStore {
     return true;
   }
 
+  /** Save a table box's Relationships-graph position. Pure view-state: applied
+   * to BOTH the draft and the baseline so arranging the diagram never registers
+   * as an unsaved schema change, and persisted immediately (unsaved negative-id
+   * tables just move locally until they're first saved). */
+  persistGraphPosition(tableId: number, x: number, y: number): void {
+    const apply = (t: TableView): TableView => (t.id === tableId ? { ...t, graphX: x, graphY: y } : t);
+    this.tables = this.tables.map(apply);
+    this.baseTables = this.baseTables.map(apply);
+    if (tableId > 0) void this.guard(() => api.setTableGraphPosition(tableId, x, y));
+  }
+
   // ── field draft mutations ───────────────────────────────────────────────
 
   saveFieldDraft(

@@ -12,7 +12,7 @@ import { getJson, postJson, postVoid as httpPostVoid } from '../shared/http';
 import type { FieldKind, FieldOptions, FieldView, RelationshipView, TableView, ValueListView } from './types';
 
 /** POST that returns no JSON body (the delete endpoints just 200/OK). */
-const postVoid = (url: string): Promise<void> => httpPostVoid(url, {});
+const postVoid = (url: string, body: unknown = {}): Promise<void> => httpPostVoid(url, body);
 
 // ── tables ──────────────────────────────────────────────────────────────────
 
@@ -34,6 +34,10 @@ export const deleteTable = (id: number): Promise<void> => postVoid(`/schema/tabl
 
 export const reorderTables = (tableIds: number[]): Promise<TableView[]> =>
   postJson('/schema/tables/order', { tableIds });
+
+/** Persist a table box's Relationships-graph position (view-state, saved on drag-stop). */
+export const setTableGraphPosition = (id: number, x: number, y: number): Promise<void> =>
+  postVoid(`/schema/tables/${id}/graph`, { x, y });
 
 // ── fields ──────────────────────────────────────────────────────────────────
 

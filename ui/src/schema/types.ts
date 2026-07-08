@@ -53,6 +53,9 @@ export interface TableView {
   notes: string;
   phys: string;
   position: number;
+  /** Saved Relationships-graph box position; null until the box is first dragged. */
+  graphX?: number | null;
+  graphY?: number | null;
 }
 
 /** A field on a table — mirrors the server's `FieldSchemaView`. `position` is the

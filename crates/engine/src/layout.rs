@@ -394,6 +394,8 @@ impl Solution {
         let Some(table) = self.table_by_id(table_id)? else {
             bail!("no table {table_id}");
         };
+        // `fields` excludes the system primary key (#156), so the read-only key is
+        // never auto-placed on a layout.
         let fields: Vec<(i64, String)> = self
             .fields(table_id)?
             .into_iter()

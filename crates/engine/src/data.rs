@@ -11,7 +11,7 @@ use rusqlite::types::{Value, ValueRef};
 use rusqlite::{params, params_from_iter};
 
 use crate::model::{FieldMeta, TableMeta};
-use crate::options::FieldOptions;
+use crate::options::{AutoEnter, FieldOptions};
 use crate::Solution;
 
 /// A row, with `cells` aligned to the field order passed to [`Solution::list_records`].
@@ -93,15 +93,27 @@ impl Solution {
     /// member-of-value-list — see [`crate::options`]) are enforced first; a
     /// rejected write fails with a downcastable [`crate::ValidationError`].
     pub fn insert_record(&self, table: &TableMeta, values: &[(&FieldMeta, String)]) -> Result<i64> {
-        // The system primary key (#156) is minted here: every system field gets a
-        // fresh v4 UUID on insert, unconditionally (its value is system-managed, so
-        // any submitted value is ignored). Assigned once at creation, never on update.
+        // Auto-enter (#159) is applied here, in the same pass that mints the
+        // system primary key (#156):
+        //  * A system field gets a fresh v4 UUID on insert, unconditionally (its
+        //    value is system-managed, so any submitted value is ignored).
+        //  * A constant auto-enter (#160) fills its default only when the field is
+        //    left empty; an explicitly supplied value wins.
+        // Both are create-only — never applied on update.
         let all_fields = self.all_fields(table.id)?;
         let mut provided: HashMap<i64, String> =
             values.iter().map(|(f, v)| (f.id, v.clone())).collect();
         for field in &all_fields {
-            if FieldOptions::parse(&field.options).system {
+            let opts = FieldOptions::parse(&field.options);
+            if opts.system {
                 provided.insert(field.id, self.generate_uuid()?);
+                continue;
+            }
+            if let Some(AutoEnter::Constant { value }) = &opts.auto_enter {
+                let empty = provided.get(&field.id).is_none_or(|v| v.trim().is_empty());
+                if empty {
+                    provided.insert(field.id, value.clone());
+                }
             }
         }
         // Rebuild in field order, keeping every column that was provided or
@@ -365,6 +377,56 @@ mod tests {
         // Undeletable + fixed-kind.
         assert!(s.delete_field(tid, pk.id).is_err());
         assert!(s.retype_field(tid, pk.id, FieldKind::Number).is_err());
+    }
+
+    #[test]
+    fn constant_auto_enter_fills_only_when_empty() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s
+            .create_table(
+                "Tasks",
+                &[
+                    NewField { name: "Title".into(), kind: FieldKind::Text },
+                    NewField { name: "Status".into(), kind: FieldKind::Text },
+                ],
+            )
+            .unwrap();
+        let table = s.table_by_id(tid).unwrap().unwrap();
+        let fields = s.fields(tid).unwrap();
+        // Status auto-enters the constant "Open" when left empty.
+        s.update_field_options(
+            tid,
+            fields[1].id,
+            r#"{"autoEnter":{"kind":"constant","value":"Open"}}"#,
+        )
+        .unwrap();
+        let fields = s.fields(tid).unwrap();
+        let status_at = |s: &Solution, id: i64| {
+            s.get_record(&table, &fields, id).unwrap().unwrap()[1].clone()
+        };
+
+        // Absent → constant fills.
+        let a = s
+            .insert_record(&table, &[(&fields[0], "A".into())])
+            .unwrap();
+        assert_eq!(status_at(&s, a), "Open");
+
+        // Empty string → constant fills.
+        let b = s
+            .insert_record(&table, &[(&fields[0], "B".into()), (&fields[1], "".into())])
+            .unwrap();
+        assert_eq!(status_at(&s, b), "Open");
+
+        // Explicit value → kept.
+        let c = s
+            .insert_record(&table, &[(&fields[0], "C".into()), (&fields[1], "Done".into())])
+            .unwrap();
+        assert_eq!(status_at(&s, c), "Done");
+
+        // Not applied on update: clearing the field is honoured, not re-filled.
+        s.update_record(&table, a, &[(&fields[0], "A".into()), (&fields[1], "".into())])
+            .unwrap();
+        assert_eq!(status_at(&s, a), "");
     }
 
     #[test]

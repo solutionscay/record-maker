@@ -47,9 +47,21 @@ impl FieldMeta {
 pub struct FieldOptions {
     /// The `validation` sub-object, when present and well-formed.
     pub validation: Option<ValidationRules>,
+    /// The `autoEnter` sub-object (#159/#160): a value the engine populates when
+    /// a record is created and the field is left empty. Extensible per source;
+    /// only the constant source exists today.
+    pub auto_enter: Option<AutoEnter>,
     /// The system primary key (#156): auto-minted UUID, value-immutable,
     /// undeletable, fixed-kind. Set once at table creation; users never toggle it.
     pub system: bool,
+}
+
+/// An auto-enter value source (#159). Stored under `options.autoEnter` as
+/// `{"kind":"<source>", …}`; unknown/malformed sources read as `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoEnter {
+    /// A static default: fill this constant when the field is left empty (#160).
+    Constant { value: String },
 }
 
 /// The `validation` rules of one field.
@@ -91,8 +103,18 @@ impl FieldOptions {
                 }),
                 member_of_value_list: v.get("memberOfValueList").and_then(Value::as_i64),
             });
+        let auto_enter = value
+            .get("autoEnter")
+            .filter(|v| v.is_object())
+            .and_then(|v| match v.get("kind").and_then(Value::as_str) {
+                Some("constant") => Some(AutoEnter::Constant {
+                    value: v.get("value").and_then(Value::as_str).unwrap_or("").to_string(),
+                }),
+                _ => None,
+            });
         FieldOptions {
             validation,
+            auto_enter,
             system: bool_rule(&value, "system"),
         }
     }
@@ -397,6 +419,22 @@ mod tests {
             })
         );
         assert_eq!(rules.member_of_value_list, Some(7));
+        assert_eq!(parsed.auto_enter, None);
+
+        // autoEnter parses the constant source; unknown/malformed sources read as None.
+        assert_eq!(
+            FieldOptions::parse(r#"{"autoEnter":{"kind":"constant","value":"Open"}}"#).auto_enter,
+            Some(AutoEnter::Constant { value: "Open".into() })
+        );
+        assert_eq!(
+            FieldOptions::parse(r#"{"autoEnter":{"kind":"serial"}}"#).auto_enter,
+            None
+        );
+        // A constant with no value reads as an empty string, not a parse failure.
+        assert_eq!(
+            FieldOptions::parse(r#"{"autoEnter":{"kind":"constant"}}"#).auto_enter,
+            Some(AutoEnter::Constant { value: String::new() })
+        );
     }
 
     #[test]

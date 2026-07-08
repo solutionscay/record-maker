@@ -29,6 +29,8 @@
   let memberOfValueList = $state<number | null>(null);
   let rangeMin = $state('');
   let rangeMax = $state('');
+  let autoEnterSource = $state<'none' | 'constant'>('none');
+  let autoEnterValue = $state('');
   let referenceEnabled = $state(false);
   let referenceName = $state('');
   let referenceToTable = $state<number | null>(null);
@@ -37,6 +39,9 @@
 
   const hasRange = $derived(kind === 'number' || kind === 'date' || kind === 'time' || kind === 'timestamp');
   const rangeInputType = $derived(kind === 'number' ? 'number' : kind === 'date' ? 'date' : kind === 'time' ? 'time' : 'datetime-local');
+  const autoEnterInputType = $derived(
+    kind === 'number' ? 'number' : kind === 'date' ? 'date' : kind === 'time' ? 'time' : kind === 'timestamp' ? 'datetime-local' : 'text',
+  );
   const referenceFields = $derived(referenceToTable == null ? [] : (store.fieldsByTable[referenceToTable] ?? []));
   const memberOfValid = $derived(
     !memberOfEnabled || (memberOfValueList != null && store.valueLists.some((list) => list.id === memberOfValueList)),
@@ -69,6 +74,8 @@
       memberOfEnabled = field?.options?.validation?.memberOfValueList != null;
       rangeMin = field?.options?.validation?.range?.min ?? '';
       rangeMax = field?.options?.validation?.range?.max ?? '';
+      autoEnterSource = field?.options?.autoEnter?.kind ?? 'none';
+      autoEnterValue = field?.options?.autoEnter?.value ?? '';
       referenceEnabled = field?.options?.reference != null;
       referenceName = field?.options?.reference?.name ?? '';
       referenceToTable = nextReferenceToTable;
@@ -108,6 +115,9 @@
       if (rangeMax.trim()) validation.range.max = rangeMax.trim();
     }
     const options: FieldOptions = Object.keys(validation).length > 0 ? { validation } : {};
+    if (autoEnterSource === 'constant') {
+      options.autoEnter = { kind: 'constant', value: autoEnterValue };
+    }
     if (referenceEnabled && referenceToTable != null && referenceToField != null) {
       options.reference = {
         name: referenceName.trim(),
@@ -215,6 +225,23 @@
           <input class="sc-input" type={rangeInputType} bind:value={rangeMax} />
         </label>
       </div>
+    {/if}
+  </section>
+
+  <section class="fd-section fd-auto" aria-labelledby="fd-auto-enter">
+    <span id="fd-auto-enter" class="sc-micro fd-label">Auto-enter</span>
+    <label>
+      <span class="sc-hint">Source</span>
+      <select class="sc-select" bind:value={autoEnterSource}>
+        <option value="none">None</option>
+        <option value="constant">Constant value</option>
+      </select>
+    </label>
+    {#if autoEnterSource === 'constant'}
+      <label>
+        <span class="sc-hint">Value</span>
+        <input class="sc-input" type={autoEnterInputType} bind:value={autoEnterValue} />
+      </label>
     {/if}
   </section>
 
@@ -378,6 +405,14 @@
     display: flex;
     flex-direction: column;
     gap: 5px;
+  }
+  /* Auto-enter source select + value input stack like the reference fields. */
+  .fd-auto label {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-top: 8px;
   }
   .fd-ref {
     display: flex;

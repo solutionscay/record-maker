@@ -57,11 +57,16 @@ export interface ObjectView {
   value: string;
   /** Server-derived inline CSS for a shape's appearance; empty for non-shapes. */
   shapeStyle: string;
-  /** Portal (#169): the resolved terminal table's field names (the row header).
-   * Present only for a portal resolved against a base record in Browse; omitted
-   * (via serde skip) for every other object and for a portal on the design canvas
-   * — the renderer keys off it: present ⇒ render the related-row region, absent ⇒
-   * the unresolved route frame. */
+  /** Portal (#168/#169): whether the portal resolved its bound route against a live
+   * base record (Browse). The renderer keys off THIS, not the column count: true ⇒
+   * render the repeating-row region (even with zero authored columns/rows), absent/
+   * false ⇒ the unresolved route frame. Omitted (serde-skipped) for non-portals and
+   * for the design canvas, which never resolves a portal. */
+  portalResolved?: boolean;
+  /** Portal (#168/#169): the header row of a resolved portal — the display name of
+   * each AUTHORED column (a child field object bound route-relative to the terminal
+   * table), in visual column order. Omitted for non-portals, the design canvas, and
+   * a resolved portal with no authored columns yet. */
   portalColumns?: string[];
   /** Portal inline edit (#170): the terminal field id backing each column, parallel
    * to `portalColumns`. In an editable Browse view each cell renders as an

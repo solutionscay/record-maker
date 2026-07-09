@@ -50,6 +50,7 @@ fn field_obj(field_id: i64, value: &str, read_only: bool) -> ObjectView {
         value: value.to_string(),
         raw: value.to_string(),
         shape_style: String::new(),
+        portal_resolved: false,
         portal_columns: Vec::new(),
         portal_field_ids: Vec::new(),
         portal_rows: Vec::new(),
@@ -58,9 +59,10 @@ fn field_obj(field_id: i64, value: &str, read_only: bool) -> ObjectView {
     }
 }
 
-/// #169: a portal placed on a Form layout resolves its bound anchor route and
-/// renders one row per related record, with the terminal table's fields as
-/// columns and each row stamped with its terminal id. An empty set still renders
+/// #168/#169: a portal placed on a Form layout resolves its bound anchor route and
+/// renders one row per related record, with its AUTHORED child columns as the
+/// header and each row stamped with its terminal id. The column children render
+/// INSIDE the portal, not as standalone band objects. An empty set still renders
 /// its columns (a clean header over an empty body), while an unresolved binding
 /// renders neither (the frame placeholder).
 #[test]
@@ -148,6 +150,15 @@ fn portal_object_renders_related_rows_in_form_view() {
         )
         .unwrap()
         .unwrap();
+    // Author two columns (Total, then CustomerId) as the portal's child field
+    // objects, bound ROUTE-RELATIVE to the terminal (Invoices) table (#168/#169).
+    // Column order follows visual x, so Total (x=20) sorts before CustomerId (x=140).
+    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id))
+        .unwrap()
+        .unwrap();
+    sol.create_field_object(form.id, body.id, "customer.CustomerId", "CustomerId", 140, 20, 100, 24, Some(portal_id))
+        .unwrap()
+        .unwrap();
 
     let fields = sol.fields(customers).unwrap();
     let ids = sol.record_ids(&cust_tbl).unwrap();
@@ -159,13 +170,21 @@ fn portal_object_renders_related_rows_in_form_view() {
         .flat_map(|p| &p.objects)
         .find(|o| o.id == portal_id)
         .expect("portal object present");
-    // Columns are the terminal (Invoices) user fields, in field order.
+    // Columns are the AUTHORED child columns, in visual order.
+    assert!(portal.portal_resolved, "portal resolved against Ada");
     assert_eq!(portal.portal_columns, vec!["Total".to_string(), "CustomerId".to_string()]);
-    // One row per related invoice, each addressable by its terminal id.
+    // One row per related invoice, each addressable by its terminal id, carrying
+    // only the authored columns' values (Total first).
     assert_eq!(portal.portal_rows.len(), 2);
     let totals: Vec<&str> = portal.portal_rows.iter().map(|r| r.cells[0].as_str()).collect();
     assert!(totals.contains(&"42") && totals.contains(&"17"));
     assert!(portal.portal_rows.iter().all(|r| r.id > 0));
+    // The authored column children render inside the portal, never as standalone
+    // top-level band objects (they're filtered from the band in a resolved render).
+    assert!(
+        record.parts.iter().flat_map(|p| &p.objects).all(|o| o.parent_object_id.is_none()),
+        "portal column children don't paint as standalone band objects"
+    );
 }
 
 /// #168/#169 (Model B): placing a field INTO a portal via the create endpoint —
@@ -379,6 +398,11 @@ async fn portal_related_row_inline_edit_commits_child_record() {
         )
         .unwrap()
         .unwrap();
+    // Author a Total column (child field, route-relative) so the portal renders a
+    // Total cell per related row — the inline-edit input keys off it (#168/#170).
+    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id))
+        .unwrap()
+        .unwrap();
 
     let state = AppState::new(sol);
 
@@ -479,6 +503,11 @@ async fn portal_blank_row_creates_related_record_when_allowed() {
                 parent_object_id: None,
             },
         )
+        .unwrap()
+        .unwrap();
+
+    // Author a Total column so the create/blank row carries an `f<id>` input for it.
+    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id))
         .unwrap()
         .unwrap();
 
@@ -604,6 +633,12 @@ async fn portal_row_deletes_related_record_when_allowed() {
                 parent_object_id: None,
             },
         )
+        .unwrap()
+        .unwrap();
+
+    // Author a Total column so the portal renders a row (with a delete affordance)
+    // per related record (#168/#172).
+    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id))
         .unwrap()
         .unwrap();
 

@@ -382,27 +382,37 @@ pub(crate) struct ObjectView {
     #[serde(skip)]
     pub(crate) raw: String,
     pub(crate) shape_style: String,
-    /// Portal (#169): the terminal table's user-field names, the header row of a
-    /// resolved portal. Non-empty ONLY for a portal object resolved against a base
-    /// record in Browse; empty for every other object and for a portal on the
-    /// design canvas (no base record). The renderer keys off this: non-empty ⇒
-    /// render the related-row region (even with zero rows — an empty set renders a
-    /// clean header + empty body); empty ⇒ the unresolved-frame placeholder.
-    /// Skipped from JSON when empty so non-portal objects (and the design-model
-    /// portal frame) serialise byte-identically to before (#44 fixture stability).
+    /// Portal (#168/#169): whether this portal resolved its bound anchor route
+    /// against a live base record (Browse Form/List). The renderer keys off THIS,
+    /// not the column count: `true` ⇒ render the repeating-row region (its authored
+    /// columns as a header + one row per related record — a clean empty region when
+    /// it has no columns or no rows yet); `false` ⇒ the unresolved route-frame
+    /// placeholder (blank/unresolvable binding, or the design canvas, which passes
+    /// no base record). Skipped from JSON when `false` so non-portal objects and the
+    /// design-model portal frame serialise byte-identically to before (#44 fixture
+    /// stability).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) portal_resolved: bool,
+    /// Portal (#168/#169): the header row of a resolved portal — the display name
+    /// of each AUTHORED column (a child field object bound route-relative to the
+    /// terminal table), in visual column order. Empty for every other object, for a
+    /// portal on the design canvas, and for a resolved portal with no authored
+    /// columns yet. Skipped from JSON when empty so the flat design-model fixture
+    /// stays byte-identical (#44).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) portal_columns: Vec<String>,
-    /// Portal (#170): the terminal-table field id backing each column, parallel to
-    /// [`Self::portal_columns`]. A resolved portal in an editable view renders each
-    /// cell as an `f<field_id>` input off these ids so a per-row commit collects the
-    /// right terminal fields (the same `f<id>` contract as base-record edit). Empty
-    /// for every non-portal object and for an unresolved portal frame.
+    /// Portal (#170): the terminal-table field id each AUTHORED column binds to,
+    /// parallel to [`Self::portal_columns`]. A resolved portal in an editable view
+    /// renders each cell as an `f<field_id>` input off these ids so a per-row commit
+    /// collects the right terminal fields (the same `f<id>` contract as base-record
+    /// edit). Empty for every non-portal object and for an unresolved portal frame.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) portal_field_ids: Vec<i64>,
     /// Portal (#169): one entry per related record in the resolved set, after the
     /// display-only filter (#112) and the declared sort. Each carries the terminal
-    /// record id (stamped `data-related-id`) and its user-field values in column
-    /// order. Empty for a non-portal object, and for a portal whose set is empty.
+    /// record id (stamped `data-related-id`) and its value for each AUTHORED column,
+    /// in column order (parallel to [`Self::portal_columns`]). Empty for a non-portal
+    /// object, and for a portal whose set is empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) portal_rows: Vec<PortalRowView>,
     /// Portal create-new (#171): whether this resolved portal may mint a related
@@ -703,13 +713,18 @@ pub(crate) struct PortalCtx<'a> {
     pub(crate) base_id: i64,
 }
 
-/// The resolved render state of a portal object (#169/#170/#171): the terminal
-/// table's column names, the backing field ids (parallel to the columns, so an
-/// editable row emits `f<id>` inputs), the related rows after the #112 filter +
-/// declared sort, and the create-new gate. Default (all-empty / `can_create`
-/// false) is the unresolved frame.
+/// The resolved render state of a portal object (#168/#169/#170/#171): the AUTHORED
+/// column names (its child field objects), the backing terminal field ids (parallel
+/// to the columns, so an editable row emits `f<id>` inputs), the related rows after
+/// the #112 filter + declared sort (each row carrying only the authored columns'
+/// values), and the create-new gate. Default (`resolved` false / all-empty) is the
+/// unresolved frame.
 #[derive(Default)]
 struct PortalResolved {
+    /// The bound route resolved against a live base record — the render draws the
+    /// repeating-row region rather than the unresolved frame, even when `columns`
+    /// is empty (no authored columns yet). Default `false` is the frame.
+    resolved: bool,
     columns: Vec<String>,
     field_ids: Vec<i64>,
     rows: Vec<PortalRowView>,
@@ -722,16 +737,18 @@ struct PortalResolved {
 }
 
 /// Resolve a portal object's bound route against `ctx` into its [`PortalResolved`]
-/// (#169/#170/#171). `columns` are the terminal table's user-field names;
-/// `field_ids` are the backing field ids, parallel to the columns (so an editable
-/// row can emit `f<id>` inputs, #170); `rows` are the related records after the
-/// display-only filter (#112) and the declared sort, each carrying its inline-edit
-/// endpoint URLs; `can_create`/`create_url` gate the trailing blank create row
-/// (#171).
+/// (#168/#169/#170/#171). `columns` are the display names of the portal's AUTHORED
+/// child field columns (route-relative bindings resolved to terminal fields);
+/// `field_ids` are the backing terminal field ids, parallel to the columns (so an
+/// editable row can emit `f<id>` inputs, #170); `rows` are the related records after
+/// the display-only filter (#112) and the declared sort, each carrying only the
+/// authored columns' values + its inline-edit endpoint URLs; `can_create`/
+/// `create_url` gate the trailing blank create row (#171).
 ///
-/// A blank/unresolvable binding yields the default (all-empty) so the frame renders
-/// its unresolved-placeholder branch; a route that resolves to zero related records
-/// yields the columns + an empty body so the header renders over a clean empty body.
+/// A blank/unresolvable binding yields the default (`resolved` false) so the frame
+/// renders its unresolved-placeholder branch; a resolved route with zero authored
+/// columns or zero related records still sets `resolved`, so the header (empty or
+/// column names) renders over a clean empty body.
 fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
     let Some(binding) = o.binding.as_deref().filter(|b| !b.is_empty()) else {
         return PortalResolved::default();
@@ -748,8 +765,34 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         .read_related_records_filtered(&route, ctx.base_id, &filter)
         .unwrap_or_default();
     apply_portal_sort(o.props.as_deref(), &fields, &mut records);
-    let columns = fields.iter().map(|f| f.name.clone()).collect();
-    let field_ids = fields.iter().map(|f| f.id).collect();
+    // Columns are the portal's AUTHORED children (#168/#169, Model B): each child
+    // `field` object binds route-relative (`<route>.<field>`) to the terminal
+    // table. Resolve each column's binding's last segment to a terminal field —
+    // that gives the header name, the backing `field_id` (for `f<id>` edit inputs),
+    // and the cell INDEX to pull from every related record. A child that doesn't
+    // resolve to a terminal field (deleted/renamed) is skipped. The portal renders
+    // ONLY these columns — not the whole terminal table.
+    let children = ctx
+        .sol
+        .object_children(ctx.layout_id, o.id)
+        .unwrap_or_default();
+    let mut columns: Vec<String> = Vec::new();
+    let mut field_ids: Vec<i64> = Vec::new();
+    let mut col_idx: Vec<usize> = Vec::new();
+    for child in &children {
+        if !child.kind.is_field() {
+            continue;
+        }
+        let Some(binding) = child.binding.as_deref().filter(|b| !b.is_empty()) else {
+            continue;
+        };
+        let seg = binding.rsplit('.').next().unwrap_or(binding).to_lowercase();
+        if let Some(pos) = fields.iter().position(|f| f.name.to_lowercase() == seg) {
+            columns.push(fields[pos].name.clone());
+            field_ids.push(fields[pos].id);
+            col_idx.push(pos);
+        }
+    }
     // The anchoring relationship (the route's first hop) carries the referential
     // flags (#110) that gate both the create-new and the delete/unlink affordances.
     let anchor_rel = route
@@ -783,7 +826,12 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
                 String::new()
             },
             id: r.id,
-            cells: r.cells,
+            // Only the authored columns' values, in column order (parallel to
+            // `columns`/`field_ids`), not the whole terminal record.
+            cells: col_idx
+                .iter()
+                .map(|&i| r.cells.get(i).cloned().unwrap_or_default())
+                .collect(),
         })
         .collect();
     // Create-new gate (#171): the route must be create-determined (#11) AND the
@@ -799,6 +847,7 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         String::new()
     };
     PortalResolved {
+        resolved: true,
         columns,
         field_ids,
         rows,
@@ -891,6 +940,7 @@ fn prepared_object_view(
         _ => PortalResolved::default(),
     };
     let PortalResolved {
+        resolved: portal_resolved,
         columns: portal_columns,
         field_ids: portal_field_ids,
         rows: portal_rows,
@@ -937,6 +987,7 @@ fn prepared_object_view(
         value,
         raw: raw_value,
         shape_style: p.shape_style.clone(),
+        portal_resolved,
         portal_columns,
         portal_field_ids,
         portal_rows,
@@ -1066,6 +1117,12 @@ pub(crate) fn render_part_with_objects(
         part_style: part_style(part.props.as_deref()),
         objects: objects
             .iter()
+            // In a resolved (Browse) render, a portal's authored column children
+            // (#168/#169) are NOT top-level band objects — the portal renders them
+            // as its repeating-row template. Skip them here so they don't also paint
+            // standalone. On the design canvas (`portal` is `None`) they stay visible
+            // as ordinary objects the designer places — byte-identical to before.
+            .filter(|o| portal.is_none() || o.parent_object_id.is_none())
             .map(|o| prepared_object_view(&prepare_object(o.clone()), by_name, portal))
             .collect(),
     }
@@ -1125,6 +1182,10 @@ pub(crate) fn render_prepared_part(
         objects: prep
             .objects
             .iter()
+            // See [`render_part_with_objects`]: a portal's authored column children
+            // (#168/#169) render inside the portal in a resolved Browse render, not
+            // as standalone band objects; keep them on the design canvas (`None`).
+            .filter(|p| portal.is_none() || p.meta.parent_object_id.is_none())
             .map(|p| prepared_object_view(p, by_name, portal))
             .collect(),
     }

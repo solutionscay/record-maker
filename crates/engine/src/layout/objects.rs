@@ -39,6 +39,40 @@ impl Solution {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// A portal's child objects (its authored columns, #168/#169 Model B),
+    /// **scoped** to `layout_id`, in visual COLUMN order (`x, y, z, id`). Matches
+    /// `parent_object_id = parent_id`, so a portal enumerates the field/label
+    /// objects it owns to project its repeating row template in Browse. Empty for
+    /// a parent with no children (or an unknown/foreign id).
+    pub fn object_children(&self, layout_id: i64, parent_id: i64) -> Result<Vec<ObjectMeta>> {
+        let mut stmt = self.app.prepare(
+            "SELECT id, part_id, kind, x, y, w, h, z, read_only, binding, content, props, parent_object_id \
+             FROM meta_object \
+             WHERE parent_object_id=?1 \
+               AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?2) \
+             ORDER BY x, y, z, id",
+        )?;
+        let rows = stmt.query_map(params![parent_id, layout_id], |r| {
+            let kind_s: String = r.get(2)?;
+            Ok(ObjectMeta {
+                id: r.get(0)?,
+                part_id: r.get(1)?,
+                kind: ObjectKind::parse(&kind_s).unwrap_or(ObjectKind::Text),
+                x: r.get(3)?,
+                y: r.get(4)?,
+                w: r.get(5)?,
+                h: r.get(6)?,
+                z: r.get(7)?,
+                read_only: r.get::<_, i64>(8)? != 0,
+                binding: r.get(9)?,
+                content: r.get(10)?,
+                props: r.get(11)?,
+                parent_object_id: r.get(12)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Read one object by id, **scoped** to `layout_id` (the part must belong to
     /// the layout). Returns `None` for an unknown/foreign id. Used after a props
     /// edit to re-derive that object's shape style server-side (#49).

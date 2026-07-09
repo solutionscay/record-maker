@@ -15,7 +15,7 @@ impl Solution {
     /// stored `kind` falls back to `Text` (rendered, never editable).
     pub fn objects(&self, part_id: i64) -> Result<Vec<ObjectMeta>> {
         let mut stmt = self.app.prepare(
-            "SELECT id, part_id, kind, x, y, w, h, z, read_only, binding, content, props \
+            "SELECT id, part_id, kind, x, y, w, h, z, read_only, binding, content, props, parent_object_id \
              FROM meta_object WHERE part_id=?1 ORDER BY z, id",
         )?;
         let rows = stmt.query_map(params![part_id], |r| {
@@ -33,6 +33,7 @@ impl Solution {
                 binding: r.get(9)?,
                 content: r.get(10)?,
                 props: r.get(11)?,
+                parent_object_id: r.get(12)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -43,7 +44,7 @@ impl Solution {
     /// edit to re-derive that object's shape style server-side (#49).
     pub fn object_by_id(&self, layout_id: i64, object_id: i64) -> Result<Option<ObjectMeta>> {
         let mut stmt = self.app.prepare(
-            "SELECT id, part_id, kind, x, y, w, h, z, read_only, binding, content, props \
+            "SELECT id, part_id, kind, x, y, w, h, z, read_only, binding, content, props, parent_object_id \
              FROM meta_object \
              WHERE id=?1 AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?2)",
         )?;
@@ -62,6 +63,7 @@ impl Solution {
                 binding: r.get(9)?,
                 content: r.get(10)?,
                 props: r.get(11)?,
+                parent_object_id: r.get(12)?,
             })
         })?;
         match rows.next() {
@@ -175,8 +177,8 @@ impl Solution {
             return Ok(None);
         }
         self.app.execute(
-            "INSERT INTO meta_object(part_id, kind, x, y, w, h, binding, content, props) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO meta_object(part_id, kind, x, y, w, h, binding, content, props, parent_object_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 o.part_id,
                 o.kind.as_str(),
@@ -186,7 +188,8 @@ impl Solution {
                 o.h,
                 o.binding,
                 o.content,
-                o.props
+                o.props,
+                o.parent_object_id
             ],
         )?;
         Ok(Some(self.app.last_insert_rowid()))
@@ -198,6 +201,10 @@ impl Solution {
     /// row (clamped to the band origin). Atomic (both or neither). Layout-scoped
     /// like [`Solution::create_object`]; returns `(label_id, field_id)` or `None`
     /// if the part isn't in the layout.
+    ///
+    /// `parent` (#168/#169, Model B) is the owning portal when the pair is placed
+    /// as a portal COLUMN; both the label and the value become children of it, so
+    /// they cascade-delete and move with the portal. `None` for a top-level place.
     pub fn create_field_object(
         &mut self,
         layout_id: i64,
@@ -208,6 +215,7 @@ impl Solution {
         y: i64,
         w: i64,
         h: i64,
+        parent: Option<i64>,
     ) -> Result<Option<(i64, i64)>> {
         if !self.part_in_layout(part_id, layout_id)? {
             return Ok(None);
@@ -215,15 +223,15 @@ impl Solution {
         let label_x = (x - 80).max(0);
         let tx = self.app.transaction()?;
         tx.execute(
-            "INSERT INTO meta_object(part_id, kind, x, y, w, h, content) \
-             VALUES (?1, 'text', ?2, ?3, 72, ?4, ?5)",
-            params![part_id, label_x, y, h, label],
+            "INSERT INTO meta_object(part_id, kind, x, y, w, h, content, parent_object_id) \
+             VALUES (?1, 'text', ?2, ?3, 72, ?4, ?5, ?6)",
+            params![part_id, label_x, y, h, label, parent],
         )?;
         let label_id = tx.last_insert_rowid();
         tx.execute(
-            "INSERT INTO meta_object(part_id, kind, x, y, w, h, binding) \
-             VALUES (?1, 'field', ?2, ?3, ?4, ?5, ?6)",
-            params![part_id, x, y, w, h, binding],
+            "INSERT INTO meta_object(part_id, kind, x, y, w, h, binding, parent_object_id) \
+             VALUES (?1, 'field', ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![part_id, x, y, w, h, binding, parent],
         )?;
         let field_id = tx.last_insert_rowid();
         tx.commit()?;
@@ -246,6 +254,10 @@ impl Solution {
         objs: &[RestoreObject],
     ) -> Result<RestoreResult> {
         let tx = self.app.transaction()?;
+        // A restored column may reference a parent restored later in the SAME
+        // batch (#168/#169). Defer the self-FK check to COMMIT so batch order
+        // doesn't matter; the pragma resets itself at the end of this transaction.
+        tx.pragma_update(None, "defer_foreign_keys", true)?;
         for o in objs {
             let part_ok: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM meta_part WHERE id = ?1 AND layout_id = ?2)",
@@ -264,8 +276,8 @@ impl Solution {
                 return Ok(RestoreResult::IdInUse);
             }
             tx.execute(
-                "INSERT INTO meta_object(id, part_id, kind, x, y, w, h, z, read_only, binding, content, props) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO meta_object(id, part_id, kind, x, y, w, h, z, read_only, binding, content, props, parent_object_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     o.id,
                     o.part_id,
@@ -278,7 +290,8 @@ impl Solution {
                     o.read_only as i64,
                     o.binding,
                     o.content,
-                    o.props
+                    o.props,
+                    o.parent_object_id
                 ],
             )?;
         }
@@ -289,6 +302,10 @@ impl Solution {
     /// Delete an object from a layout (#48) — the undo of a create, and the Create
     /// zone's delete. **Layout-scoped**, so a foreign/unknown id is a no-op.
     /// Returns the number of rows removed (`0` ⇒ no such object in that layout).
+    ///
+    /// Deleting a portal CASCADES to its column children via the
+    /// `parent_object_id` self-FK (`ON DELETE CASCADE`, #168/#169); the returned
+    /// count is the direct row (`1`), not the cascaded children.
     pub fn delete_object(&self, layout_id: i64, object_id: i64) -> Result<usize> {
         let n = self.app.execute(
             "DELETE FROM meta_object \

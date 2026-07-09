@@ -66,6 +66,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0014_relationship_referential",
         include_str!("migrations/0014_relationship_referential.sql"),
     ),
+    (
+        "0015_object_parent",
+        include_str!("migrations/0015_object_parent.sql"),
+    ),
 ];
 
 /// Schema version this build targets (the number of migrations defined).

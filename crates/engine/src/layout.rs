@@ -296,6 +296,10 @@ pub struct ObjectMeta {
     /// (which is data-paths only). `None` for `field`/shape objects.
     pub content: Option<String>,
     pub props: Option<String>,
+    /// Owning container (#168/#169, Model B). `Some(portal_id)` when this object
+    /// is a column field owned by a portal object; `None` for a top-level object.
+    /// A self-FK with `ON DELETE CASCADE`, so a portal's columns vanish with it.
+    pub parent_object_id: Option<i64>,
 }
 
 /// A durable selection/move group over existing layout objects (#75). Groups are
@@ -324,6 +328,9 @@ pub struct NewObject {
     pub binding: Option<String>,
     pub content: Option<String>,
     pub props: Option<String>,
+    /// Owning portal (#168/#169, Model B) when the object is placed as a column
+    /// INSIDE a portal; `None` for a normal top-level create. See [`ObjectMeta`].
+    pub parent_object_id: Option<i64>,
 }
 
 /// An object restored to its ORIGINAL id (identity-preserving undo of a delete /
@@ -343,6 +350,9 @@ pub struct RestoreObject {
     pub binding: Option<String>,
     pub content: Option<String>,
     pub props: Option<String>,
+    /// Owning portal (#168/#169, Model B), preserved so a restored column keeps
+    /// its containment link on undo-of-delete / redo-of-create. See [`ObjectMeta`].
+    pub parent_object_id: Option<i64>,
 }
 
 /// Outcome of a [`Solution::restore_objects`] batch (#84). The batch either fully
@@ -637,7 +647,7 @@ pub(crate) fn clone_layout(
 #[cfg(test)]
 mod tests {
     use crate::PartMeta;
-    use crate::layout::{NewObject, ObjectKind, PartKind};
+    use crate::layout::{NewObject, ObjectKind, PartKind, RestoreObject, RestoreResult};
     use crate::{FieldKind, NewField, Solution};
 
     fn body_part(s: &Solution, layout_id: i64) -> PartMeta {
@@ -1207,6 +1217,7 @@ mod tests {
                     binding: None,
                     content: None,
                     props: Some("{\"fill\":\"#abc\"}".into()),
+                    parent_object_id: None,
                 },
             )
             .unwrap()
@@ -1232,6 +1243,7 @@ mod tests {
             binding: None,
             content: None,
             props: None,
+            parent_object_id: None,
         };
         assert!(s.create_object(lay.id, &other).unwrap().is_none());
         assert_eq!(
@@ -1267,6 +1279,7 @@ mod tests {
                 40,
                 200,
                 24,
+                None,
             )
             .unwrap()
             .expect("created");
@@ -1284,7 +1297,7 @@ mod tests {
 
         // Foreign part ⇒ no-op, nothing inserted.
         assert!(
-            s.create_field_object(lay.id, 999_999, "Customers.Name", "Name", 0, 0, 1, 1)
+            s.create_field_object(lay.id, 999_999, "Customers.Name", "Name", 0, 0, 1, 1, None)
                 .unwrap()
                 .is_none()
         );
@@ -1730,5 +1743,203 @@ mod tests {
         assert_eq!(s.move_part(list.id, body.id, true).unwrap(), 0);
         // An unknown/foreign part id is a no-op.
         assert_eq!(s.move_part(list.id, 999_999, true).unwrap(), 0);
+    }
+
+    /// #168/#169 (Model B): a portal OWNS its column field objects via the
+    /// `parent_object_id` self-FK. A column created under a portal reports that
+    /// portal as its parent; the portal itself stays top-level. `create_object`
+    /// and `create_field_object` both accept the owning parent, and it round-trips
+    /// through `objects()` and `object_by_id()`.
+    fn portal_fixture(s: &mut Solution) -> (i64, i64) {
+        s.create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
+        .unwrap();
+        let lay = s.layouts().unwrap()[0].clone();
+        let part = body_part(s, lay.id);
+        let portal = s
+            .create_object(
+                lay.id,
+                &NewObject {
+                    part_id: part.id,
+                    kind: ObjectKind::Portal,
+                    x: 0,
+                    y: 0,
+                    w: 300,
+                    h: 120,
+                    binding: Some("sensors".into()),
+                    content: None,
+                    props: None,
+                    parent_object_id: None,
+                },
+            )
+            .unwrap()
+            .expect("portal");
+        (lay.id, portal)
+    }
+
+    #[test]
+    fn portal_column_child_binds_to_its_parent_object() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let (lay_id, portal) = portal_fixture(&mut s);
+        let part = body_part(&s, lay_id);
+
+        // A column field owned by the portal, bound route-relative to the
+        // related table (the settled Model-B column shape).
+        let col = s
+            .create_object(
+                lay_id,
+                &NewObject {
+                    part_id: part.id,
+                    kind: ObjectKind::Field,
+                    x: 0,
+                    y: 0,
+                    w: 100,
+                    h: 24,
+                    binding: Some("sensors.reading".into()),
+                    content: None,
+                    props: None,
+                    parent_object_id: Some(portal),
+                },
+            )
+            .unwrap()
+            .expect("column");
+        // A field+label pair placed inside the portal via create_field_object:
+        // BOTH become children so they cascade and move with the portal.
+        let (label2, field2) = s
+            .create_field_object(
+                lay_id,
+                part.id,
+                "sensors.name",
+                "Name",
+                0,
+                30,
+                100,
+                24,
+                Some(portal),
+            )
+            .unwrap()
+            .expect("pair");
+
+        let objs = s.objects(part.id).unwrap();
+        let get = |id: i64| objs.iter().find(|o| o.id == id).unwrap();
+        assert!(get(portal).parent_object_id.is_none(), "portal is top-level");
+        assert_eq!(get(col).parent_object_id, Some(portal));
+        assert_eq!(get(label2).parent_object_id, Some(portal));
+        assert_eq!(get(field2).parent_object_id, Some(portal));
+        // object_by_id carries the link too.
+        assert_eq!(
+            s.object_by_id(lay_id, col).unwrap().unwrap().parent_object_id,
+            Some(portal)
+        );
+    }
+
+    #[test]
+    fn deleting_a_portal_cascades_its_column_children() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let (lay_id, portal) = portal_fixture(&mut s);
+        let part = body_part(&s, lay_id);
+        let col = s
+            .create_object(
+                lay_id,
+                &NewObject {
+                    part_id: part.id,
+                    kind: ObjectKind::Field,
+                    x: 0,
+                    y: 0,
+                    w: 100,
+                    h: 24,
+                    binding: Some("sensors.reading".into()),
+                    content: None,
+                    props: None,
+                    parent_object_id: Some(portal),
+                },
+            )
+            .unwrap()
+            .expect("column");
+
+        // Deleting the portal reports ONE direct row, but cascades the child.
+        assert_eq!(s.delete_object(lay_id, portal).unwrap(), 1);
+        let after = s.objects(part.id).unwrap();
+        assert!(!after.iter().any(|o| o.id == portal), "portal removed");
+        assert!(!after.iter().any(|o| o.id == col), "column cascaded");
+        assert!(
+            !after.iter().any(|o| o.parent_object_id == Some(portal)),
+            "no orphaned children linger"
+        );
+        // The default-form objects on the body are untouched by the cascade.
+        assert!(after.iter().all(|o| o.parent_object_id.is_none()));
+    }
+
+    #[test]
+    fn restore_preserves_and_defers_portal_parent_links() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let (lay_id, portal) = portal_fixture(&mut s);
+        let part = body_part(&s, lay_id);
+        let col = s
+            .create_object(
+                lay_id,
+                &NewObject {
+                    part_id: part.id,
+                    kind: ObjectKind::Field,
+                    x: 5,
+                    y: 6,
+                    w: 100,
+                    h: 24,
+                    binding: Some("sensors.reading".into()),
+                    content: None,
+                    props: None,
+                    parent_object_id: Some(portal),
+                },
+            )
+            .unwrap()
+            .expect("column");
+
+        let snap = |s: &Solution, id: i64| {
+            let o = s.object_by_id(lay_id, id).unwrap().unwrap();
+            RestoreObject {
+                id: o.id,
+                part_id: o.part_id,
+                kind: o.kind,
+                x: o.x,
+                y: o.y,
+                w: o.w,
+                h: o.h,
+                z: o.z,
+                read_only: o.read_only,
+                binding: o.binding,
+                content: o.content,
+                props: o.props,
+                parent_object_id: o.parent_object_id,
+            }
+        };
+        let portal_snap = snap(&s, portal);
+        let col_snap = snap(&s, col);
+
+        // Delete the portal (cascades the column), then restore BOTH — with the
+        // child listed BEFORE its parent to prove the self-FK check is deferred to
+        // COMMIT rather than enforced per-INSERT.
+        s.delete_object(lay_id, portal).unwrap();
+        assert!(s.object_by_id(lay_id, col).unwrap().is_none());
+        let res = s
+            .restore_objects(lay_id, &[col_snap, portal_snap])
+            .unwrap();
+        assert_eq!(res, RestoreResult::Restored);
+
+        let col_back = s.object_by_id(lay_id, col).unwrap().unwrap();
+        assert_eq!(col_back.parent_object_id, Some(portal), "link preserved");
+        assert_eq!((col_back.x, col_back.y), (5, 6));
+        assert!(
+            s.object_by_id(lay_id, portal)
+                .unwrap()
+                .unwrap()
+                .parent_object_id
+                .is_none(),
+            "restored portal stays top-level"
+        );
     }
 }

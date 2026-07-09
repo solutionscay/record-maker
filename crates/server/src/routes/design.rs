@@ -428,6 +428,9 @@ pub(crate) async fn create_design_object(
                     body.y,
                     body.w,
                     body.h,
+                    // Portal-column containment is threaded by a later step (#168/
+                    // #169); top-level placement passes no parent.
+                    None,
                 )
                 .unwrap()
             {
@@ -467,6 +470,8 @@ pub(crate) async fn create_design_object(
                 // field keeps its fill/border/format bag; the label-spawning branch
                 // above is normal placement and has no props to carry yet.
                 props: body.props.as_ref().map(|v| v.to_string()),
+                // Portal-column containment (#168/#169) is threaded by a later step.
+                parent_object_id: None,
             };
             match sol.create_object(layout_id, &new).unwrap() {
                 Some(id) => vec![id],
@@ -497,6 +502,7 @@ pub(crate) async fn create_design_object(
             binding,
             content,
             props,
+            parent_object_id: None,
         };
         match sol.create_object(layout_id, &new).unwrap() {
             Some(id) => vec![id],
@@ -532,6 +538,10 @@ pub(crate) struct RestoreObjectBody {
     binding: Option<String>,
     content: Option<String>,
     props: Option<String>,
+    /// Owning portal for a restored column (#168/#169). Absent on older clients
+    /// and for top-level objects, so it defaults to `None`.
+    #[serde(default)]
+    parent_object_id: Option<i64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -571,6 +581,7 @@ pub(crate) async fn restore_design_objects(
             binding: o.binding.clone(),
             content: o.content.clone(),
             props: o.props.clone(),
+            parent_object_id: o.parent_object_id,
         });
     }
     match sol.restore_objects(layout_id, &restores).unwrap() {

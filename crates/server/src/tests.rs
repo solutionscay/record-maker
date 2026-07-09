@@ -142,6 +142,7 @@ fn portal_object_renders_related_rows_in_form_view() {
                 binding: Some("customer".into()),
                 content: None,
                 props: None,
+                parent_object_id: None,
             },
         )
         .unwrap()
@@ -243,6 +244,7 @@ async fn portal_related_row_inline_edit_commits_child_record() {
                 binding: Some("customer".into()),
                 content: None,
                 props: None,
+                parent_object_id: None,
             },
         )
         .unwrap()
@@ -344,6 +346,7 @@ async fn portal_blank_row_creates_related_record_when_allowed() {
                 binding: Some("customer".into()),
                 content: None,
                 props: None,
+                parent_object_id: None,
             },
         )
         .unwrap()
@@ -468,6 +471,7 @@ async fn portal_row_deletes_related_record_when_allowed() {
                 binding: Some("customer".into()),
                 content: None,
                 props: None,
+                parent_object_id: None,
             },
         )
         .unwrap()
@@ -562,6 +566,7 @@ fn unresolved_field_binding_renders_binding_fallback() {
         binding: Some("Customers.Missing".into()),
         content: None,
         props: None,
+        parent_object_id: None,
     };
     let view = object_view(&object, &HashMap::new());
     assert_eq!(view.label, "Customers.Missing");

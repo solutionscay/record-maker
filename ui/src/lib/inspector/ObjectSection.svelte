@@ -4,8 +4,12 @@
   // server-resolved fieldId — never re-derived from the binding string
   // client-side (#134) — so the root passes it in alongside the object.
   import type { EditorDoc, ObjectDoc } from '../doc.svelte';
+  import type { ObjectView } from '../model';
   import FieldSelect from '../FieldSelect.svelte';
+  import { defaultBox } from '../create';
   import {
+    createObject,
+    deleteObjects,
     setObjectBinding as persistBinding,
     setObjectBindingPath as persistBindingPath,
     setObjectContent as persistContent,
@@ -96,6 +100,109 @@
     }
   }
 
+  // ── Portal columns (#168): author a portal's columns from ITS inspector, not the
+  // left rail. When a portal is selected, resolve its bound route (so the picker
+  // offers the related table's fields) and enumerate its authored column children
+  // (the field objects whose `parentObjectId` is this portal), so the user can
+  // append and remove columns here. FK-first: a column binds a declared route field.
+  let busyCols = $state(false);
+
+  /** The declared route the selected portal is bound to (its related-table fields
+   * feed the column picker), or null when the selection isn't a bound portal. */
+  let portalRoute = $derived(
+    selected.kind === 'portal'
+      ? (doc.relatedRoutes.find((r) => r.path === selected.binding) ?? null)
+      : null,
+  );
+
+  /** Every object owned by the selected portal (columns AND their spawned caption
+   * labels), pulled from the render model. Empty unless a portal is selected. */
+  let portalChildren = $derived.by<ObjectView[]>(() => {
+    if (selected.kind !== 'portal') return [];
+    const out: ObjectView[] = [];
+    for (const p of doc.renderModel.parts) {
+      for (const o of p.objects) {
+        if (o.parentObjectId === selected.id) out.push(o);
+      }
+    }
+    return out;
+  });
+
+  /** The portal's authored columns (field children) in visual order — the same
+   * `(x, y, z, id)` order the server enumerates them in for the header row. */
+  let portalColumns = $derived(
+    portalChildren
+      .filter((o) => o.kind === 'field')
+      .slice()
+      .sort((a, b) => a.x - b.x || a.y - b.y || a.z - b.z || a.id - b.id),
+  );
+
+  /** A column's display name: its binding's trailing segment mapped back to the
+   * related field by name, falling back to the resolved label or the raw segment. */
+  function columnName(o: ObjectView): string {
+    const seg = (o.binding.split('.').pop() ?? '').toLowerCase();
+    const f = portalRoute?.fields.find((c) => c.name.toLowerCase() === seg);
+    return f?.name ?? o.label ?? seg;
+  }
+
+  /** Append a column to the selected portal: POST the create-object route with
+   * `parentObjectId` = the portal id and the chosen related field, so the server
+   * builds the route-relative binding (`<route>.<field>`) and creates the column
+   * child (plus its caption label). New columns land ROW-RELATIVE — the next slot
+   * to the right of the last column — reusing the Field tool's default box. */
+  async function addColumn(fieldId: number): Promise<void> {
+    if (selected.kind !== 'portal' || busyCols) return;
+    const size = defaultBox('field');
+    const last = portalColumns.at(-1);
+    const x = last ? last.x + last.w : selected.x;
+    const y = last ? last.y : selected.y;
+    busyCols = true;
+    llog('persist', 'inspector: add portal column', { portal: selected.id, fieldId });
+    try {
+      const views = await createObject(layoutId, {
+        partId: selected.partId,
+        kind: 'field',
+        x,
+        y,
+        w: size.w,
+        h: size.h,
+        fieldId,
+        createLabel: true,
+        parentObjectId: selected.id,
+        rec: doc.rec,
+      });
+      for (const v of views) doc.addObject(v, selected.partId);
+      doc.mark();
+    } catch (e) {
+      reportPersistError(doc, 'add portal column', e);
+    } finally {
+      busyCols = false;
+    }
+  }
+
+  /** Remove a column from the selected portal — deleting the field child AND the
+   * caption label the server spawned beside it (`create_field_object` places the
+   * label at `x = col.x - 80`, same `y`), as one undoable step. */
+  async function removeColumn(col: ObjectView): Promise<void> {
+    if (busyCols) return;
+    const labelX = Math.max(0, col.x - 80);
+    const label = portalChildren.find(
+      (o) => o.kind === 'text' && o.y === col.y && o.x === labelX,
+    );
+    const ids = label ? [col.id, label.id] : [col.id];
+    busyCols = true;
+    llog('persist', 'inspector: remove portal column', { portal: selected.id, ids });
+    try {
+      await deleteObjects(layoutId, ids);
+      for (const id of ids) doc.removeObject(id);
+      doc.mark();
+    } catch (e) {
+      reportPersistError(doc, 'remove portal column', e);
+    } finally {
+      busyCols = false;
+    }
+  }
+
   async function setSelectedReadOnly(readOnly: boolean): Promise<void> {
     llog('persist', 'inspector: set read-only', { id: selected.id, readOnly });
     doc.setProp(selected.id, 'readOnly', readOnly);
@@ -166,3 +273,39 @@
     />
   {/if}
 </section>
+
+{#if selected.kind === 'portal'}
+  <section class="insp-sec">
+    <span class="side-label">Columns</span>
+    {#if !portalRoute}
+      <span class="le-hint">Bind a related list route above to add columns.</span>
+    {:else}
+      <FieldSelect
+        fields={portalRoute.fields}
+        value={null}
+        placeholder="Add column…"
+        title="Add a column from {portalRoute.tableName}"
+        onselect={(id) => addColumn(id)}
+      />
+      {#if portalColumns.length === 0}
+        <span class="le-hint">No columns yet — pick a field above to add one.</span>
+      {:else}
+        <ul class="col-list">
+          {#each portalColumns as col (col.id)}
+            <li class="col-row">
+              <span class="col-name">{columnName(col)}</span>
+              <button
+                type="button"
+                class="col-del"
+                title="Remove column"
+                aria-label="Remove column"
+                disabled={busyCols}
+                onclick={() => removeColumn(col)}>×</button
+              >
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    {/if}
+  </section>
+{/if}

@@ -375,13 +375,10 @@ export class PlacementController {
   async #createFieldObjectsAt(target: FieldPlacementTarget, fieldIds: number[]): Promise<ObjectView[]> {
     const { partId, partHeight, box } = target;
     const rowStep = Math.max(32, box.h + GRID);
-    // SELECT-TO-SCOPE (#168/#169): with a portal in scope, each placed field is a
-    // CHILD COLUMN of that portal — the server links it via the self-FK and binds
-    // it ROUTE-RELATIVE to the related table (the picked `fieldId` is a related
-    // field). The server's parent-aware branch lives on the label-spawning path, so
-    // a column always spawns its caption (createLabel is forced on here; the rail
-    // hides the "Create label" toggle while scoped).
-    const parentObjectId = this.#ctx.doc.scopedPortal?.id ?? null;
+    // The Field tool always places PRIMARY/base-table fields as top-level objects.
+    // Portal columns are authored from the portal inspector's Columns picker (#168),
+    // which POSTs the create route with `parentObjectId` directly — the canvas
+    // placement pipeline never creates portal-column children.
     const batches = await Promise.all(
       fieldIds.map((fieldId, i) => {
         const y = Math.min(partHeight - 1, box.y + i * rowStep);
@@ -393,8 +390,7 @@ export class PlacementController {
           w: box.w,
           h: Math.min(box.h, Math.max(1, partHeight - y)),
           fieldId,
-          createLabel: parentObjectId !== null ? true : this.#ctx.doc.toolCreateLabel,
-          parentObjectId,
+          createLabel: this.#ctx.doc.toolCreateLabel,
           rec: this.#ctx.doc.rec,
         });
       }),

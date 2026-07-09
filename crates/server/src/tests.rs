@@ -52,6 +52,7 @@ fn field_obj(field_id: i64, value: &str, read_only: bool) -> ObjectView {
         shape_style: String::new(),
         portal_resolved: false,
         portal_columns: Vec::new(),
+        portal_row_height: 0,
         portal_field_ids: Vec::new(),
         portal_rows: Vec::new(),
         portal_can_create: false,

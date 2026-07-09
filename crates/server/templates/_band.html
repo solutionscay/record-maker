@@ -50,7 +50,7 @@
        right terminal fields. The Svelte `Band` (display-only canvas) mirrors the
        read-only row branch; the editable input subtree legitimately diverges, just
        as an ordinary field's does (the #44 parity contract). #}
-    <div class="fm-portal" data-route="{{ o.binding }}">
+    <div class="fm-portal"{% if o.portal_row_height > 0 %} style="--fm-portal-row-h: {{ o.portal_row_height }}px"{% endif %} data-route="{{ o.binding }}">
       {% if !o.portal_resolved %}
       <span class="fm-portal-tag">{{ o.binding }}</span>
       {% else %}

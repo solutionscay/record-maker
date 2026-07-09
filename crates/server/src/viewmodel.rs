@@ -405,6 +405,16 @@ pub(crate) struct ObjectView {
     /// stays byte-identical (#44).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) portal_columns: Vec<String>,
+    /// Portal (#168): the repeating-row template height in px — the tallest authored
+    /// column field object's `h`, i.e. the row slot the designer sized by dragging
+    /// the column height. The renderer sizes both the header and every value row to
+    /// this, so the portal box (a fixed-height viewport) shows `floor(body height /
+    /// row height)` rows and scrolls the rest — the visible-row count is geometry-
+    /// driven (box height + row height), never a numeric setting. `0` for a non-portal
+    /// object, an unresolved portal frame, and a resolved portal with no columns yet;
+    /// skipped from JSON then so those stay byte-identical (#44).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub(crate) portal_row_height: i64,
     /// Portal (#170): the terminal-table field id each AUTHORED column binds to,
     /// parallel to [`Self::portal_columns`]. A resolved portal in an editable view
     /// renders each cell as an `f<field_id>` input off these ids so a per-row commit
@@ -434,6 +444,13 @@ pub(crate) struct ObjectView {
     /// every other object and for a portal that cannot create.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) portal_create_url: String,
+}
+
+/// Serde skip predicate for an `i64` field that defaults to `0` (e.g. a portal's
+/// row-template height on non-portal objects) — keeps those out of the JSON so the
+/// flat design-model fixture stays byte-identical (#44).
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 /// One related record inside a rendered portal (#169): its terminal-table row id
@@ -745,6 +762,11 @@ struct PortalResolved {
     resolved: bool,
     columns: Vec<String>,
     field_ids: Vec<i64>,
+    /// #168: the repeating-row template height — the tallest authored column field
+    /// object's `h`. Sizes the header + each value row so the fixed-height portal
+    /// box shows a geometry-driven number of rows and scrolls the rest. `0` when the
+    /// portal has no authored columns yet (nothing to size a row from).
+    row_height: i64,
     rows: Vec<PortalRowView>,
     /// #171: the route is create-determined AND the anchor relationship's
     /// `allow_create` is on — the trailing blank create row may render.
@@ -797,6 +819,10 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
     let mut columns: Vec<String> = Vec::new();
     let mut field_ids: Vec<i64> = Vec::new();
     let mut col_idx: Vec<usize> = Vec::new();
+    // The row-template height is the tallest authored column's `h` — the row slot
+    // the designer sized. It drives both the header and each value row so the
+    // fixed-height portal box shows `floor(body / row)` rows and scrolls the rest.
+    let mut row_height: i64 = 0;
     for child in &children {
         if !child.kind.is_field() {
             continue;
@@ -809,6 +835,7 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
             columns.push(fields[pos].name.clone());
             field_ids.push(fields[pos].id);
             col_idx.push(pos);
+            row_height = row_height.max(child.h);
         }
     }
     // The anchoring relationship (the route's first hop) carries the referential
@@ -870,6 +897,7 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         resolved: true,
         columns,
         field_ids,
+        row_height,
         rows,
         can_create,
         create_url,
@@ -963,6 +991,7 @@ fn prepared_object_view(
         resolved: portal_resolved,
         columns: portal_columns,
         field_ids: portal_field_ids,
+        row_height: portal_row_height,
         rows: portal_rows,
         can_create: portal_can_create,
         create_url: portal_create_url,
@@ -1009,6 +1038,7 @@ fn prepared_object_view(
         shape_style: p.shape_style.clone(),
         portal_resolved,
         portal_columns,
+        portal_row_height,
         portal_field_ids,
         portal_rows,
         portal_can_create,

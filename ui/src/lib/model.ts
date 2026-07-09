@@ -68,6 +68,13 @@ export interface ObjectView {
    * table), in visual column order. Omitted for non-portals, the design canvas, and
    * a resolved portal with no authored columns yet. */
   portalColumns?: string[];
+  /** Portal (#168): the repeating-row template height in px — the tallest authored
+   * column field object's `h`. The header and every value row size to it, so the
+   * fixed-height portal box (a clipping scroll viewport) shows `floor(body height /
+   * row height)` rows and scrolls the rest; the visible-row count is geometry-driven
+   * (box height + row height), never a numeric setting. Omitted for non-portals, the
+   * design canvas, and a resolved portal with no authored columns yet. */
+  portalRowHeight?: number;
   /** Portal inline edit (#170): the terminal field id backing each column, parallel
    * to `portalColumns`. In an editable Browse view each cell renders as an
    * `f<fieldId>` input off these ids so a per-row commit collects the right terminal

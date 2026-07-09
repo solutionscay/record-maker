@@ -45,7 +45,11 @@
              child columns + one row per related record, each stamped with its
              terminal id (#170/#172). `portalResolved` (not the column count) picks
              the branch, so a resolved portal with zero columns still renders cleanly. -->
-        <div class="fm-portal" data-route={o.binding}>
+        <div
+          class="fm-portal"
+          style={(o.portalRowHeight ?? 0) > 0 ? `--fm-portal-row-h: ${o.portalRowHeight}px` : null}
+          data-route={o.binding}
+        >
           {#if !o.portalResolved}
             <span class="fm-portal-tag">{o.binding}</span>
           {:else}

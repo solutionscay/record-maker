@@ -231,10 +231,17 @@ impl Solution {
 
     /// Place a value `field` object together with its separate caption `text`
     /// label (#60) — the same pairing `generate_default_form` emits, but at an
-    /// arbitrary drop point. The label sits to the left of the value on the same
-    /// row (clamped to the band origin). Atomic (both or neither). Layout-scoped
-    /// like [`Solution::create_object`]; returns `(label_id, field_id)` or `None`
-    /// if the part isn't in the layout.
+    /// arbitrary drop point. Atomic (both or neither). Layout-scoped like
+    /// [`Solution::create_object`]; returns `(label_id, field_id)` or `None` if the
+    /// part isn't in the layout.
+    ///
+    /// Label placement depends on containment:
+    /// - a top-level field's caption sits to the LEFT of the value on the same row
+    ///   (clamped to the band origin) — the standard field/label pairing;
+    /// - a portal COLUMN's caption (#169) is a single column HEADER: it sits
+    ///   directly ABOVE the column value, spanning the column width, so a portal's
+    ///   authored labels read as one top header row over the repeating value rows
+    ///   rather than a per-row left caption.
     ///
     /// `parent` (#168/#169, Model B) is the owning portal when the pair is placed
     /// as a portal COLUMN; both the label and the value become children of it, so
@@ -254,12 +261,17 @@ impl Solution {
         if !self.part_in_layout(part_id, layout_id)? {
             return Ok(None);
         }
-        let label_x = (x - 80).max(0);
+        // A portal column's label is a top header (above the value, column width);
+        // a top-level field's label is a left caption (to the left, fixed 72 wide).
+        let (label_x, label_y, label_w) = match parent {
+            Some(_) => (x, (y - h).max(0), w),
+            None => ((x - 80).max(0), y, 72),
+        };
         let tx = self.app.transaction()?;
         tx.execute(
             "INSERT INTO meta_object(part_id, kind, x, y, w, h, content, parent_object_id) \
-             VALUES (?1, 'text', ?2, ?3, 72, ?4, ?5, ?6)",
-            params![part_id, label_x, y, h, label, parent],
+             VALUES (?1, 'text', ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![part_id, label_x, label_y, label_w, h, label, parent],
         )?;
         let label_id = tx.last_insert_rowid();
         tx.execute(

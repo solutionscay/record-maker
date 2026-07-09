@@ -181,13 +181,15 @@
   }
 
   /** Remove a column from the selected portal — deleting the field child AND the
-   * caption label the server spawned beside it (`create_field_object` places the
-   * label at `x = col.x - 80`, same `y`), as one undoable step. */
+   * header label the server spawned for it, as one undoable step. A portal column's
+   * label is a top header: `create_field_object` places it directly ABOVE the value
+   * (`x = col.x`, `y = max(0, col.y - col.h)`), not the left caption a top-level
+   * field gets — so pair on that geometry. */
   async function removeColumn(col: ObjectView): Promise<void> {
     if (busyCols) return;
-    const labelX = Math.max(0, col.x - 80);
+    const labelY = Math.max(0, col.y - col.h);
     const label = portalChildren.find(
-      (o) => o.kind === 'text' && o.y === col.y && o.x === labelX,
+      (o) => o.kind === 'text' && o.y === labelY && o.x === col.x,
     );
     const ids = label ? [col.id, label.id] : [col.id];
     busyCols = true;

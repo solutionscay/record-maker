@@ -297,6 +297,10 @@ pub(crate) struct FormTemplate {
 /// One record laid out per the layout's parts/objects, with live values (#25).
 pub(crate) struct FormRecord {
     pub(crate) id: i64,
+    /// This record is a never-committed DRAFT (#173): the template stamps
+    /// `data-draft` on its `.rec-edit` so the client runs the draft edit loop
+    /// (lenient per-field saves + a response-read record-exit commit).
+    pub(crate) draft: bool,
     pub(crate) parts: Vec<PartView>,
 }
 
@@ -460,6 +464,11 @@ pub(crate) struct PortalRowView {
     /// JSON) otherwise, so a row that may not be deleted renders no button.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) delete_url: String,
+    /// This terminal row is a never-committed DRAFT (#173) — the portal-row
+    /// parallel of [`FormRecord::draft`]. Only ever set in the editable Browse
+    /// render; skipped from the design-model JSON (the canvas is never editable).
+    #[serde(skip)]
+    pub(crate) draft: bool,
 }
 
 /// A bindable field on the layout's primary table — the Field tool's dropdown
@@ -528,6 +537,9 @@ pub(crate) struct ListTemplate {
 pub(crate) struct ListRow {
     id: i64,
     current: bool,
+    /// This row's record is a never-committed DRAFT (#173) — computed per row,
+    /// since drafts are id-keyed and several may coexist (a base + a portal one).
+    draft: bool,
     parts: Vec<PartView>,
 }
 
@@ -543,6 +555,8 @@ pub(crate) struct TableColumn {
 
 pub(crate) struct RecordView {
     pub(crate) id: i64,
+    /// This row's record is a never-committed DRAFT (#173); per row (id-keyed).
+    pub(crate) draft: bool,
     pub(crate) cells: Vec<CellView>,
 }
 
@@ -711,6 +725,10 @@ pub(crate) struct PortalCtx<'a> {
     pub(crate) layout_id: i64,
     pub(crate) base_table: i64,
     pub(crate) base_id: i64,
+    /// Snapshot of the in-process DRAFT set (#173), keyed `(table_id, record_id)`.
+    /// A portal row whose terminal `(terminal_table, id)` is in here is marked a
+    /// draft so its `.rec-edit` runs the same draft edit loop as a base record.
+    pub(crate) drafts: &'a HashSet<(i64, i64)>,
 }
 
 /// The resolved render state of a portal object (#168/#169/#170/#171): the AUTHORED
@@ -826,6 +844,8 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
                 String::new()
             },
             id: r.id,
+            // Terminal-row draft-ness (#173), keyed on the terminal table.
+            draft: ctx.drafts.contains(&(route.terminal_table, r.id)),
             // Only the authored columns' values, in column order (parallel to
             // `columns`/`field_ids`), not the whole terminal record.
             cells: col_idx
@@ -1245,6 +1265,7 @@ pub(crate) fn build_form_record(
     fields: &[FieldMeta],
     ids: &[i64],
     rec: i64,
+    drafts: &HashSet<(i64, i64)>,
 ) -> Option<FormRecord> {
     if rec <= 0 {
         return None;
@@ -1258,6 +1279,7 @@ pub(crate) fn build_form_record(
         layout_id,
         base_table: table.id,
         base_id: id,
+        drafts,
     };
     let parts = sol
         .parts(layout_id)
@@ -1265,7 +1287,11 @@ pub(crate) fn build_form_record(
         .iter()
         .map(|p| render_part(sol, p, &by_name, Some(&portal)))
         .collect();
-    Some(FormRecord { id, parts })
+    Some(FormRecord {
+        id,
+        draft: drafts.contains(&(table.id, id)),
+        parts,
+    })
 }
 
 /// The header and footer bands of a layout, rendered once with no record bound,
@@ -1302,6 +1328,7 @@ pub(crate) fn build_list(
     table: &TableMeta,
     fields: &[FieldMeta],
     current_rec: i64,
+    drafts: &HashSet<(i64, i64)>,
 ) -> (Vec<PartView>, Vec<ListRow>, Vec<PartView>) {
     let parts = layout_parts_with_objects(sol, layout_id);
     let (header, footer) = build_bands(&parts);
@@ -1321,6 +1348,7 @@ pub(crate) fn build_list(
             layout_id,
             base_table: table.id,
             base_id,
+            drafts,
         };
         let parts = body_parts
             .iter()
@@ -1329,6 +1357,7 @@ pub(crate) fn build_list(
         rows.push(ListRow {
             id: base_id,
             current: (i as i64) + 1 == current_rec,
+            draft: drafts.contains(&(table.id, base_id)),
             parts,
         });
     }

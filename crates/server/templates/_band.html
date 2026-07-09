@@ -66,7 +66,7 @@
          opening/committing the row edit, confirms, then POSTs and reloads. No
          Svelte mirror: the design canvas is never editable, so this editable-only
          affordance lives in askama alone (the #44 parity contract). #}
-      <div class="fm-portal-row rec-edit" data-related-id="{{ r.id }}" data-related="1" data-open="{{ r.open_url }}" data-action="{{ r.action_url }}" data-revert="{{ r.revert_url }}">{% for c in r.cells %}<input class="fm-portal-cell fm-finput" name="f{{ o.portal_field_ids[loop.index0] }}" value="{{ c }}" autocomplete="off">{% endfor %}{% if !r.delete_url.is_empty() %}<button type="button" class="fm-portal-del" data-delete="{{ r.delete_url }}" title="Delete this related record" aria-label="Delete related record">&times;</button>{% endif %}</div>
+      <div class="fm-portal-row rec-edit" data-related-id="{{ r.id }}" data-related="1"{% if r.draft %} data-draft="1"{% endif %} data-open="{{ r.open_url }}" data-action="{{ r.action_url }}" data-revert="{{ r.revert_url }}">{% for c in r.cells %}<input class="fm-portal-cell fm-finput" name="f{{ o.portal_field_ids[loop.index0] }}" value="{{ c }}" autocomplete="off">{% endfor %}{% if !r.delete_url.is_empty() %}<button type="button" class="fm-portal-del" data-delete="{{ r.delete_url }}" title="Delete this related record" aria-label="Delete related record">&times;</button>{% endif %}</div>
       {% else %}
       <div class="fm-portal-row" data-related-id="{{ r.id }}">{% for c in r.cells %}<span class="fm-portal-cell">{{ c }}</span>{% endfor %}</div>
       {% endif %}

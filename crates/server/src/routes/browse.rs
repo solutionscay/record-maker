@@ -66,10 +66,16 @@ pub(crate) async fn browse(
     chrome.nav = Some(flipbook(layout_id, view, rec, current_id, total));
     chrome.editing = current_id.is_some_and(|cid| st.lock_held((table.id, cid)));
 
+    // Snapshot the in-process DRAFT set for this request (#173): base rows key on
+    // `table.id`, portal rows on their terminal table, so the renderers get the
+    // whole set and match per record. A record in here renders `data-draft` on its
+    // `.rec-edit` so the client runs the lenient draft edit loop + gated commit.
+    let drafts = st.drafts.lock().unwrap().clone();
+
     match view {
         "form" => {
             let fields = sol.fields(table.id).unwrap();
-            let record = build_form_record(&sol, layout_id, &table, &fields, &ids, rec);
+            let record = build_form_record(&sol, layout_id, &table, &fields, &ids, rec, &drafts);
             Html(
                 FormTemplate {
                     chrome,
@@ -83,7 +89,7 @@ pub(crate) async fn browse(
         }
         "list" => {
             let fields = sol.fields(table.id).unwrap();
-            let (header, rows, footer) = build_list(&sol, layout_id, &table, &fields, rec);
+            let (header, rows, footer) = build_list(&sol, layout_id, &table, &fields, rec, &drafts);
             Html(
                 ListTemplate {
                     chrome,
@@ -121,6 +127,7 @@ pub(crate) async fn browse(
                     .into_iter()
                     .map(|r| RecordView {
                         id: r.id,
+                        draft: drafts.contains(&(table.id, r.id)),
                         cells: columns
                             .iter()
                             .zip(r.cells)

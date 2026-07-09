@@ -672,10 +672,42 @@
         if (i.dataset.dirty !== '1' && i.dataset.fmt != null) i.value = i.dataset.fmt;
       });
     });
+    // The `f<id>` inputs owned by THIS record scope — not those of a nested child
+    // `.rec-edit` (a portal row, #170) and not the trailing create-new row. Used
+    // for a draft's per-field saves so a portal cell's blur never fires the base
+    // record's draft save. (recordBody stays as-is: extra terminal params are
+    // ignored server-side, matching today's commit.)
+    function ownInputs(el) {
+      return Array.prototype.filter.call(el.querySelectorAll('input[name]'), function (i) {
+        return i.closest('.rec-edit') === el && !i.closest('.fm-portal-add');
+      });
+    }
     document.querySelectorAll('.rec-edit').forEach(function (el) {
       var open = false;
+      // A never-committed DRAFT (#173, `data-draft`): required + uniqueness were
+      // deferred at mint, so per-field saves stay lenient and the record-EXIT
+      // commit is the BLOCKING promotion gate whose response we must read.
+      var draft = el.dataset.draft != null;
       function openRec() { if (open) return; open = true; beacon(el.dataset.open); }
-      function commit() { if (!open) return; open = false; beacon(el.dataset.action, recordBody(el)); }
+      function commit() {
+        if (!open) return;
+        open = false;
+        if (!draft) { beacon(el.dataset.action, recordBody(el)); return; }
+        // Draft record-EXIT: the full gate fires here. `keepalive` survives the
+        // navigation that often triggers the exit (like sendBeacon) but lets us
+        // read the result. On success the draft is promoted server-side and we
+        // proceed; on rejection the record stays a draft + open, so we surface
+        // the reason and keep the scope open for another edit/exit.
+        fetch(el.dataset.action, {
+          method: 'POST', keepalive: true,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: recordBody(el).toString()
+        }).then(function (res) {
+          if (res.ok) { draft = false; return; }
+          open = true; // still a draft server-side — keep this scope open
+          return res.text().then(function (t) { window.alert(t || 'Could not save record'); });
+        }).catch(function () {});
+      }
       function revert() { if (!open) return; open = false; beacon(el.dataset.revert); location.reload(); }
       el.addEventListener('focusin', openRec);
       el.addEventListener('focusout', function (e) { if (!el.contains(e.relatedTarget)) commit(); });
@@ -683,6 +715,17 @@
         if (e.key === 'Enter') { e.preventDefault(); commit(); if (document.activeElement) document.activeElement.blur(); }
         else if (e.key === 'Escape') { e.preventDefault(); revert(); }
       });
+      // While this record is a draft, a field's focus-out persists partial
+      // progress under the lenient DRAFT gate (no required/unique) so tabbing
+      // between fields is free and nothing is lost if the eventual record-exit
+      // races a hard navigation. Field-to-field within the record does NOT run
+      // the full gate — only the record-exit commit above does. Existing
+      // (non-draft) records get NO such listener (today's behavior unchanged).
+      if (draft) {
+        ownInputs(el).forEach(function (i) {
+          i.addEventListener('blur', function () { beacon(el.dataset.action + '/draft', recordBody(el)); });
+        });
+      }
       // A portal row (#170) is a `.rec-edit` scope nested inside the base record's
       // own `.rec-edit`. Stop its focus events from bubbling so editing a related
       // row opens/commits ONLY that child record, never the enclosing base record.
@@ -691,6 +734,17 @@
         el.addEventListener('focusout', function (e) { e.stopPropagation(); });
       }
     });
+    // A freshly-minted draft (New / portal create-new both reload the page onto
+    // the new record, #173) lands here as a `data-draft` record; focus its first
+    // editable field so the user can start typing immediately — the "create the
+    // draft and focus it" half of New. Prefer the current row when several drafts
+    // coexist. Focusing opens+locks the record via the focusin handler above.
+    (function () {
+      var d = document.querySelector('.rec-edit.current[data-draft]') || document.querySelector('.rec-edit[data-draft]');
+      if (!d) return;
+      var first = ownInputs(d).find(function (i) { return !i.readOnly && !i.disabled; });
+      if (first) first.focus();
+    })();
     // Portal create-new (#171): the trailing blank `.fm-portal-add` row mints a
     // related record. Unlike an edit row it takes no lock (insert is atomic) and
     // commits via fetch (not sendBeacon) so the page can reload to surface the new

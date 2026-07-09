@@ -16,7 +16,7 @@
         <tr class="rec-edit" data-action="/browse/{{ layout_id }}/{{ r.id }}"
             data-open="/browse/{{ layout_id }}/{{ r.id }}/open"
             data-revert="/browse/{{ layout_id }}/{{ r.id }}/revert"
-            data-view="table" data-rec="{{ loop.index }}">
+            {% if r.draft %}data-draft="1" {% endif %}data-view="table" data-rec="{{ loop.index }}">
           {% for c in r.cells %}
           <td><input class="cell-input" name="f{{ c.field_id }}" value="{{ c.display }}"{% if c.display != c.value %} data-raw="{{ c.value }}" data-fmt="{{ c.display }}"{% endif %}{% if c.style != "" %} style="{{ c.style }}"{% endif %} autocomplete="off"></td>
           {% endfor %}

@@ -2,7 +2,7 @@
 //! #44 renderer-parity goldens. Kept as the crate-root `tests` module (see
 //! `lib.rs`) so test paths stay `tests::…` across the module split.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use askama::Template;
 use axum::http::StatusCode;
@@ -163,7 +163,8 @@ fn portal_object_renders_related_rows_in_form_view() {
     let fields = sol.fields(customers).unwrap();
     let ids = sol.record_ids(&cust_tbl).unwrap();
     let ada_pos = ids.iter().position(|&i| i == ada).unwrap() as i64 + 1;
-    let record = build_form_record(&sol, form.id, &cust_tbl, &fields, &ids, ada_pos).unwrap();
+    let record =
+        build_form_record(&sol, form.id, &cust_tbl, &fields, &ids, ada_pos, &HashSet::new()).unwrap();
     let portal = record
         .parts
         .iter()
@@ -758,6 +759,7 @@ fn read_only_object_renders_value_editable_object_renders_input() {
         table: "T".into(),
         record: Some(FormRecord {
             id: 1,
+            draft: false,
             parts: vec![part],
         }),
     };
@@ -790,6 +792,7 @@ fn object_z_order_renders_as_css_z_index() {
         table: "T".into(),
         record: Some(FormRecord {
             id: 1,
+            draft: false,
             parts: vec![PartView {
                 id: 1,
                 kind: "body",

@@ -11,7 +11,7 @@ use rusqlite::types::{Value, ValueRef};
 use rusqlite::{params, params_from_iter};
 
 use crate::model::{FieldMeta, TableMeta};
-use crate::options::{AutoEnter, FieldOptions};
+use crate::options::{AutoEnter, FieldOptions, ValidationMode};
 use crate::Solution;
 
 /// A row, with `cells` aligned to the field order passed to [`Solution::list_records`].
@@ -93,6 +93,28 @@ impl Solution {
     /// member-of-value-list — see [`crate::options`]) are enforced first; a
     /// rejected write fails with a downcastable [`crate::ValidationError`].
     pub fn insert_record(&self, table: &TableMeta, values: &[(&FieldMeta, String)]) -> Result<i64> {
+        self.insert_record_mode(table, values, ValidationMode::Full)
+    }
+
+    /// Insert a row as a DRAFT (#173): the system primary key and auto-enter run
+    /// exactly as in [`Solution::insert_record`] and every present value is still
+    /// type/range/member-of-value-list checked, but required + uniqueness are
+    /// deferred to the record-EXIT commit. This lets a blank New record be minted
+    /// even when the table has a required field.
+    pub fn insert_record_draft(
+        &self,
+        table: &TableMeta,
+        values: &[(&FieldMeta, String)],
+    ) -> Result<i64> {
+        self.insert_record_mode(table, values, ValidationMode::Draft)
+    }
+
+    fn insert_record_mode(
+        &self,
+        table: &TableMeta,
+        values: &[(&FieldMeta, String)],
+        mode: ValidationMode,
+    ) -> Result<i64> {
         // Auto-enter (#159) is applied here, in the same pass that mints the
         // system primary key (#156):
         //  * A system field gets a fresh v4 UUID on insert, unconditionally (its
@@ -123,7 +145,7 @@ impl Solution {
             .filter_map(|f| provided.get(&f.id).map(|v| (f, v.clone())))
             .collect();
 
-        self.validate_record_values(table, &augmented, None)?;
+        self.validate_record_values(table, &augmented, None, mode)?;
         if augmented.is_empty() {
             self.data
                 .execute(&format!("INSERT INTO {} DEFAULT VALUES", table.phys), [])?;
@@ -212,6 +234,29 @@ impl Solution {
         id: i64,
         values: &[(&FieldMeta, String)],
     ) -> Result<()> {
+        self.update_record_mode(table, id, values, ValidationMode::Full)
+    }
+
+    /// Update a draft row (#173): a partial-progress save that skips required +
+    /// uniqueness (still enforcing type/range/member-of-value-list on present
+    /// values), so the user can tab between fields before the record-EXIT commit
+    /// runs the full gate via [`Solution::update_record`].
+    pub fn update_record_draft(
+        &self,
+        table: &TableMeta,
+        id: i64,
+        values: &[(&FieldMeta, String)],
+    ) -> Result<()> {
+        self.update_record_mode(table, id, values, ValidationMode::Draft)
+    }
+
+    fn update_record_mode(
+        &self,
+        table: &TableMeta,
+        id: i64,
+        values: &[(&FieldMeta, String)],
+        mode: ValidationMode,
+    ) -> Result<()> {
         // The system primary key (#156) is immutable — drop any system field from
         // the write, even if a commit resubmits its value.
         let values: Vec<(&FieldMeta, String)> = values
@@ -220,7 +265,7 @@ impl Solution {
             .map(|(f, v)| (*f, v.clone()))
             .collect();
         let values = values.as_slice();
-        self.validate_record_values(table, values, Some(id))?;
+        self.validate_record_values(table, values, Some(id), mode)?;
         if values.is_empty() {
             return Ok(());
         }
@@ -427,6 +472,69 @@ mod tests {
         s.update_record(&table, a, &[(&fields[0], "A".into()), (&fields[1], "".into())])
             .unwrap();
         assert_eq!(status_at(&s, a), "");
+    }
+
+    #[test]
+    fn draft_insert_defers_required_and_unique_until_commit() {
+        use crate::options::ValidationError;
+
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s
+            .create_table(
+                "Invoices",
+                &[
+                    NewField { name: "Number".into(), kind: FieldKind::Text },
+                    NewField { name: "Total".into(), kind: FieldKind::Number },
+                ],
+            )
+            .unwrap();
+        let table = s.table_by_id(tid).unwrap().unwrap();
+        let f = s.fields(tid).unwrap();
+        // Number is required + unique; Total has a range.
+        s.update_field_options(
+            tid,
+            f[0].id,
+            r#"{"validation":{"required":true,"unique":true}}"#,
+        )
+        .unwrap();
+        s.update_field_options(tid, f[1].id, r#"{"validation":{"range":{"min":"1","max":"10"}}}"#)
+            .unwrap();
+        let f = s.fields(tid).unwrap();
+        let row = |n: &str, t: &str| vec![(&f[0], n.to_string()), (&f[1], t.to_string())];
+        let msg = |r: anyhow::Result<()>| {
+            r.unwrap_err().downcast::<ValidationError>().unwrap().to_string()
+        };
+
+        // A blank mint fails as a Full insert but SUCCEEDS as a draft — the whole
+        // point of #173 (a required field no longer blocks minting a New record).
+        assert_eq!(
+            s.insert_record(&table, &[]).unwrap_err().downcast::<ValidationError>().unwrap().to_string(),
+            "Field \"Number\" is required."
+        );
+        let draft = s.insert_record_draft(&table, &[]).unwrap();
+
+        // Draft still enforces range on any present value.
+        assert_eq!(
+            s.update_record_draft(&table, draft, &row("", "99")).unwrap_err()
+                .downcast::<ValidationError>().unwrap().to_string(),
+            "Field \"Total\" must be at most 10."
+        );
+
+        // A commit-mode update with the required field still empty FAILS Required.
+        assert_eq!(msg(s.update_record(&table, draft, &row("", "5"))), "Field \"Number\" is required.");
+        // The same partial update as a draft SUCCEEDS (required deferred).
+        s.update_record_draft(&table, draft, &row("", "5")).unwrap();
+        // Filling the required field lets the commit gate pass — promote.
+        s.update_record(&table, draft, &row("INV-1", "5")).unwrap();
+
+        // A second draft may transiently hold a duplicate Number (unique deferred);
+        // the commit gate catches it, the draft update does not.
+        let dup = s.insert_record_draft(&table, &row("INV-1", "6")).unwrap();
+        s.update_record_draft(&table, dup, &row("INV-1", "6")).unwrap();
+        assert_eq!(
+            msg(s.update_record(&table, dup, &row("INV-1", "6"))),
+            "Field \"Number\" must be unique."
+        );
     }
 
     #[test]

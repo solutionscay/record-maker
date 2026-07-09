@@ -31,5 +31,6 @@ pub use model::{
     TableMeta, ValueListItem, ValueListMeta,
 };
 pub use options::{
-    FieldOptions, FieldReference, FieldReferenceError, RangeRule, ValidationError, ValidationRules,
+    FieldOptions, FieldReference, FieldReferenceError, RangeRule, ValidationError, ValidationMode,
+    ValidationRules,
 };

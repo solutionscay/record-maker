@@ -187,18 +187,37 @@ fn storage(e: anyhow::Error) -> ValidationError {
     }
 }
 
+/// How strictly a record write is validated (#173 — the draft lifecycle).
+///
+/// A record is minted as a DRAFT and only the record-EXIT commit enforces the
+/// full rule set. Both modes still enforce type/format/range/member-of-value-list
+/// on any *present* value; `Draft` only defers presence ([`ValidationError::Required`])
+/// and uniqueness ([`ValidationError::NotUnique`]) so a blank New record can be
+/// minted and the user can tab between fields before completing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationMode {
+    /// The record-EXIT commit gate: enforce every rule.
+    Full,
+    /// A draft write: defer required + unique to the eventual commit.
+    Draft,
+}
+
 impl Solution {
     /// Validate submitted `(field, value)` pairs against every field's rules.
     /// Ran by [`Solution::insert_record`] / [`Solution::update_record`] (with
     /// `existing_id` excluding the row being updated from uniqueness checks), so
-    /// no engine consumer can bypass validation. A field not submitted at all
-    /// still fails its required rule.
+    /// no engine consumer can bypass validation. In [`ValidationMode::Full`] a
+    /// field not submitted at all still fails its required rule; in
+    /// [`ValidationMode::Draft`] required + unique are deferred (see
+    /// [`ValidationMode`]).
     pub fn validate_record_values(
         &self,
         table: &TableMeta,
         values: &[(&FieldMeta, String)],
         existing_id: Option<i64>,
+        mode: ValidationMode,
     ) -> Result<(), ValidationError> {
+        let full = matches!(mode, ValidationMode::Full);
         let fields = self.fields(table.id).map_err(storage)?;
         let submitted: HashMap<i64, &str> =
             values.iter().map(|(f, v)| (f.id, v.as_str())).collect();
@@ -208,7 +227,7 @@ impl Solution {
             };
             let value = submitted.get(&field.id).copied();
             let trimmed = value.unwrap_or("").trim();
-            if (rules.primary || rules.required) && (value.is_none() || trimmed.is_empty()) {
+            if full && (rules.primary || rules.required) && (value.is_none() || trimmed.is_empty()) {
                 return Err(ValidationError::Required {
                     field: field.name.clone(),
                 });
@@ -218,7 +237,8 @@ impl Solution {
                 continue;
             }
 
-            if (rules.primary || rules.unique)
+            if full
+                && (rules.primary || rules.unique)
                 && self
                     .field_value_exists(table, field, trimmed, existing_id)
                     .map_err(storage)?

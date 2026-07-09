@@ -53,6 +53,16 @@
   // layout offers header/body/footer only (Issue 3). List/Table keep all five.
   let partKinds = $derived(PART_KINDS.filter((p) => partKindAllowedInView(doc.view, p.id)));
 
+  // SELECT-TO-SCOPE (#168/#169): when a portal (or one of its columns) is the sole
+  // selection, the Field tool authors columns INTO that portal — its picker offers
+  // the RELATED table's fields (not the primary table's) and a placed field becomes
+  // a child column (placement reads `doc.scopedPortal` for the parent link + the
+  // route-relative binding). `pickerFields` is the source the Field tool draws from.
+  let scoped = $derived(doc.scopedPortal);
+  let pickerFields = $derived(scoped ? scoped.fields : doc.fields);
+  // Identity of the current field SOURCE — flips when entering/leaving a portal.
+  let sourceKey = $derived(scoped ? `portal:${scoped.id}` : 'primary');
+
   // A placement (or leaving the Field tool some other way) drops `doc.activeTool`
   // back to 'pointer', but this component's own `fieldIds` is a separate copy that
   // doesn't hear about it, so a multi-select used to survive across placements:
@@ -78,10 +88,25 @@
   // below), so a rule that re-defaults on every emptiness would silently
   // overwrite an explicit clear on the next tick — the picker would look
   // permanently pinned to the first field with no way to deselect it.
+  //
+  // The one exception is a SOURCE change (entering/leaving a portal scope): the
+  // whole field SET flips (primary ↔ related), so a selection from the old source
+  // is stale and MUST be dropped and re-defaulted, regardless of an explicit clear.
   let hasDefaulted = false;
+  let lastSourceKey: string | undefined;
   $effect(() => {
-    if (!hasDefaulted && fieldIds.length === 0 && doc.fields.length > 0) {
-      fieldIds = [doc.fields[0].id];
+    const key = sourceKey;
+    const first = pickerFields[0]?.id;
+    if (lastSourceKey !== undefined && key !== lastSourceKey) {
+      lastSourceKey = key;
+      fieldIds = first !== undefined ? [first] : [];
+      hasDefaulted = pickerFields.length > 0;
+      if (doc.activeTool === 'field') doc.setTool('field', fieldIds, createLabel);
+      return;
+    }
+    lastSourceKey = key;
+    if (!hasDefaulted && fieldIds.length === 0 && first !== undefined) {
+      fieldIds = [first];
       hasDefaulted = true;
     }
   });
@@ -169,10 +194,13 @@
     {/each}
   </div>
   {#if doc.activeTool === 'field'}
+    {#if scoped}
+      <span class="le-scope-chip" title="Fields placed now become columns of this portal, bound to its related table">Placing into: {scoped.tableName} (portal)</span>
+    {/if}
     <div class="le-control le-control-stack">
-      <span>Field to place</span>
+      <span>{scoped ? 'Column to place' : 'Field to place'}</span>
       <FieldSelect
-        fields={doc.fields}
+        fields={pickerFields}
         value={fieldIds[0] ?? null}
         values={fieldIds}
         multi
@@ -189,14 +217,16 @@
         title="Field to place; Shift-click range, Ctrl/Cmd-click individual, or drag a row onto the canvas"
       />
     </div>
-    <label class="le-check">
-      <input
-        type="checkbox"
-        bind:checked={createLabel}
-        onchange={onCreateLabelChange}
-      />
-      <span>Create label</span>
-    </label>
+    {#if !scoped}
+      <label class="le-check">
+        <input
+          type="checkbox"
+          bind:checked={createLabel}
+          onchange={onCreateLabelChange}
+        />
+        <span>Create label</span>
+      </label>
+    {/if}
   {/if}
   {#if doc.activeTool === 'portal'}
     <div class="le-control le-control-stack">
@@ -308,6 +338,20 @@
   .le-control-stack {
     grid-template-columns: 1fr;
     gap: 6px;
+  }
+  /* Select-to-scope chip (#168/#169): a quiet accent-tinted badge telling the user
+     the Field tool is authoring INTO a portal. Reuses the shared --rm-accent token
+     and the rail's 13px control type — no new visual language. */
+  .le-scope-chip {
+    display: block;
+    padding: 5px 8px;
+    border: 0.5px solid var(--rm-accent);
+    border-radius: var(--rm-radius);
+    background: rgba(10, 132, 255, 0.1);
+    color: var(--rm-accent);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.3;
   }
   .le-check {
     display: inline-flex;

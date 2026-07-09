@@ -156,6 +156,7 @@ function buildPlan(doc: EditorDoc, step: Step): ReplayPlan {
         binding: o.binding,
         content: o.content,
         props: o.props,
+        parentObjectId: o.parentObjectId,
       });
     } else {
       plan.deletes.push(id);

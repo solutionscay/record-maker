@@ -21,11 +21,44 @@
     fieldId,
   }: { doc: EditorDoc; layoutId?: string; selected: Readonly<ObjectDoc>; fieldId: number | null } = $props();
 
+  // SELECT-TO-SCOPE (#168/#169): a selected field that is a portal COLUMN (it has a
+  // parent portal) binds to the portal's RELATED table, not the primary one — so its
+  // Binding row must offer the related fields and rebind ROUTE-RELATIVE. When the
+  // sole selection is this column, `doc.scopedPortal` resolves its owning portal
+  // (route path + related fields). A plain top-level field leaves this null and
+  // keeps the primary-table picker + fieldId rebind untouched.
+  let columnPortal = $derived(
+    selected.kind === 'field' && selected.parentObjectId !== null ? doc.scopedPortal : null,
+  );
+  // The server resolves a column's binding against the PRIMARY record (its last
+  // segment rarely matches a primary field), so the model's `fieldId` is usually
+  // null for a column. For the picker's current-selection highlight only, map the
+  // binding's trailing field-name segment back to a related field id by name.
+  let columnFieldId = $derived.by(() => {
+    if (!columnPortal) return fieldId;
+    const seg = (selected.binding.split('.').pop() ?? '').toLowerCase();
+    return columnPortal.fields.find((f) => f.name.toLowerCase() === seg)?.id ?? null;
+  });
+
   async function setSelectedBinding(nextFieldId: number): Promise<void> {
     if (selected.kind !== 'field' || !Number.isFinite(nextFieldId)) return;
-    llog('persist', 'inspector: set field binding', { id: selected.id, fieldId: nextFieldId });
+    // A portal column rebinds ROUTE-RELATIVE: resolve the picked RELATED field by id
+    // and write `<route>.<field>` verbatim through the binding-path endpoint (the
+    // fieldId endpoint only knows the primary table). Top-level fields keep the
+    // fieldId rebind so the server stays the single source of the primary dot-path.
+    const scope = columnPortal;
     try {
-      const view = await persistBinding(layoutId, selected.id, nextFieldId, doc.rec);
+      let view;
+      if (scope) {
+        const f = scope.fields.find((c) => c.id === nextFieldId);
+        if (!f) return;
+        const path = `${scope.path}.${f.name}`;
+        llog('persist', 'inspector: set portal column binding', { id: selected.id, path });
+        view = await persistBindingPath(layoutId, selected.id, path, doc.rec);
+      } else {
+        llog('persist', 'inspector: set field binding', { id: selected.id, fieldId: nextFieldId });
+        view = await persistBinding(layoutId, selected.id, nextFieldId, doc.rec);
+      }
       doc.setProp(selected.id, 'binding', view.binding);
       doc.refreshResolved(view);
       doc.mark();
@@ -82,14 +115,17 @@
     >{selected.kind === 'text' ? 'Text' : selected.kind === 'portal' ? 'Related list' : 'Binding'}</span
   >
   {#if selected.kind === 'field'}
+    {#if columnPortal}
+      <span class="le-hint">Column of {columnPortal.tableName} (portal)</span>
+    {/if}
     <FieldSelect
-      fields={doc.fields}
-      value={fieldId}
+      fields={columnPortal ? columnPortal.fields : doc.fields}
+      value={columnFieldId}
       placeholder="Unresolved"
-      title="Bound field"
+      title={columnPortal ? 'Bound related field' : 'Bound field'}
       onselect={(id) => setSelectedBinding(id)}
     />
-    {#if fieldId === null && selected.binding}
+    {#if columnFieldId === null && selected.binding}
       <span class="le-hint">{selected.binding}</span>
     {/if}
     <div class="insp-row">

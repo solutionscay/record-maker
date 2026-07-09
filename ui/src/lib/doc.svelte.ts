@@ -50,6 +50,12 @@ export interface ObjectDoc {
   id: number;
   /** Owning part id (object membership in a part is carried here, not by a list). */
   partId: number;
+  /** Portal containment (#168/#169, Model B): the owning portal's object id when
+   * this object is one of that portal's authored columns (a child field/label
+   * positioned row-relative), else `null`. Set at create by parent-aware placement
+   * and carried verbatim through snapshots/restores; it is NOT an editable prop
+   * (no diff targets it) — containment moves/cascades with the portal, server-side. */
+  parentObjectId: number | null;
   kind: string;
   x: number;
   y: number;
@@ -315,6 +321,7 @@ export class EditorDoc {
         this.#objects.set(o.id, {
           id: o.id,
           partId: p.id,
+          parentObjectId: o.parentObjectId ?? null,
           kind: o.kind,
           x: o.x,
           y: o.y,
@@ -470,6 +477,11 @@ export class EditorDoc {
     const r = this.#resolved.get(o.id) ?? EMPTY_RESOLVED;
     return {
       id: o.id,
+      // Serde-skipped when None on the server; mirror that here (a conditional
+      // spread inserts the key ONLY for a portal column) so the flat top-level
+      // fixture stays byte-identical while a column serialises `parentObjectId`
+      // right after `id`, matching the wire key order (#168/#169).
+      ...(o.parentObjectId !== null ? { parentObjectId: o.parentObjectId } : {}),
       kind: o.kind,
       field: r.field,
       shape: r.shape,
@@ -889,6 +901,47 @@ export class EditorDoc {
     return this.#relatedRoutes;
   }
 
+  /** SELECT-TO-SCOPE (#168/#169): the portal a Field-tool placement is currently
+   * authoring columns INTO, or `null` when the selection isn't a single portal
+   * context. It resolves to the portal when the sole selected object IS a portal,
+   * and to the OWNING portal when the sole selected object is one of its columns —
+   * so placing a column (which then selects the column) keeps the scope for the
+   * next column. Carries the portal object id (the child's `parentObjectId`), the
+   * declared route path, the related table's display name, and its user fields (the
+   * column picker's choices), all pulled from the matching declared route.
+   *
+   * The whole selection must resolve to ONE portal: the portal itself, and/or its
+   * own columns (each column's `parentObjectId` = that portal). This tolerates the
+   * label+field pair a column placement leaves selected, so authoring stays scoped
+   * across successive columns; any top-level or cross-portal object drops it. */
+  readonly #scopedPortal: {
+    id: number;
+    path: string;
+    tableName: string;
+    fields: readonly FieldChoice[];
+  } | null = $derived.by(() => {
+    if (this.#selection.size === 0) return null;
+    let portalId: number | null = null;
+    for (const id of this.#selection) {
+      const o = this.#objects.get(id);
+      if (!o) return null;
+      const pid = o.kind === 'portal' ? o.id : o.parentObjectId;
+      if (pid === null) return null;
+      if (portalId === null) portalId = pid;
+      else if (portalId !== pid) return null;
+    }
+    if (portalId === null) return null;
+    const portal = this.#objects.get(portalId);
+    if (!portal || portal.kind !== 'portal') return null;
+    const route = this.#relatedRoutes.find((r) => r.path === portal.binding);
+    if (!route) return null;
+    return { id: portal.id, path: route.path, tableName: route.tableName, fields: route.fields };
+  });
+
+  get scopedPortal(): { id: number; path: string; tableName: string; fields: readonly FieldChoice[] } | null {
+    return this.#scopedPortal;
+  }
+
   /** The capability record for an object kind — the engine's per-kind table
    * (design_model `capabilities`). All-false for an unknown kind (or before
    * hydration), so capability gates fail closed. */
@@ -1068,6 +1121,7 @@ export class EditorDoc {
       doc: {
         id: view.id,
         partId,
+        parentObjectId: view.parentObjectId ?? null,
         kind: view.kind,
         x: view.x,
         y: view.y,

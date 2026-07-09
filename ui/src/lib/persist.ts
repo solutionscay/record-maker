@@ -37,6 +37,11 @@ export interface NewObjectRequest {
    * whose binding doesn't resolve (empty table, unresolved relationship path)
    * renders with `fieldId: null`, and the binding is what actually defines it. */
   binding?: string | null;
+  /** Owning portal for a placed column (#168/#169, Model B). When set, the server
+   * creates the object as a CHILD of that portal (self-FK) and — for a `field` —
+   * binds it ROUTE-RELATIVE to the portal's related table (`<route>.<field>`)
+   * instead of the primary table. Absent/null for ordinary top-level placement. */
+  parentObjectId?: number | null;
 }
 
 // The editor's logging hook for the shared helper: JSON posts log their body,
@@ -223,6 +228,9 @@ export interface RestoreObjectRequest {
   binding: string;
   content: string;
   props: string;
+  /** Owning portal (#168/#169), so restoring a deleted portal column at its
+   * original id re-links it to its portal. Absent/null for top-level objects. */
+  parentObjectId?: number | null;
 }
 
 /** Restore one or more deleted objects at their EXACT original ids, atomically

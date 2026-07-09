@@ -9,6 +9,7 @@ import {
   type FieldKind,
   type FieldOptions,
   type FieldView,
+  type RelationshipInput,
   type RelationshipView,
   type TableView,
   type ValueListView,
@@ -352,7 +353,7 @@ export class SchemaStore {
 
   // ── relationship draft mutations ────────────────────────────────────────
 
-  saveRelationshipDraft(id: number | null, rel: Omit<RelationshipView, 'id'>): RelationshipView | null {
+  saveRelationshipDraft(id: number | null, rel: RelationshipInput): RelationshipView | null {
     if (!rel.name.trim()) return this.fail('Relationship name is required.');
     if (!this.tableById(rel.fromTable) || !this.tableById(rel.toTable)) return this.fail('Choose both tables.');
     if (!this.fieldById(rel.fromTable, rel.fromField) || !this.fieldById(rel.toTable, rel.toField)) {
@@ -367,7 +368,16 @@ export class SchemaStore {
     }
     const cleanRel = { ...rel, name: rel.name.trim() };
     if (id == null) {
-      const created: RelationshipView = { id: this.nextId(), ...cleanRel };
+      // New draft relationships default to the safe referential state and the
+      // fixed FK cardinality; the flags are edited later on the graph connector.
+      const created: RelationshipView = {
+        id: this.nextId(),
+        ...cleanRel,
+        allowCreate: false,
+        allowDelete: false,
+        forwardCardinality: 'one',
+        reverseCardinality: 'many',
+      };
       this.relationships = [...this.relationships, created];
       this.error = null;
       return created;
@@ -375,7 +385,7 @@ export class SchemaStore {
     let updated: RelationshipView | null = null;
     this.relationships = this.relationships.map((r) => {
       if (r.id !== id) return r;
-      updated = { id, ...cleanRel };
+      updated = { ...r, ...cleanRel };
       return updated;
     });
     this.error = null;
@@ -389,6 +399,20 @@ export class SchemaStore {
     }
     this.error = null;
     return true;
+  }
+
+  /** Toggle a relationship's portal create/delete permission flags (#110/#174).
+   * These are a per-relationship permission, NOT part of the schema draft: like
+   * graph box positions, they're applied to BOTH the draft and the baseline and
+   * persisted immediately, so toggling never shows up as an unsaved change and a
+   * later structural Save never clobbers them. Only persisted relationships
+   * (id > 0) reach the server; unsaved ones just update locally. */
+  async setRelationshipReferential(id: number, allowCreate: boolean, allowDelete: boolean): Promise<void> {
+    const apply = (r: RelationshipView): RelationshipView =>
+      r.id === id ? { ...r, allowCreate, allowDelete } : r;
+    this.relationships = this.relationships.map(apply);
+    this.baseRelationships = this.baseRelationships.map(apply);
+    if (id > 0) await this.guard(() => api.setRelationshipReferential(id, allowCreate, allowDelete));
   }
 
   tableById(id: number): TableView | null {
@@ -540,7 +564,7 @@ export class SchemaStore {
     rel: RelationshipView,
     tableId: (id: number) => number,
     fieldId: (id: number) => number,
-  ): Omit<RelationshipView, 'id'> {
+  ): RelationshipInput {
     return {
       name: rel.name,
       fromTable: tableId(rel.fromTable),

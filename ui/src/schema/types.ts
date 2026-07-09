@@ -70,6 +70,9 @@ export interface FieldView {
   position: number;
 }
 
+/** Traversal cardinality of one direction of a relationship. */
+export type Cardinality = 'one' | 'many';
+
 /** A named relationship between two table fields. Mirrors `RelationshipSchemaView`. */
 export interface RelationshipView {
   id: number;
@@ -78,7 +81,24 @@ export interface RelationshipView {
   toTable: number;
   fromField: number;
   toField: number;
+  /** Portal CRUD permissions (#110/#174): whether the portal may create/delete
+   * records through this relationship. Toggled on the graph connector drawer;
+   * persisted independently of the schema draft (like graph box positions). */
+  allowCreate: boolean;
+  allowDelete: boolean;
+  /** Derived traversal cardinality: forward = from-table → to-table (FK owner →
+   * parent, always to-one); reverse = to-table → from-table (always to-many). */
+  forwardCardinality: Cardinality;
+  reverseCardinality: Cardinality;
 }
+
+/** The structural fields of a relationship, as sent to the create/update
+ * endpoints. Excludes the id and the referential/cardinality fields, which the
+ * server derives or owns via the dedicated `/referential` route (#174). */
+export type RelationshipInput = Pick<
+  RelationshipView,
+  'name' | 'fromTable' | 'toTable' | 'fromField' | 'toField'
+>;
 
 export interface ValueListView {
   id: number;

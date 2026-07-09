@@ -17,11 +17,29 @@
   import SchemaTableNode, { type SchemaGraphField, type SchemaTableNodeData } from './SchemaTableNode.svelte';
   import type { RelationshipView, TableView } from './types';
 
-  // Strictly a read-only diagram of the schema's constraints (#142+). It never
-  // creates or edits anything: no "new relationship", no opening a table or a
-  // relationship to edit. Relationships are defined solely by field references
-  // in the Fields tab; this view only draws the constraints they produce.
-  let { store }: { store: SchemaStore } = $props();
+  // A read-only diagram of the schema's constraints (#142+). Its ONE editing
+  // affordance (#174): clicking a connector opens a drawer to toggle that
+  // relationship's portal create/delete permission flags. It still never does
+  // any STRUCTURAL editing — no "new relationship", no drag-connect, no opening
+  // a table, no delete. Relationships themselves are defined solely by field
+  // references in the Fields tab; this view only draws the constraints and lets
+  // you set the two permission flags on an existing one.
+  let {
+    store,
+    selectedId = null,
+    onselect,
+  }: {
+    store: SchemaStore;
+    /** Relationship whose connector drawer is open, highlighted on the graph. */
+    selectedId?: number | null;
+    /** Clicking a connector asks the host to open the relationship drawer. */
+    onselect: (relationshipId: number) => void;
+  } = $props();
+
+  function onEdgeClick({ edge }: { edge: SchemaEdge }) {
+    const id = Number(edge.id.replace('relationship-', ''));
+    if (Number.isFinite(id)) onselect(id);
+  }
 
   const hasAnyFields = $derived(store.tables.some((t) => (store.fieldsByTable[t.id] ?? []).length > 0));
 
@@ -188,7 +206,13 @@
         target: `table-${rel.toTable}`,
         sourceHandle: `source-${rel.fromField}-${sourceSide}`,
         targetHandle: `target-${rel.toField}-${targetSide}`,
-        data: { relationshipId: rel.id, name: rel.name },
+        data: {
+          relationshipId: rel.id,
+          name: rel.name,
+          allowCreate: rel.allowCreate,
+          allowDelete: rel.allowDelete,
+          selected: rel.id === selectedId,
+        },
         // Crow's-foot notation (#143): a fork at the source (the FK/"many"
         // side) and a tick at the target (the referenced/"one" side),
         // defined once as custom SVG markers below. Svelte Flow wraps these
@@ -288,6 +312,7 @@
         elementsSelectable={false}
         deleteKey={null}
         onnodedragstop={onNodeDragStop}
+        onedgeclick={onEdgeClick}
       >
         <Controls showLock={false} />
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />

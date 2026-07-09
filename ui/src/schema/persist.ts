@@ -9,7 +9,7 @@
 // with a human-readable string, e.g. a duplicate-name conflict).
 
 import { getJson, postJson, postVoid as httpPostVoid } from '../shared/http';
-import type { FieldKind, FieldOptions, FieldView, RelationshipView, TableView, ValueListView } from './types';
+import type { FieldKind, FieldOptions, FieldView, RelationshipInput, RelationshipView, TableView, ValueListView } from './types';
 
 /** POST that returns no JSON body (the delete endpoints just 200/OK). */
 const postVoid = (url: string, body: unknown = {}): Promise<void> => httpPostVoid(url, body);
@@ -77,13 +77,23 @@ export const deleteField = (tableId: number, fieldId: number): Promise<void> =>
 
 export const listRelationships = (): Promise<RelationshipView[]> => getJson('/schema/relationships');
 
-export const createRelationship = (rel: Omit<RelationshipView, 'id'>): Promise<RelationshipView> =>
+export const createRelationship = (rel: RelationshipInput): Promise<RelationshipView> =>
   postJson('/schema/relationships', rel);
 
-export const updateRelationship = (id: number, rel: Omit<RelationshipView, 'id'>): Promise<RelationshipView> =>
+export const updateRelationship = (id: number, rel: RelationshipInput): Promise<RelationshipView> =>
   postJson(`/schema/relationships/${id}`, rel);
 
 export const deleteRelationship = (id: number): Promise<void> => postVoid(`/schema/relationships/${id}/delete`);
+
+/** Set a relationship's portal create/delete permission flags (#110/#174).
+ * Independent of the structural create/update route, so a referential edit never
+ * touches the FK structure and vice versa. Returns the server's updated view. */
+export const setRelationshipReferential = (
+  id: number,
+  allowCreate: boolean,
+  allowDelete: boolean,
+): Promise<RelationshipView> =>
+  postJson(`/schema/relationships/${id}/referential`, { allowCreate, allowDelete });
 
 // ── value lists ─────────────────────────────────────────────────────────────
 

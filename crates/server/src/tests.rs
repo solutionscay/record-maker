@@ -30,6 +30,7 @@ fn form_chrome() -> Chrome {
 fn field_obj(field_id: i64, value: &str, read_only: bool) -> ObjectView {
     ObjectView {
         id: field_id,
+        parent_object_id: None,
         kind: "field",
         field: true,
         shape: false,
@@ -165,6 +166,135 @@ fn portal_object_renders_related_rows_in_form_view() {
     let totals: Vec<&str> = portal.portal_rows.iter().map(|r| r.cells[0].as_str()).collect();
     assert!(totals.contains(&"42") && totals.contains(&"17"));
     assert!(portal.portal_rows.iter().all(|r| r.id > 0));
+}
+
+/// #168/#169 (Model B): placing a field INTO a portal via the create endpoint —
+/// `parentObjectId` set to the portal — creates the column as the portal's CHILD
+/// (self-FK) with a ROUTE-RELATIVE binding drawn from the portal's related table
+/// (`<route>.<field>`), not the primary table. The returned views carry the parent
+/// linkage, and the design model lets the portal enumerate its columns by it.
+#[tokio::test]
+async fn field_placed_into_portal_becomes_a_child_column() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    let customers = sol
+        .create_table(
+            "Customers",
+            &[NewField { name: "Name".into(), kind: FieldKind::Text }],
+        )
+        .unwrap();
+    let invoices = sol
+        .create_table(
+            "Invoices",
+            &[
+                NewField { name: "Total".into(), kind: FieldKind::Number },
+                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+            ],
+        )
+        .unwrap();
+    let cust_pk = sol
+        .all_fields(customers)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name.eq_ignore_ascii_case("id"))
+        .map(|f| f.id)
+        .unwrap();
+    let fk = sol
+        .all_fields(invoices)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name == "CustomerId")
+        .unwrap()
+        .id;
+    sol.create_relationship(&NewRelationship {
+        name: "customer".into(),
+        from_table: invoices,
+        to_table: customers,
+        from_field: fk,
+        to_field: cust_pk,
+    })
+    .unwrap()
+    .unwrap();
+
+    let form = sol
+        .layouts_for_table(customers)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.view == "form")
+        .unwrap();
+    let body = body_part(&sol, form.id);
+    let portal_id = sol
+        .create_object(
+            form.id,
+            &record_maker_engine::NewObject {
+                part_id: body.id,
+                kind: ObjectKind::Portal,
+                x: 10,
+                y: 10,
+                w: 300,
+                h: 120,
+                binding: Some("customer".into()),
+                content: None,
+                props: None,
+                parent_object_id: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    // The related-table field to place as a column (Invoices.Total).
+    let total_id = sol.fields(invoices).unwrap()[0].id;
+
+    let state = state_for(sol);
+    let create = serde_json::json!({
+        "partId": body.id,
+        "kind": "field",
+        "x": 20,
+        "y": 20,
+        "w": 100,
+        "h": 24,
+        "fieldId": total_id,
+        "parentObjectId": portal_id,
+    });
+    let (status, resp) =
+        post_json_body(state.clone(), &format!("/design/{}/object", form.id), &create.to_string())
+            .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    let views: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let views = views.as_array().unwrap();
+    // Field-tool placement returns [label, field]; both owned by the portal.
+    assert_eq!(views.len(), 2);
+    assert!(
+        views.iter().all(|o| o["parentObjectId"] == portal_id),
+        "both column objects are children of the portal: {views:#?}"
+    );
+    let field = views
+        .iter()
+        .find(|o| o["kind"] == "field")
+        .expect("field column");
+    // Route-relative binding into the related table, not `Customers.Total`.
+    assert_eq!(field["binding"], "customer.Total");
+
+    // The design model lets the portal enumerate its columns by parentObjectId.
+    let (status, body_json) =
+        get_body(state, &format!("/design/{}/model?rec=1", form.id)).await;
+    assert_eq!(status, StatusCode::OK);
+    let model: serde_json::Value = serde_json::from_str(&body_json).unwrap();
+    let children: Vec<&serde_json::Value> = model["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["objects"].as_array().unwrap())
+        .filter(|o| o["parentObjectId"] == portal_id)
+        .collect();
+    assert_eq!(children.len(), 2, "portal enumerates its 2 child objects");
+    // The portal itself carries no parent linkage (serde-skipped when top-level).
+    let portal = model["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["objects"].as_array().unwrap())
+        .find(|o| o["id"] == portal_id)
+        .unwrap();
+    assert!(portal.get("parentObjectId").is_none(), "portal is top-level");
 }
 
 /// #170: a portal's related rows are editable in Browse. Each row renders as its
@@ -3273,6 +3403,18 @@ async fn design_model_related_routes_are_derived_from_fk_constraints() {
     assert_eq!(orders_route["fromTable"], orders);
     assert_eq!(orders_route["toTable"], customers);
 
+    // #168/#169: each route ships its terminal (related) table's user fields, so
+    // the rail can retarget the column picker without a second fetch. The reverse
+    // orders route lands on Orders → its CustomerId/Total fields.
+    let orders_fields = orders_route["fields"].as_array().expect("route fields");
+    let order_field_names: Vec<&str> = orders_fields
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(order_field_names, vec!["CustomerId", "Total"]);
+    assert_eq!(orders_fields[0]["id"], order_fields[0].id);
+    assert!(orders_fields[0]["kind"].is_string(), "field kind rides too");
+
     let region_route = routes
         .iter()
         .find(|route| route["name"] == "region")
@@ -3281,6 +3423,14 @@ async fn design_model_related_routes_are_derived_from_fk_constraints() {
     assert_eq!(region_route["cardinality"], "toOne");
     assert_eq!(region_route["tableId"], regions);
     assert_eq!(region_route["tableName"], "Regions");
+    // The forward region route lands on Regions → its single Name field.
+    let region_field_names: Vec<&str> = region_route["fields"]
+        .as_array()
+        .expect("route fields")
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(region_field_names, vec!["Name"]);
 
     assert!(
         routes.iter().all(|route| route["name"] != "payments"),

@@ -345,6 +345,13 @@ pub(crate) struct PartView {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ObjectView {
     pub(crate) id: i64,
+    /// Portal containment (#168/#169, Model B): the owning portal's object id when
+    /// this object is one of its authored columns (a child field/label positioned
+    /// row-relative), else `None`. A portal enumerates its columns by matching this
+    /// against its own `id`. Skipped from JSON when absent so every top-level object
+    /// — and the whole parity fixture — serialises byte-identically to before (#44).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) parent_object_id: Option<i64>,
     pub(crate) kind: &'static str,
     pub(crate) field: bool,
     pub(crate) shape: bool,
@@ -473,6 +480,25 @@ pub(crate) struct RelatedRouteChoice {
     from_field: i64,
     to_table: i64,
     to_field: i64,
+    /// The terminal (related) table's user fields — the column picker's choices
+    /// when authoring inside a portal bound to this route (#168/#169). Same
+    /// `FieldChoice` shape the primary-table Field tool offers, so the rail can
+    /// retarget its picker to the related table without a second fetch.
+    fields: Vec<FieldChoice>,
+}
+
+/// Project a table's fields into the Field-tool `FieldChoice` list (#48/#62) —
+/// shared by the design model's primary-table fields and each related route's
+/// terminal-table fields (#168/#169), so both offer the identical shape.
+pub(crate) fn field_choices(fields: &[FieldMeta]) -> Vec<FieldChoice> {
+    fields
+        .iter()
+        .map(|f| FieldChoice {
+            id: f.id,
+            name: f.name.clone(),
+            kind: f.kind.as_str().to_string(),
+        })
+        .collect()
 }
 
 #[derive(Template)]
@@ -891,6 +917,7 @@ fn prepared_object_view(
     };
     ObjectView {
         id: o.id,
+        parent_object_id: o.parent_object_id,
         kind: o.kind.as_str(),
         field,
         shape: p.shape,
@@ -967,6 +994,7 @@ pub(crate) fn related_route_choices(sol: &Solution, table: &TableMeta) -> Vec<Re
         .filter_map(|rel| {
             if rel.from_table == table.id {
                 let target = sol.table_by_id(rel.to_table).ok().flatten()?;
+                let fields = field_choices(&sol.fields(target.id).unwrap_or_default());
                 Some(RelatedRouteChoice {
                     relationship_id: rel.id,
                     name: rel.name.clone(),
@@ -979,9 +1007,11 @@ pub(crate) fn related_route_choices(sol: &Solution, table: &TableMeta) -> Vec<Re
                     from_field: rel.from_field,
                     to_table: rel.to_table,
                     to_field: rel.to_field,
+                    fields,
                 })
             } else if rel.to_table == table.id {
                 let target = sol.table_by_id(rel.from_table).ok().flatten()?;
+                let fields = field_choices(&sol.fields(target.id).unwrap_or_default());
                 Some(RelatedRouteChoice {
                     relationship_id: rel.id,
                     name: rel.name.clone(),
@@ -994,6 +1024,7 @@ pub(crate) fn related_route_choices(sol: &Solution, table: &TableMeta) -> Vec<Re
                     from_field: rel.from_field,
                     to_table: rel.to_table,
                     to_field: rel.to_field,
+                    fields,
                 })
             } else {
                 None

@@ -16,10 +16,9 @@ use record_maker_engine::{
 
 use crate::style::{object_style, shape_style, text_style};
 use crate::viewmodel::{
-    by_name_for_rec, by_name_map, canvas_width, clamp_rec, layout_parts_with_objects,
+    by_name_for_rec, by_name_map, canvas_width, clamp_rec, field_choices, layout_parts_with_objects,
     layout_table, object_view, part_view, related_route_choices, render_part_with_objects,
-    updated_object_view, updated_part_view, FieldChoice, ObjectView, PartView,
-    RelatedRouteChoice,
+    updated_object_view, updated_part_view, FieldChoice, ObjectView, PartView, RelatedRouteChoice,
 };
 use crate::{not_found, AppError, AppResult, AppState};
 
@@ -136,21 +135,13 @@ pub(crate) async fn design_model(
         .iter()
         .map(|(p, objects)| render_part_with_objects(p, objects, &by_name, None))
         .collect();
-    let field_choices = fields
-        .iter()
-        .map(|f| FieldChoice {
-            id: f.id,
-            name: f.name.clone(),
-            kind: f.kind.as_str().to_string(),
-        })
-        .collect();
     let model = DesignModel {
         layout_id,
         rec,
         total,
         width,
         view: lay.view.clone(),
-        fields: field_choices,
+        fields: field_choices(&fields),
         related_routes: related_route_choices(&sol, &table),
         parts,
         groups: sol
@@ -383,6 +374,14 @@ pub(crate) struct CreateObjectBody {
     /// the binding from `field_id` would 400. Ignored when `create_label` is true
     /// (Field-tool placement resolves the binding from `field_id` instead).
     binding: Option<String>,
+    /// Owning portal for a placed column (#168/#169, Model B). When set, the new
+    /// object is created as a CHILD of that portal (self-FK `parent_object_id`) and
+    /// a placed `field` binds ROUTE-RELATIVE to the portal's related table (the
+    /// portal's route path + the chosen related field, e.g. `sensors.reading`)
+    /// rather than to the primary table. Absent (`None`) for ordinary top-level
+    /// placement. FK-first: the column binds a declared route field, never authors one.
+    #[serde(default)]
+    parent_object_id: Option<i64>,
 }
 
 /// Create an object on a layout part from the Create zone (#48). Resolves the
@@ -412,12 +411,40 @@ pub(crate) async fn create_design_object(
             let fid = body
                 .field_id
                 .ok_or_else(|| AppError::bad_request("field tool needs a fieldId"))?;
-            let f = fields
-                .iter()
-                .find(|f| f.id == fid)
-                .ok_or_else(|| AppError::bad_request("no such field"))?;
-            let binding = format!("{}.{}", table.name, f.name);
-            let label = f.name.clone();
+            // Placing INTO a portal (#168/#169): the field is a CHILD column bound
+            // ROUTE-RELATIVE to the portal's related table. Resolve the parent
+            // portal's route, pick the field from the terminal (related) table, and
+            // build `<route>.<field>` (e.g. `sensors.reading`). Top-level placement
+            // binds `<PrimaryTable>.<field>` against the layout's own fields.
+            let (binding, label) = match body.parent_object_id {
+                Some(parent) => {
+                    let portal = sol
+                        .object_by_id(layout_id, parent)
+                        .unwrap()
+                        .ok_or_else(|| AppError::bad_request("no such portal"))?;
+                    let route_path = portal
+                        .binding
+                        .as_deref()
+                        .filter(|b| !b.is_empty())
+                        .ok_or_else(|| AppError::bad_request("portal has no route"))?;
+                    let route = sol
+                        .resolve_path(table.id, route_path)
+                        .map_err(|e| AppError::bad_request(format!("bad portal route: {e}")))?;
+                    let related = sol.fields(route.terminal_table).unwrap();
+                    let f = related
+                        .iter()
+                        .find(|f| f.id == fid)
+                        .ok_or_else(|| AppError::bad_request("no such related field"))?;
+                    (format!("{route_path}.{}", f.name), f.name.clone())
+                }
+                None => {
+                    let f = fields
+                        .iter()
+                        .find(|f| f.id == fid)
+                        .ok_or_else(|| AppError::bad_request("no such field"))?;
+                    (format!("{}.{}", table.name, f.name), f.name.clone())
+                }
+            };
             match sol
                 .create_field_object(
                     layout_id,
@@ -428,9 +455,9 @@ pub(crate) async fn create_design_object(
                     body.y,
                     body.w,
                     body.h,
-                    // Portal-column containment is threaded by a later step (#168/
-                    // #169); top-level placement passes no parent.
-                    None,
+                    // Portal-column containment (#168/#169): a column created inside
+                    // a portal is owned by it via the self-FK; top-level is `None`.
+                    body.parent_object_id,
                 )
                 .unwrap()
             {
@@ -470,8 +497,9 @@ pub(crate) async fn create_design_object(
                 // field keeps its fill/border/format bag; the label-spawning branch
                 // above is normal placement and has no props to carry yet.
                 props: body.props.as_ref().map(|v| v.to_string()),
-                // Portal-column containment (#168/#169) is threaded by a later step.
-                parent_object_id: None,
+                // Portal-column containment (#168/#169): a value-only field copy
+                // pasted into a portal is owned by it via the self-FK.
+                parent_object_id: body.parent_object_id,
             };
             match sol.create_object(layout_id, &new).unwrap() {
                 Some(id) => vec![id],
@@ -502,7 +530,13 @@ pub(crate) async fn create_design_object(
             binding,
             content,
             props,
-            parent_object_id: None,
+            // A non-field object (text/shape) may also be authored as a portal
+            // child (#168/#169); a portal itself is always top-level.
+            parent_object_id: if kind == ObjectKind::Portal {
+                None
+            } else {
+                body.parent_object_id
+            },
         };
         match sol.create_object(layout_id, &new).unwrap() {
             Some(id) => vec![id],

@@ -14,6 +14,11 @@
 export interface ObjectView {
   /** Stable object id; used as the keyed-each key. */
   id: number;
+  /** Portal containment (#168/#169, Model B): the owning portal's object id when
+   * this object is one of its authored columns (a child field/label positioned
+   * row-relative), else absent. A portal enumerates its columns by matching this
+   * against its own `id`. Omitted (serde-skipped) for every top-level object. */
+  parentObjectId?: number;
   /** Object kind: `"field"`, `"text"`, or a shape (`"rect"`/`"line"`/`"ellipse"`). */
   kind: string;
   /** True when the object is a bound field (renders its value only). */
@@ -114,6 +119,11 @@ export interface RelatedRouteChoice {
   fromField: number;
   toTable: number;
   toField: number;
+  /** The terminal (related) table's user fields — the column picker's choices when
+   * authoring inside a portal bound to this route (#168/#169). Same `FieldChoice`
+   * shape the primary-table Field tool offers, so the rail retargets its picker to
+   * the related table without a second fetch. Mirrors the server. */
+  fields: FieldChoice[];
 }
 
 /** One layout part (band) and the objects it contains, ordered back→front. */

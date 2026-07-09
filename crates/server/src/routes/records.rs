@@ -270,3 +270,44 @@ pub(crate) async fn create_related_record(
         }
     }
 }
+
+/// Delete (or unlink) a related record from a portal row (#172): the engine's
+/// `delete_related_record` removes the NEAREST record for the portal's anchor
+/// route — a direct to-many child is deleted, a forward to-one clears the base FK
+/// (unlink; the parent survives), a join-table M:N removes only the join row (the
+/// terminal survives). Never cascades.
+///
+/// The gate is the relationship's, not the portal's: the anchoring relationship's
+/// `allow_delete` (#110) must be on. The render suppresses the per-row affordance
+/// otherwise (the row's `delete_url` is empty in `resolve_portal`); this handler
+/// enforces the same gate again (defense-in-depth), mapping a refusal to a precise
+/// 4xx. On success the terminal row's edit lock (if any) is released and the
+/// client reloads to surface the shortened set.
+pub(crate) async fn delete_related_record(
+    State(st): State<AppState>,
+    Path((layout_id, base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let Some(route) = portal_route(&sol, layout_id, object_id) else {
+        return (StatusCode::NOT_FOUND, "no such portal route".to_string()).into_response();
+    };
+    match sol.delete_related_record(&route, base_id, rec_id) {
+        Ok(()) => {
+            st.locks
+                .lock()
+                .unwrap()
+                .remove(&(route.terminal_table, rec_id));
+            (StatusCode::OK, "deleted".to_string()).into_response()
+        }
+        // A refusal here means the affordance rendered despite the gate (or a
+        // crafted request): map each RelatedCrudError to a precise status.
+        Err(e) => {
+            let status = match e.downcast_ref::<RelatedCrudError>() {
+                Some(RelatedCrudError::DeleteNotAllowed) => StatusCode::FORBIDDEN,
+                Some(RelatedCrudError::NotARelatedRoute) => StatusCode::CONFLICT,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, e.to_string()).into_response()
+        }
+    }
+}

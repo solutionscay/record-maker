@@ -55,7 +55,16 @@
       <div class="fm-portal-head">{% for c in o.portal_columns %}<span class="fm-portal-cell">{{ c }}</span>{% endfor %}</div>
       {% for r in o.portal_rows %}
       {% if editable %}
-      <div class="fm-portal-row rec-edit" data-related-id="{{ r.id }}" data-related="1" data-open="{{ r.open_url }}" data-action="{{ r.action_url }}" data-revert="{{ r.revert_url }}">{% for c in r.cells %}<input class="fm-portal-cell fm-finput" name="f{{ o.portal_field_ids[loop.index0] }}" value="{{ c }}" autocomplete="off">{% endfor %}</div>
+      {# Delete/unlink affordance (#172): a per-row button removes the NEAREST
+         related record via `delete_related_record` (to-many deletes the child;
+         forward to-one / M:N unlinks, the terminal survives). Rendered only when
+         the row carries a `delete_url` — i.e. the anchoring relationship's
+         allow_delete (#110) is on and the route is delete-determined. It sits
+         inside the `.rec-edit` scope; its own controller stops the click from
+         opening/committing the row edit, confirms, then POSTs and reloads. No
+         Svelte mirror: the design canvas is never editable, so this editable-only
+         affordance lives in askama alone (the #44 parity contract). #}
+      <div class="fm-portal-row rec-edit" data-related-id="{{ r.id }}" data-related="1" data-open="{{ r.open_url }}" data-action="{{ r.action_url }}" data-revert="{{ r.revert_url }}">{% for c in r.cells %}<input class="fm-portal-cell fm-finput" name="f{{ o.portal_field_ids[loop.index0] }}" value="{{ c }}" autocomplete="off">{% endfor %}{% if !r.delete_url.is_empty() %}<button type="button" class="fm-portal-del" data-delete="{{ r.delete_url }}" title="Delete this related record" aria-label="Delete related record">&times;</button>{% endif %}</div>
       {% else %}
       <div class="fm-portal-row" data-related-id="{{ r.id }}">{% for c in r.cells %}<span class="fm-portal-cell">{{ c }}</span>{% endfor %}</div>
       {% endif %}

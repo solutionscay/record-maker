@@ -398,6 +398,138 @@ async fn portal_blank_row_creates_related_record_when_allowed() {
     assert_eq!(rows[0].cells[0], "250", "created with the submitted value");
 }
 
+/// #172 — a resolved portal row renders a delete/unlink affordance ONLY when the
+/// anchoring relationship's `allow_delete` is on, and POSTing it removes the
+/// nearest related record through `delete_related_record`. When `allow_delete` is
+/// off the button is suppressed and the endpoint refuses (the gate is the
+/// relationship's, not the portal's).
+#[tokio::test]
+async fn portal_row_deletes_related_record_when_allowed() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    let customers = sol
+        .create_table(
+            "Customers",
+            &[NewField { name: "Name".into(), kind: FieldKind::Text }],
+        )
+        .unwrap();
+    let invoices = sol
+        .create_table(
+            "Invoices",
+            &[
+                NewField { name: "Total".into(), kind: FieldKind::Number },
+                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+            ],
+        )
+        .unwrap();
+    let cust_pk = sol
+        .all_fields(customers)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name.eq_ignore_ascii_case("id"))
+        .map(|f| f.id)
+        .unwrap();
+    let fk = field_named(&sol, invoices, "CustomerId");
+    sol.create_relationship(&NewRelationship {
+        name: "customer".into(),
+        from_table: invoices,
+        to_table: customers,
+        from_field: fk,
+        to_field: cust_pk,
+    })
+    .unwrap()
+    .unwrap();
+    let rel_id = sol.relationships().unwrap()[0].id;
+
+    let cust_tbl = sol.table_by_id(customers).unwrap().unwrap();
+    let name = sol
+        .field_by_id(customers, field_named(&sol, customers, "Name"))
+        .unwrap()
+        .unwrap();
+    let ada = sol.insert_record(&cust_tbl, &[(&name, "Ada".into())]).unwrap();
+    let route = sol.resolve_path(customers, "customer").unwrap();
+
+    let form = sol
+        .layouts_for_table(customers)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.view == "form")
+        .unwrap();
+    let body = body_part(&sol, form.id);
+    let portal_id = sol
+        .create_object(
+            form.id,
+            &record_maker_engine::NewObject {
+                part_id: body.id,
+                kind: ObjectKind::Portal,
+                x: 10,
+                y: 10,
+                w: 300,
+                h: 120,
+                binding: Some("customer".into()),
+                content: None,
+                props: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+    // Seed one related record (allow_create on) so there is a row to delete.
+    sol.set_relationship_referential(rel_id, true, false).unwrap();
+    let child = sol
+        .create_related_record(&route, ada, &[], None)
+        .unwrap();
+    let delete_url = format!(
+        "/browse/{}/{}/related/{}/{}/delete",
+        form.id, ada, portal_id, child
+    );
+
+    // allow_delete OFF → no per-row delete button, and the endpoint refuses.
+    let state = AppState::new(sol);
+    let (status, html) = get_body(state.clone(), &format!("/browse/{}?view=form", form.id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !html.contains("data-delete="),
+        "no delete button when allow_delete is off"
+    );
+    let (status, _) = post_form_body(state.clone(), &delete_url, "").await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "engine refuses delete when allow_delete is off"
+    );
+    assert_eq!(
+        state.sol.lock().unwrap().read_related_records(&route, ada).unwrap().len(),
+        1,
+        "related record still present after a refused delete"
+    );
+
+    // Turn allow_delete ON → the delete button renders wired to the endpoint.
+    state
+        .sol
+        .lock()
+        .unwrap()
+        .set_relationship_referential(rel_id, true, true)
+        .unwrap();
+    let (status, html) = get_body(state.clone(), &format!("/browse/{}?view=form", form.id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.contains(r#"class="fm-portal-del""#),
+        "delete button renders when allowed"
+    );
+    assert!(
+        html.contains(&format!(r#"data-delete="{delete_url}""#)),
+        "delete button wired to the portal delete endpoint"
+    );
+
+    // POSTing it removes the related record through the related layer.
+    let (status, _) = post_form_body(state.clone(), &delete_url, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        state.sol.lock().unwrap().read_related_records(&route, ada).unwrap().is_empty(),
+        "related record deleted"
+    );
+}
+
 fn field_named(sol: &Solution, table_id: i64, name: &str) -> i64 {
     sol.all_fields(table_id)
         .unwrap()

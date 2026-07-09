@@ -45,8 +45,8 @@ use routes::layouts::{
     set_layout_enabled,
 };
 use routes::records::{
-    create_record, create_related_record, delete_record, open_record, open_related_record,
-    revert_record, revert_related_record, save_record, save_related_record,
+    create_record, create_related_record, delete_record, delete_related_record, open_record,
+    open_related_record, revert_record, revert_related_record, save_record, save_related_record,
 };
 use routes::schema::{
     create_schema_field, create_schema_relationship, create_schema_table, create_value_list,
@@ -235,6 +235,12 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/browse/:layout/:base/related/:obj/:rec/revert",
             post(revert_related_record),
+        )
+        // Portal related-record delete/unlink (#172): remove the nearest related
+        // record addressed by (base record, portal object, terminal row).
+        .route(
+            "/browse/:layout/:base/related/:obj/:rec/delete",
+            post(delete_related_record),
         )
         .route(
             "/schema/tables",

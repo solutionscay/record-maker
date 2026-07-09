@@ -434,6 +434,15 @@ pub(crate) struct PortalRowView {
     pub(crate) action_url: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) revert_url: String,
+    /// Portal delete/unlink (#172): the endpoint a per-row delete affordance posts
+    /// to, removing the NEAREST related record — a to-many child is deleted, a
+    /// forward to-one clears the base FK, an M:N unlinks the join row (the terminal
+    /// survives; never cascades). Non-empty ONLY when the route is delete-determined
+    /// AND the anchoring relationship's `allow_delete` (#110) is on — the one
+    /// permission on the relationship, no portal-own flag. Empty (and skipped from
+    /// JSON) otherwise, so a row that may not be deleted renders no button.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) delete_url: String,
 }
 
 /// A bindable field on the layout's primary table — the Field tool's dropdown
@@ -715,8 +724,23 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
     apply_portal_sort(o.props.as_deref(), &fields, &mut records);
     let columns = fields.iter().map(|f| f.name.clone()).collect();
     let field_ids = fields.iter().map(|f| f.id).collect();
+    // The anchoring relationship (the route's first hop) carries the referential
+    // flags (#110) that gate both the create-new and the delete/unlink affordances.
+    let anchor_rel = route
+        .hops
+        .first()
+        .and_then(|h| ctx.sol.relationship_by_id(h.relationship_id).ok().flatten());
+    // Delete/unlink gate (#172): the route must resolve to a determined nearest
+    // record (DirectFk or join-table M:N — exactly the classes
+    // `delete_related_record` supports) AND the anchoring relationship's
+    // `allow_delete` (#110) must be on. One permission on the relationship — the
+    // portal has no own flag. Suppressed on an Undetermined/base route or when
+    // `allow_delete` is off; the engine's `delete_related_record` enforces the same
+    // gate again.
+    let can_delete = route.class.create_determined()
+        && anchor_rel.as_ref().is_some_and(|r| r.allow_delete);
     // Per-row inline-edit endpoints (#170), scoped to this portal object and the
-    // terminal row id: `/browse/:layout/:base/related/:obj/:rec[/open|/revert]`.
+    // terminal row id: `/browse/:layout/:base/related/:obj/:rec[/open|/revert|/delete]`.
     let base = format!(
         "/browse/{}/{}/related/{}",
         ctx.layout_id, ctx.base_id, o.id
@@ -727,6 +751,11 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
             open_url: format!("{base}/{}/open", r.id),
             action_url: format!("{base}/{}", r.id),
             revert_url: format!("{base}/{}/revert", r.id),
+            delete_url: if can_delete {
+                format!("{base}/{}/delete", r.id)
+            } else {
+                String::new()
+            },
             id: r.id,
             cells: r.cells,
         })
@@ -736,12 +765,8 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
     // permission on the relationship — the portal has no own flag. The `/new`
     // affordance is suppressed on an Undetermined route or when `allow_create` is
     // off; the engine's `create_related_record` enforces the same gate again.
-    let can_create = route.class.create_determined()
-        && route
-            .hops
-            .first()
-            .and_then(|h| ctx.sol.relationship_by_id(h.relationship_id).ok().flatten())
-            .is_some_and(|r| r.allow_create);
+    let can_create =
+        route.class.create_determined() && anchor_rel.as_ref().is_some_and(|r| r.allow_create);
     let create_url = if can_create {
         format!("/browse/{}/{}/related/{}", ctx.layout_id, ctx.base_id, o.id)
     } else {

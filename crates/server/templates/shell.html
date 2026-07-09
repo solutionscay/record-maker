@@ -243,6 +243,15 @@
     .fm-portal-add .fm-finput::placeholder { color: #9aa6b2; }
     .fm-portal-cell { flex: 1 1 0; min-width: 0; overflow: hidden;
                      text-overflow: ellipsis; }
+    /* Per-row delete/unlink affordance (#172): a compact trailing button shown
+       only when the relationship permits delete; reddens on hover. It is a fixed
+       trailing control, not a flexing cell, so it never steals column width. */
+    .fm-portal-del { flex: 0 0 auto; align-self: center; margin-left: .15rem;
+                     width: 1.05rem; height: 1.05rem; padding: 0; line-height: 1;
+                     border: 0; border-radius: 3px; background: transparent;
+                     color: #9aa6b2; font-size: .95rem; cursor: pointer; }
+    .fm-portal-del:hover { background: #fdeaea; color: #c0392b; }
+    .fm-portal-del:focus { outline: none; box-shadow: inset 0 0 0 1px #f0c36d; }
     /* Editable field input (Form view, open/commit editing #40). */
     .fm-edit { margin: 0; }
     /* Always transparent so the object's fill (set on the .fm-field box) shows
@@ -728,6 +737,34 @@
       });
       el.addEventListener('focusin', function (e) { e.stopPropagation(); });
       el.addEventListener('focusout', function (e) { e.stopPropagation(); });
+    });
+    // Portal row delete/unlink (#172): a per-row button removes the NEAREST related
+    // record — a to-many child is deleted, a forward to-one / M:N link is unlinked
+    // (the terminal survives; never cascades). Rendered only when the relationship's
+    // allow_delete (#110) is on. The button lives inside the row's `.rec-edit` scope,
+    // so its click is stopped from opening/committing that row's edit; it routes
+    // through the shared confirm dialog, then POSTs and reloads to surface the
+    // shortened set (a full reload, matching the base-record delete).
+    document.querySelectorAll('.fm-portal-del').forEach(function (el) {
+      el.addEventListener('mousedown', function (e) { e.preventDefault(); e.stopPropagation(); });
+      el.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var url = el.dataset.delete;
+        if (!url) return;
+        window.appConfirm({
+          title: 'Delete related record',
+          message: 'Remove this related record? This cannot be undone.',
+          confirmLabel: 'Delete',
+          danger: true
+        }).then(function (ok) {
+          if (!ok) return;
+          fetch(url, { method: 'POST' }).then(function (res) {
+            if (res.ok) { location.reload(); return; }
+            return res.text().then(function (t) { window.alert(t || 'Could not delete record'); });
+          }).catch(function () {});
+        });
+      });
     });
     // Issue 9: clicking a List row selects that record — navigate with `?rec=`.
     // A field box fills nearly the whole row, so most clicks land on its <input>;

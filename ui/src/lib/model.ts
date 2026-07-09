@@ -67,6 +67,14 @@ export interface ObjectView {
    * sort), each carrying the terminal record id and its cell values in column
    * order. Omitted when empty. */
   portalRows?: PortalRowView[];
+  /** Portal create-new (#171): whether the trailing blank create row may render —
+   * the route is create-determined AND the anchoring relationship's `allow_create`
+   * is on. Omitted (serde-skipped) when false, so only a resolved, create-permitted
+   * portal in Browse carries it; the design canvas never does. */
+  portalCanCreate?: boolean;
+  /** Portal create-new (#171): the endpoint the blank row posts to to mint a related
+   * record. Present only when `portalCanCreate`. */
+  portalCreateUrl?: string;
 }
 
 /** One related record rendered inside a portal (#169): its terminal-table row id

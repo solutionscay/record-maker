@@ -45,8 +45,8 @@ use routes::layouts::{
     set_layout_enabled,
 };
 use routes::records::{
-    create_record, delete_record, open_record, open_related_record, revert_record,
-    revert_related_record, save_record, save_related_record,
+    create_record, create_related_record, delete_record, open_record, open_related_record,
+    revert_record, revert_related_record, save_record, save_related_record,
 };
 use routes::schema::{
     create_schema_field, create_schema_relationship, create_schema_table, create_value_list,
@@ -214,6 +214,14 @@ pub fn app(state: AppState) -> Router {
         .route("/browse/:layout/:id/open", post(open_record))
         .route("/browse/:layout/:id/revert", post(revert_record))
         .route("/browse/:layout/:id/delete", post(delete_record))
+        // Portal related-record create-new (#171): mint a CHILD record from the
+        // portal's trailing blank row, associated to the base record via the
+        // portal object's anchor route. Distinct 4-segment path (no `:rec`), so it
+        // never collides with the 5-segment inline-edit routes below.
+        .route(
+            "/browse/:layout/:base/related/:obj",
+            post(create_related_record),
+        )
         // Portal related-record inline edit (#170): open/commit/revert a CHILD
         // record addressed by (base record, portal object, terminal row).
         .route(

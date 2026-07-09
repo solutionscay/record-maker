@@ -60,6 +60,20 @@
       <div class="fm-portal-row" data-related-id="{{ r.id }}">{% for c in r.cells %}<span class="fm-portal-cell">{{ c }}</span>{% endfor %}</div>
       {% endif %}
       {% endfor %}
+      {# Create-new blank row (#171): rendered only in an editable view and only
+         when the relationship permits create (`portal_can_create` — the route is
+         create-determined AND `allow_create` is on, #11/#110). It is a `.fm-portal-add`
+         scope (NOT a nested `<form>` — the base record is already a form); its own
+         controller posts the `f<field_id>` inputs to the portal's create endpoint on
+         commit (blur/Enter with any value), then reloads to surface the new row and a
+         fresh blank. An all-empty row is abandoned. `data-related` keeps its focus
+         events from bubbling to the enclosing base-record editor, like an edit row.
+         Create-new only — associate-existing is deferred (#100). No Svelte mirror:
+         the design canvas is never editable, so this editable-only subtree lives in
+         askama alone, exactly as the edit-row inputs do (the #44 parity contract). #}
+      {% if editable && o.portal_can_create %}
+      <div class="fm-portal-row fm-portal-add" data-related="1" data-create="{{ o.portal_create_url }}">{% for fid in o.portal_field_ids %}<input class="fm-portal-cell fm-finput" name="f{{ fid }}" value="" autocomplete="off">{% endfor %}</div>
+      {% endif %}
       {% endif %}
     </div>
     {% else %}

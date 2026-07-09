@@ -237,6 +237,10 @@
     .fm-portal-head { font-weight: 600; color: #5b6675; background: #eef2f7;
                      position: sticky; top: 0; }
     .fm-portal-row { border-top: 1px solid #eef1f5; color: #2b3440; }
+    /* Create-new blank row (#171): a faint tinted trailing row that mints a
+       related record on commit; rendered only when the relationship permits it. */
+    .fm-portal-add { background: #f4f8fc; }
+    .fm-portal-add .fm-finput::placeholder { color: #9aa6b2; }
     .fm-portal-cell { flex: 1 1 0; min-width: 0; overflow: hidden;
                      text-overflow: ellipsis; }
     /* Editable field input (Form view, open/commit editing #40). */
@@ -677,6 +681,53 @@
         el.addEventListener('focusin', function (e) { e.stopPropagation(); });
         el.addEventListener('focusout', function (e) { e.stopPropagation(); });
       }
+    });
+    // Portal create-new (#171): the trailing blank `.fm-portal-add` row mints a
+    // related record. Unlike an edit row it takes no lock (insert is atomic) and
+    // commits via fetch (not sendBeacon) so the page can reload to surface the new
+    // row + a fresh blank. Commit fires on leaving the row or pressing Enter, and
+    // ONLY when some cell was filled — an untouched row is abandoned (a no-op).
+    // Escape clears the row. It sits inside the base record's form, so — like an
+    // edit row — its focus events don't bubble to the enclosing base editor.
+    document.querySelectorAll('.fm-portal-add').forEach(function (el) {
+      var busy = false;
+      function body() {
+        var p = new URLSearchParams(), any = false;
+        el.querySelectorAll('input[name]').forEach(function (i) {
+          if (i.value !== '') any = true;
+          p.append(i.name, i.value);
+        });
+        return any ? p : null;
+      }
+      function submit() {
+        if (busy) return;
+        var b = body();
+        if (!b) return; // untouched blank row → nothing to create
+        busy = true;
+        fetch(el.dataset.create, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: b.toString()
+        }).then(function (res) {
+          if (res.ok) { location.reload(); return; }
+          // Keep the user's input on screen (no reload) and surface the reason;
+          // mirrors how a base create's rejection reports its message.
+          return res.text().then(function (t) { busy = false; window.alert(t || 'Could not create record'); });
+        }).catch(function () { busy = false; });
+      }
+      el.addEventListener('focusout', function (e) { if (!el.contains(e.relatedTarget)) submit(); });
+      el.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          if (document.activeElement) document.activeElement.blur();
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          el.querySelectorAll('input[name]').forEach(function (i) { i.value = ''; });
+          if (document.activeElement) document.activeElement.blur();
+        }
+      });
+      el.addEventListener('focusin', function (e) { e.stopPropagation(); });
+      el.addEventListener('focusout', function (e) { e.stopPropagation(); });
     });
     // Issue 9: clicking a List row selects that record — navigate with `?rec=`.
     // A field box fills nearly the whole row, so most clicks land on its <input>;

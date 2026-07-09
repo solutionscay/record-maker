@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Redirect},
 };
 
-use record_maker_engine::{ResolvedRoute, Solution};
+use record_maker_engine::{RelatedCrudError, ResolvedRoute, Solution};
 
 use crate::validate::{collect_values, validation_message};
 use crate::viewmodel::{clamp_rec, layout_table, view_param};
@@ -219,4 +219,54 @@ pub(crate) async fn revert_related_record(
             .remove(&(route.terminal_table, rec_id));
     }
     (StatusCode::OK, "reverted")
+}
+
+/// Create a related (child) record from a portal's trailing blank row (#171):
+/// mint the terminal record (and, for a join-table M:N, its join row) through the
+/// engine's `create_related_record`, associating it to base record `base_id` via
+/// the portal object's anchor route. CREATE-NEW ONLY — `associate_existing` is
+/// `None`; associate-existing is deferred (needs the #100 value-list picker).
+///
+/// The gate is the relationship's, not the portal's: the route must be
+/// create-determined (#11) and the anchoring relationship's `allow_create` (#110)
+/// on. The render suppresses the blank row otherwise (#171 gate in `resolve_portal`);
+/// this handler enforces it again (defense-in-depth), mapping a refusal to a
+/// precise 4xx. Inputs are the same `f<field_id>` contract over the TERMINAL
+/// table's fields; the anchor FK is stamped by the engine, so a stray FK input is
+/// harmless. The client reloads on success to surface the new row + a fresh blank.
+pub(crate) async fn create_related_record(
+    State(st): State<AppState>,
+    Path((layout_id, base_id, object_id)): Path<(i64, i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let Some(route) = portal_route(&sol, layout_id, object_id) else {
+        return (StatusCode::NOT_FOUND, "no such portal route".to_string()).into_response();
+    };
+    let fields = match sol.fields(route.terminal_table) {
+        Ok(fields) => fields,
+        Err(_) => {
+            return (StatusCode::NOT_FOUND, "no such related table".to_string()).into_response()
+        }
+    };
+    let values = collect_values(&fields, &form);
+    let created = sol.create_related_record(&route, base_id, &values, None);
+    // Validation rejection surfaces as the same 400 + message as a base create.
+    if let Some(msg) = validation_message(&created) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+    match created {
+        Ok(_) => (StatusCode::OK, "created".to_string()).into_response(),
+        // A refusal here means the affordance rendered despite the gate (or a
+        // crafted request): map each RelatedCrudError to a precise status.
+        Err(e) => {
+            let status = match e.downcast_ref::<RelatedCrudError>() {
+                Some(RelatedCrudError::CreateNotAllowed) => StatusCode::FORBIDDEN,
+                Some(RelatedCrudError::CreateUndetermined)
+                | Some(RelatedCrudError::NotARelatedRoute) => StatusCode::CONFLICT,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, e.to_string()).into_response()
+        }
+    }
 }

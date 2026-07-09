@@ -398,6 +398,21 @@ pub(crate) struct ObjectView {
     /// order. Empty for a non-portal object, and for a portal whose set is empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) portal_rows: Vec<PortalRowView>,
+    /// Portal create-new (#171): whether this resolved portal may mint a related
+    /// record — the route is create-determined (#11) AND the anchoring
+    /// relationship's `allow_create` (#110) is on. The one permission on the
+    /// relationship gates the affordance; the portal carries no own flag. `false`
+    /// for every non-portal object, an unresolved portal frame, and a resolved
+    /// portal whose route/relationship forbids create. Skipped from JSON when
+    /// `false` so non-portal objects (and the design-model frame) stay byte-stable.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) portal_can_create: bool,
+    /// Portal create-new (#171): the endpoint the trailing blank row posts to to
+    /// mint a related record — `/browse/:layout/:base/related/:obj`. Non-empty only
+    /// when [`Self::portal_can_create`] is set. Empty (and skipped from JSON) for
+    /// every other object and for a portal that cannot create.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) portal_create_url: String,
 }
 
 /// One related record inside a rendered portal (#169): its terminal-table row id
@@ -653,26 +668,44 @@ pub(crate) struct PortalCtx<'a> {
     pub(crate) base_id: i64,
 }
 
-/// Resolve a portal object's bound route against `ctx` into its
-/// `(columns, field_ids, rows)` (#169/#170). `columns` are the terminal table's
-/// user-field names; `field_ids` are the backing field ids, parallel to the
-/// columns (so an editable row can emit `f<id>` inputs, #170); `rows` are the
-/// related records after the display-only filter (#112) and the declared sort,
-/// each carrying its inline-edit endpoint URLs.
+/// The resolved render state of a portal object (#169/#170/#171): the terminal
+/// table's column names, the backing field ids (parallel to the columns, so an
+/// editable row emits `f<id>` inputs), the related rows after the #112 filter +
+/// declared sort, and the create-new gate. Default (all-empty / `can_create`
+/// false) is the unresolved frame.
+#[derive(Default)]
+struct PortalResolved {
+    columns: Vec<String>,
+    field_ids: Vec<i64>,
+    rows: Vec<PortalRowView>,
+    /// #171: the route is create-determined AND the anchor relationship's
+    /// `allow_create` is on — the trailing blank create row may render.
+    can_create: bool,
+    /// #171: where that blank row posts to mint a related record. Non-empty only
+    /// when `can_create`.
+    create_url: String,
+}
+
+/// Resolve a portal object's bound route against `ctx` into its [`PortalResolved`]
+/// (#169/#170/#171). `columns` are the terminal table's user-field names;
+/// `field_ids` are the backing field ids, parallel to the columns (so an editable
+/// row can emit `f<id>` inputs, #170); `rows` are the related records after the
+/// display-only filter (#112) and the declared sort, each carrying its inline-edit
+/// endpoint URLs; `can_create`/`create_url` gate the trailing blank create row
+/// (#171).
 ///
-/// A blank/unresolvable binding yields `([], [], [])` so the frame renders its
-/// unresolved-placeholder branch; a route that resolves to zero related records
-/// yields `(columns, field_ids, [])` so the header renders over a clean empty body.
-fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> (Vec<String>, Vec<i64>, Vec<PortalRowView>) {
-    let empty = (Vec::new(), Vec::new(), Vec::new());
+/// A blank/unresolvable binding yields the default (all-empty) so the frame renders
+/// its unresolved-placeholder branch; a route that resolves to zero related records
+/// yields the columns + an empty body so the header renders over a clean empty body.
+fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
     let Some(binding) = o.binding.as_deref().filter(|b| !b.is_empty()) else {
-        return empty;
+        return PortalResolved::default();
     };
     let Ok(route) = ctx.sol.resolve_path(ctx.base_table, binding) else {
-        return empty;
+        return PortalResolved::default();
     };
     let Ok(fields) = ctx.sol.fields(route.terminal_table) else {
-        return empty;
+        return PortalResolved::default();
     };
     let filter = parse_portal_filter(o.props.as_deref());
     let mut records = ctx
@@ -698,7 +731,29 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> (Vec<String>, Vec<i64>, Ve
             cells: r.cells,
         })
         .collect();
-    (columns, field_ids, rows)
+    // Create-new gate (#171): the route must be create-determined (#11) AND the
+    // anchoring relationship (the first hop) must permit create (#110). One
+    // permission on the relationship — the portal has no own flag. The `/new`
+    // affordance is suppressed on an Undetermined route or when `allow_create` is
+    // off; the engine's `create_related_record` enforces the same gate again.
+    let can_create = route.class.create_determined()
+        && route
+            .hops
+            .first()
+            .and_then(|h| ctx.sol.relationship_by_id(h.relationship_id).ok().flatten())
+            .is_some_and(|r| r.allow_create);
+    let create_url = if can_create {
+        format!("/browse/{}/{}/related/{}", ctx.layout_id, ctx.base_id, o.id)
+    } else {
+        String::new()
+    };
+    PortalResolved {
+        columns,
+        field_ids,
+        rows,
+        can_create,
+        create_url,
+    }
 }
 
 /// Parse a portal's optional display-only read filter (#112) from its `props`
@@ -780,10 +835,17 @@ fn prepared_object_view(
     portal: Option<&PortalCtx>,
 ) -> ObjectView {
     let o = &p.meta;
-    let (portal_columns, portal_field_ids, portal_rows) = match (o.kind.is_portal(), portal) {
+    let portal_resolved = match (o.kind.is_portal(), portal) {
         (true, Some(ctx)) => resolve_portal(o, ctx),
-        _ => (Vec::new(), Vec::new(), Vec::new()),
+        _ => PortalResolved::default(),
     };
+    let PortalResolved {
+        columns: portal_columns,
+        field_ids: portal_field_ids,
+        rows: portal_rows,
+        can_create: portal_can_create,
+        create_url: portal_create_url,
+    } = portal_resolved;
     let (field, field_id, label, raw_value, field_kind) = resolve_object(o, by_name);
     let mut text_style = p.text_style.clone();
     // Value formatting (#77/#78) is display-only: applied to the resolved value
@@ -826,6 +888,8 @@ fn prepared_object_view(
         portal_columns,
         portal_field_ids,
         portal_rows,
+        portal_can_create,
+        portal_create_url,
     }
 }
 

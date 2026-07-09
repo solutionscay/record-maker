@@ -52,6 +52,8 @@ fn field_obj(field_id: i64, value: &str, read_only: bool) -> ObjectView {
         portal_columns: Vec::new(),
         portal_field_ids: Vec::new(),
         portal_rows: Vec::new(),
+        portal_can_create: false,
+        portal_create_url: String::new(),
     }
 }
 
@@ -269,6 +271,131 @@ async fn portal_related_row_inline_edit_commits_child_record() {
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].id, inv);
     assert_eq!(saved[0].cells[0], "99", "commit updated the terminal record");
+}
+
+/// #171: a create-determined portal whose relationship permits create renders a
+/// trailing blank `.fm-portal-add` row wired to the portal's create endpoint;
+/// POSTing it mints a related record through `create_related_record`. When
+/// `allow_create` is off the blank row is suppressed (the gate is the
+/// relationship's, not the portal's).
+#[tokio::test]
+async fn portal_blank_row_creates_related_record_when_allowed() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    let customers = sol
+        .create_table(
+            "Customers",
+            &[NewField { name: "Name".into(), kind: FieldKind::Text }],
+        )
+        .unwrap();
+    let invoices = sol
+        .create_table(
+            "Invoices",
+            &[
+                NewField { name: "Total".into(), kind: FieldKind::Number },
+                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+            ],
+        )
+        .unwrap();
+    let cust_pk = sol
+        .all_fields(customers)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name.eq_ignore_ascii_case("id"))
+        .map(|f| f.id)
+        .unwrap();
+    let fk = field_named(&sol, invoices, "CustomerId");
+    sol.create_relationship(&NewRelationship {
+        name: "customer".into(),
+        from_table: invoices,
+        to_table: customers,
+        from_field: fk,
+        to_field: cust_pk,
+    })
+    .unwrap()
+    .unwrap();
+    let rel_id = sol.relationships().unwrap()[0].id;
+
+    let cust_tbl = sol.table_by_id(customers).unwrap().unwrap();
+    let name = sol
+        .field_by_id(customers, field_named(&sol, customers, "Name"))
+        .unwrap()
+        .unwrap();
+    let ada = sol.insert_record(&cust_tbl, &[(&name, "Ada".into())]).unwrap();
+    let route = sol.resolve_path(customers, "customer").unwrap();
+    let total_fid = field_named(&sol, invoices, "Total");
+
+    let form = sol
+        .layouts_for_table(customers)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.view == "form")
+        .unwrap();
+    let body = body_part(&sol, form.id);
+    let portal_id = sol
+        .create_object(
+            form.id,
+            &record_maker_engine::NewObject {
+                part_id: body.id,
+                kind: ObjectKind::Portal,
+                x: 10,
+                y: 10,
+                w: 300,
+                h: 120,
+                binding: Some("customer".into()),
+                content: None,
+                props: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+    // allow_create OFF → no blank create row, and the endpoint refuses.
+    let state = AppState::new(sol);
+    let create_url = format!("/browse/{}/{}/related/{}", form.id, ada, portal_id);
+    let (status, html) = get_body(state.clone(), &format!("/browse/{}?view=form", form.id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !html.contains("data-create="),
+        "no create row when allow_create is off"
+    );
+    let (status, _) =
+        post_form_body(state.clone(), &create_url, &format!("f{total_fid}=7")).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "engine refuses create when allow_create is off"
+    );
+
+    // Turn allow_create ON → the blank row renders wired to the create endpoint.
+    state
+        .sol
+        .lock()
+        .unwrap()
+        .set_relationship_referential(rel_id, true, false)
+        .unwrap();
+    let (status, html) = get_body(state.clone(), &format!("/browse/{}?view=form", form.id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.contains(r#"class="fm-portal-row fm-portal-add""#),
+        "create row renders when allowed"
+    );
+    assert!(
+        html.contains(&format!(r#"data-create="{create_url}""#)),
+        "blank row wired to the portal create endpoint"
+    );
+
+    // POSTing the blank row mints a related record through the related layer.
+    let (status, _) =
+        post_form_body(state.clone(), &create_url, &format!("f{total_fid}=250")).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = state
+        .sol
+        .lock()
+        .unwrap()
+        .read_related_records(&route, ada)
+        .unwrap();
+    assert_eq!(rows.len(), 1, "one related record now exists");
+    assert_eq!(rows[0].cells[0], "250", "created with the submitted value");
 }
 
 fn field_named(sol: &Solution, table_id: i64, name: &str) -> i64 {

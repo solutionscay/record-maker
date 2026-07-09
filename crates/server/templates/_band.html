@@ -33,7 +33,22 @@
     {% else if o.shape %}
     <div class="fm-shape fm-{{ o.kind }}" style="{{ o.shape_style }}"></div>
     {% else if o.kind == "portal" %}
-    <div class="fm-portal" data-route="{{ o.binding }}"><span class="fm-portal-tag">{{ o.binding }}</span></div>
+    {# A portal (#169): when resolved against a base record its columns are the
+       terminal table's field names and each related record is one scrolling row
+       (`data-related-id` addresses it for #170/#172). An empty column set means
+       unresolved (design canvas / blank binding) — show the route frame instead;
+       a resolved route with zero rows renders the header over a clean empty body.
+       The Svelte `Band` mirrors this branch-for-branch (the #44 parity contract). #}
+    <div class="fm-portal" data-route="{{ o.binding }}">
+      {% if o.portal_columns.is_empty() %}
+      <span class="fm-portal-tag">{{ o.binding }}</span>
+      {% else %}
+      <div class="fm-portal-head">{% for c in o.portal_columns %}<span class="fm-portal-cell">{{ c }}</span>{% endfor %}</div>
+      {% for r in o.portal_rows %}
+      <div class="fm-portal-row" data-related-id="{{ r.id }}">{% for c in r.cells %}<span class="fm-portal-cell">{{ c }}</span>{% endfor %}</div>
+      {% endfor %}
+      {% endif %}
+    </div>
     {% else %}
     <span class="fm-text"{% if o.text_style != "" %} style="{{ o.text_style }}"{% endif %}>{{ o.content }}</span>
     {% endif %}

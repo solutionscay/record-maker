@@ -49,7 +49,127 @@ fn field_obj(field_id: i64, value: &str, read_only: bool) -> ObjectView {
         value: value.to_string(),
         raw: value.to_string(),
         shape_style: String::new(),
+        portal_columns: Vec::new(),
+        portal_rows: Vec::new(),
     }
+}
+
+/// #169: a portal placed on a Form layout resolves its bound anchor route and
+/// renders one row per related record, with the terminal table's fields as
+/// columns and each row stamped with its terminal id. An empty set still renders
+/// its columns (a clean header over an empty body), while an unresolved binding
+/// renders neither (the frame placeholder).
+#[test]
+fn portal_object_renders_related_rows_in_form_view() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    // Customers ← Invoices via a direct FK; "customer" is reverse/to-many from
+    // the Customer side (its invoices).
+    let customers = sol
+        .create_table(
+            "Customers",
+            &[NewField { name: "Name".into(), kind: FieldKind::Text }],
+        )
+        .unwrap();
+    let invoices = sol
+        .create_table(
+            "Invoices",
+            &[
+                NewField { name: "Total".into(), kind: FieldKind::Number },
+                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+            ],
+        )
+        .unwrap();
+    let cust_pk = sol
+        .all_fields(customers)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name.eq_ignore_ascii_case("id"))
+        .map(|f| f.id)
+        .unwrap();
+    let fk = sol
+        .all_fields(invoices)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name == "CustomerId")
+        .unwrap()
+        .id;
+    sol.create_relationship(&NewRelationship {
+        name: "customer".into(),
+        from_table: invoices,
+        to_table: customers,
+        from_field: fk,
+        to_field: cust_pk,
+    })
+    .unwrap()
+    .unwrap();
+
+    // Ada with two invoices; a second customer whose invoice must NOT leak in.
+    let cust_tbl = sol.table_by_id(customers).unwrap().unwrap();
+    let name = sol.field_by_id(customers, field_named(&sol, customers, "Name")).unwrap().unwrap();
+    let ada = sol.insert_record(&cust_tbl, &[(&name, "Ada".into())]).unwrap();
+    let route = sol.resolve_path(customers, "customer").unwrap();
+    let total = sol.field_by_id(invoices, field_named(&sol, invoices, "Total")).unwrap().unwrap();
+    sol.set_relationship_referential(
+        sol.relationships().unwrap()[0].id,
+        true,
+        true,
+    )
+    .unwrap();
+    sol.create_related_record(&route, ada, &[(&total, "42".into())], None).unwrap();
+    sol.create_related_record(&route, ada, &[(&total, "17".into())], None).unwrap();
+
+    // Place a portal on the Customers Form body, bound to the "customer" route.
+    let form = sol
+        .layouts_for_table(customers)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.view == "form")
+        .unwrap();
+    let body = body_part(&sol, form.id);
+    let portal_id = sol
+        .create_object(
+            form.id,
+            &record_maker_engine::NewObject {
+                part_id: body.id,
+                kind: ObjectKind::Portal,
+                x: 10,
+                y: 10,
+                w: 300,
+                h: 120,
+                binding: Some("customer".into()),
+                content: None,
+                props: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+    let fields = sol.fields(customers).unwrap();
+    let ids = sol.record_ids(&cust_tbl).unwrap();
+    let ada_pos = ids.iter().position(|&i| i == ada).unwrap() as i64 + 1;
+    let record = build_form_record(&sol, form.id, &cust_tbl, &fields, &ids, ada_pos).unwrap();
+    let portal = record
+        .parts
+        .iter()
+        .flat_map(|p| &p.objects)
+        .find(|o| o.id == portal_id)
+        .expect("portal object present");
+    // Columns are the terminal (Invoices) user fields, in field order.
+    assert_eq!(portal.portal_columns, vec!["Total".to_string(), "CustomerId".to_string()]);
+    // One row per related invoice, each addressable by its terminal id.
+    assert_eq!(portal.portal_rows.len(), 2);
+    let totals: Vec<&str> = portal.portal_rows.iter().map(|r| r.cells[0].as_str()).collect();
+    assert!(totals.contains(&"42") && totals.contains(&"17"));
+    assert!(portal.portal_rows.iter().all(|r| r.id > 0));
+}
+
+fn field_named(sol: &Solution, table_id: i64, name: &str) -> i64 {
+    sol.all_fields(table_id)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name == name)
+        .unwrap()
+        .id
 }
 
 fn body_part(sol: &Solution, layout_id: i64) -> PartMeta {

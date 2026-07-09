@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 use askama::Template;
 use axum::Json;
 use record_maker_engine::{
-    FieldKind, FieldMeta, LayoutMeta, ObjectKind, ObjectMeta, PartKind, PartMeta, Solution,
-    TableMeta,
+    FieldKind, FieldMeta, FilterClause, FilterOp, FilterOperand, LayoutMeta, ObjectKind,
+    ObjectMeta, PartKind, PartMeta, Record, RelatedFilter, Solution, TableMeta,
 };
 
 use crate::style::{object_style, parse_props, part_style, shape_style, text_style};
@@ -375,6 +375,32 @@ pub(crate) struct ObjectView {
     #[serde(skip)]
     pub(crate) raw: String,
     pub(crate) shape_style: String,
+    /// Portal (#169): the terminal table's user-field names, the header row of a
+    /// resolved portal. Non-empty ONLY for a portal object resolved against a base
+    /// record in Browse; empty for every other object and for a portal on the
+    /// design canvas (no base record). The renderer keys off this: non-empty ⇒
+    /// render the related-row region (even with zero rows — an empty set renders a
+    /// clean header + empty body); empty ⇒ the unresolved-frame placeholder.
+    /// Skipped from JSON when empty so non-portal objects (and the design-model
+    /// portal frame) serialise byte-identically to before (#44 fixture stability).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) portal_columns: Vec<String>,
+    /// Portal (#169): one entry per related record in the resolved set, after the
+    /// display-only filter (#112) and the declared sort. Each carries the terminal
+    /// record id (stamped `data-related-id`) and its user-field values in column
+    /// order. Empty for a non-portal object, and for a portal whose set is empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) portal_rows: Vec<PortalRowView>,
+}
+
+/// One related record inside a rendered portal (#169): its terminal-table row id
+/// (so an inline-edit/delete affordance can address it, #170/#172) and its user
+/// field values in the portal's column order.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PortalRowView {
+    pub(crate) id: i64,
+    pub(crate) cells: Vec<String>,
 }
 
 /// A bindable field on the layout's primary table — the Field tool's dropdown
@@ -595,13 +621,135 @@ pub(crate) fn prepare_object(o: ObjectMeta) -> PreparedObject {
     }
 }
 
+/// The anchor a portal object renders against (#169): the live solution plus the
+/// base record its route is rooted at. Threaded ONLY through the Browse Form/List
+/// render paths — a header/footer band, the design canvas, and the create/restore
+/// handlers pass `None`, so a portal there renders its unresolved frame rather
+/// than issuing a related read with no base record.
+pub(crate) struct PortalCtx<'a> {
+    pub(crate) sol: &'a Solution,
+    pub(crate) base_table: i64,
+    pub(crate) base_id: i64,
+}
+
+/// Resolve a portal object's bound route against `ctx` into its `(columns, rows)`
+/// (#169). `columns` are the terminal table's user-field names; `rows` are the
+/// related records after the display-only filter (#112) and the declared sort.
+///
+/// A blank/unresolvable binding yields `([], [])` so the frame renders its
+/// unresolved-placeholder branch; a route that resolves to zero related records
+/// yields `(columns, [])` so the header renders over a clean empty body.
+fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> (Vec<String>, Vec<PortalRowView>) {
+    let empty = (Vec::new(), Vec::new());
+    let Some(binding) = o.binding.as_deref().filter(|b| !b.is_empty()) else {
+        return empty;
+    };
+    let Ok(route) = ctx.sol.resolve_path(ctx.base_table, binding) else {
+        return empty;
+    };
+    let Ok(fields) = ctx.sol.fields(route.terminal_table) else {
+        return empty;
+    };
+    let filter = parse_portal_filter(o.props.as_deref());
+    let mut records = ctx
+        .sol
+        .read_related_records_filtered(&route, ctx.base_id, &filter)
+        .unwrap_or_default();
+    apply_portal_sort(o.props.as_deref(), &fields, &mut records);
+    let columns = fields.iter().map(|f| f.name.clone()).collect();
+    let rows = records
+        .into_iter()
+        .map(|r| PortalRowView {
+            id: r.id,
+            cells: r.cells,
+        })
+        .collect();
+    (columns, rows)
+}
+
+/// Parse a portal's optional display-only read filter (#112) from its `props`
+/// JSON: `{"filter":{"clauses":[{"field":<id>,"op":"eq|ne|lt|le|gt|ge",
+/// "value":"…"|"parentField":<id>}, …]}}`. Absent/malformed ⇒ no refinement. The
+/// engine validates the terminal-field ids, so a stray id surfaces as an empty
+/// read (display-only), never a panic.
+fn parse_portal_filter(props: Option<&str>) -> RelatedFilter {
+    let Some(v) = parse_props(props) else {
+        return RelatedFilter::none();
+    };
+    let Some(clauses) = v
+        .get("filter")
+        .and_then(|f| f.get("clauses"))
+        .and_then(|c| c.as_array())
+    else {
+        return RelatedFilter::none();
+    };
+    let clauses = clauses
+        .iter()
+        .filter_map(|c| {
+            let field_id = c.get("field").and_then(serde_json::Value::as_i64)?;
+            let op = match c.get("op").and_then(serde_json::Value::as_str).unwrap_or("eq") {
+                "ne" => FilterOp::Ne,
+                "lt" => FilterOp::Lt,
+                "le" => FilterOp::Le,
+                "gt" => FilterOp::Gt,
+                "ge" => FilterOp::Ge,
+                _ => FilterOp::Eq,
+            };
+            let rhs = match c.get("parentField").and_then(serde_json::Value::as_i64) {
+                Some(pf) => FilterOperand::ParentField(pf),
+                None => FilterOperand::Value(
+                    c.get("value")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+            };
+            Some(FilterClause { field_id, op, rhs })
+        })
+        .collect();
+    RelatedFilter { clauses }
+}
+
+/// Apply a portal's optional declared sort from its `props` JSON:
+/// `{"sort":{"field":<id>,"dir":"asc"|"desc"}}`. Numeric-aware (both cells parse
+/// as `f64` ⇒ numeric order, else byte-wise), stable, and a no-op when absent or
+/// the field isn't a column. Ordering is done here rather than in-engine because
+/// the read set is defined by FK membership; sort is a presentation choice.
+fn apply_portal_sort(props: Option<&str>, fields: &[FieldMeta], records: &mut [Record]) {
+    let Some(v) = parse_props(props) else { return };
+    let Some(sort) = v.get("sort") else { return };
+    let Some(field_id) = sort.get("field").and_then(serde_json::Value::as_i64) else {
+        return;
+    };
+    let Some(idx) = fields.iter().position(|f| f.id == field_id) else {
+        return;
+    };
+    let desc = sort.get("dir").and_then(serde_json::Value::as_str) == Some("desc");
+    records.sort_by(|a, b| {
+        let av = a.cells.get(idx).map(String::as_str).unwrap_or("");
+        let bv = b.cells.get(idx).map(String::as_str).unwrap_or("");
+        let ord = match (av.parse::<f64>(), bv.parse::<f64>()) {
+            (Ok(x), Ok(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+            _ => av.cmp(bv),
+        };
+        if desc { ord.reverse() } else { ord }
+    });
+}
+
 /// Project a prepared object against one record's `by_name` map — the
-/// record-dependent half of [`object_view`].
+/// record-dependent half of [`object_view`]. `portal` supplies the anchor a
+/// portal object resolves its related rows against (#169); `None` renders a
+/// portal as its unresolved frame (design canvas, header/footer, create/restore).
 fn prepared_object_view(
     p: &PreparedObject,
     by_name: &HashMap<String, (i64, String, String, FieldKind)>,
+    portal: Option<&PortalCtx>,
 ) -> ObjectView {
     let o = &p.meta;
+    let (portal_columns, portal_rows) = match (o.kind.is_portal(), portal) {
+        (true, Some(ctx)) => resolve_portal(o, ctx),
+        _ => (Vec::new(), Vec::new()),
+    };
     let (field, field_id, label, raw_value, field_kind) = resolve_object(o, by_name);
     let mut text_style = p.text_style.clone();
     // Value formatting (#77/#78) is display-only: applied to the resolved value
@@ -641,6 +789,8 @@ fn prepared_object_view(
         value,
         raw: raw_value,
         shape_style: p.shape_style.clone(),
+        portal_columns,
+        portal_rows,
     }
 }
 
@@ -652,7 +802,7 @@ pub(crate) fn object_view(
     o: &ObjectMeta,
     by_name: &HashMap<String, (i64, String, String, FieldKind)>,
 ) -> ObjectView {
-    prepared_object_view(&prepare_object(o.clone()), by_name)
+    prepared_object_view(&prepare_object(o.clone()), by_name, None)
 }
 
 pub(crate) fn object_view_for_rec(
@@ -751,6 +901,7 @@ pub(crate) fn render_part_with_objects(
     part: &PartMeta,
     objects: &[ObjectMeta],
     by_name: &HashMap<String, (i64, String, String, FieldKind)>,
+    portal: Option<&PortalCtx>,
 ) -> PartView {
     PartView {
         id: part.id,
@@ -758,18 +909,24 @@ pub(crate) fn render_part_with_objects(
         height: part.height,
         props: part.props.clone().unwrap_or_default(),
         part_style: part_style(part.props.as_deref()),
-        objects: objects.iter().map(|o| object_view(o, by_name)).collect(),
+        objects: objects
+            .iter()
+            .map(|o| prepared_object_view(&prepare_object(o.clone()), by_name, portal))
+            .collect(),
     }
 }
 
 /// Render one part's objects, positioned and bound against `by_name` (an empty
 /// map leaves field values blank — used for header/footer with no record).
+/// `portal` supplies a portal object's anchor (#169); `None` renders portals as
+/// unresolved frames.
 pub(crate) fn render_part(
     sol: &Solution,
     part: &PartMeta,
     by_name: &HashMap<String, (i64, String, String, FieldKind)>,
+    portal: Option<&PortalCtx>,
 ) -> PartView {
-    render_part_with_objects(part, &sol.objects(part.id).unwrap(), by_name)
+    render_part_with_objects(part, &sol.objects(part.id).unwrap(), by_name, portal)
 }
 
 /// A part with its objects' record-independent render state precomputed, so a
@@ -802,6 +959,7 @@ pub(crate) fn prepare_part(part: &PartMeta, objects: Vec<ObjectMeta>) -> Prepare
 pub(crate) fn render_prepared_part(
     prep: &PreparedPart,
     by_name: &HashMap<String, (i64, String, String, FieldKind)>,
+    portal: Option<&PortalCtx>,
 ) -> PartView {
     PartView {
         id: prep.id,
@@ -812,7 +970,7 @@ pub(crate) fn render_prepared_part(
         objects: prep
             .objects
             .iter()
-            .map(|p| prepared_object_view(p, by_name))
+            .map(|p| prepared_object_view(p, by_name, portal))
             .collect(),
     }
 }
@@ -878,11 +1036,17 @@ pub(crate) fn build_form_record(
     let id = ids[(rec - 1) as usize];
     let cells = sol.get_record(table, fields, id).unwrap()?;
     let by_name = by_name_map(fields, cells);
+    // Portals in the Form resolve their related rows against THIS record (#169).
+    let portal = PortalCtx {
+        sol,
+        base_table: table.id,
+        base_id: id,
+    };
     let parts = sol
         .parts(layout_id)
         .unwrap()
         .iter()
-        .map(|p| render_part(sol, p, &by_name))
+        .map(|p| render_part(sol, p, &by_name, Some(&portal)))
         .collect();
     Some(FormRecord { id, parts })
 }
@@ -899,10 +1063,10 @@ pub(crate) fn build_bands(
     for (p, objects) in parts {
         match p.kind {
             PartKind::Footer | PartKind::GrandSummary => {
-                footer.push(render_part_with_objects(p, objects, &no_record))
+                footer.push(render_part_with_objects(p, objects, &no_record, None))
             }
             PartKind::Header | PartKind::SubSummary => {
-                header.push(render_part_with_objects(p, objects, &no_record))
+                header.push(render_part_with_objects(p, objects, &no_record, None))
             }
             PartKind::Body => {}
         }
@@ -932,13 +1096,20 @@ pub(crate) fn build_list(
 
     let mut rows = Vec::new();
     for (i, r) in sol.list_records(table, fields).unwrap().into_iter().enumerate() {
+        let base_id = r.id;
         let by_name = by_name_map(fields, r.cells);
+        // Each row's portals anchor on that row's record (#169).
+        let portal = PortalCtx {
+            sol,
+            base_table: table.id,
+            base_id,
+        };
         let parts = body_parts
             .iter()
-            .map(|p| render_prepared_part(p, &by_name))
+            .map(|p| render_prepared_part(p, &by_name, Some(&portal)))
             .collect();
         rows.push(ListRow {
-            id: r.id,
+            id: base_id,
             current: (i as i64) + 1 == current_rec,
             parts,
         });

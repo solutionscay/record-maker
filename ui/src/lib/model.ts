@@ -52,6 +52,23 @@ export interface ObjectView {
   value: string;
   /** Server-derived inline CSS for a shape's appearance; empty for non-shapes. */
   shapeStyle: string;
+  /** Portal (#169): the resolved terminal table's field names (the row header).
+   * Present only for a portal resolved against a base record in Browse; omitted
+   * (via serde skip) for every other object and for a portal on the design canvas
+   * — the renderer keys off it: present ⇒ render the related-row region, absent ⇒
+   * the unresolved route frame. */
+  portalColumns?: string[];
+  /** Portal (#169): one entry per related record (after the #112 filter + declared
+   * sort), each carrying the terminal record id and its cell values in column
+   * order. Omitted when empty. */
+  portalRows?: PortalRowView[];
+}
+
+/** One related record rendered inside a portal (#169): its terminal-table row id
+ * (stamped `data-related-id` for #170/#172) and its cell values in column order. */
+export interface PortalRowView {
+  id: number;
+  cells: string[];
 }
 
 /** A bindable field on the layout's primary table — the Field tool's dropdown

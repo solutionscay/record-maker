@@ -39,7 +39,20 @@
       {:else if o.shape}
         <div class="fm-shape fm-{o.kind}" style={o.shapeStyle}></div>
       {:else if o.kind === 'portal'}
-        <div class="fm-portal" data-route={o.binding}><span class="fm-portal-tag">{o.binding}</span></div>
+        <!-- Portal (#169): mirrors the askama `_band.html` branch. Empty columns
+             (the design canvas has no base record) render the route frame; a
+             resolved portal renders its terminal columns + one row per related
+             record, each stamped with its terminal id (#170/#172). -->
+        <div class="fm-portal" data-route={o.binding}>
+          {#if !o.portalColumns || o.portalColumns.length === 0}
+            <span class="fm-portal-tag">{o.binding}</span>
+          {:else}
+            <div class="fm-portal-head">{#each o.portalColumns as c}<span class="fm-portal-cell">{c}</span>{/each}</div>
+            {#each o.portalRows ?? [] as r (r.id)}
+              <div class="fm-portal-row" data-related-id={r.id}>{#each r.cells as c}<span class="fm-portal-cell">{c}</span>{/each}</div>
+            {/each}
+          {/if}
+        </div>
       {:else}
         <span class="fm-text" style={o.textStyle || null}>{o.content}</span>
       {/if}

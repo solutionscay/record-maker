@@ -134,7 +134,7 @@ pub(crate) async fn design_model(
     let width = canvas_width(&parts_objects);
     let parts = parts_objects
         .iter()
-        .map(|(p, objects)| render_part_with_objects(p, objects, &by_name))
+        .map(|(p, objects)| render_part_with_objects(p, objects, &by_name, None))
         .collect();
     let field_choices = fields
         .iter()

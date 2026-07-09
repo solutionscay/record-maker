@@ -385,6 +385,13 @@ pub(crate) struct ObjectView {
     /// portal frame) serialise byte-identically to before (#44 fixture stability).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) portal_columns: Vec<String>,
+    /// Portal (#170): the terminal-table field id backing each column, parallel to
+    /// [`Self::portal_columns`]. A resolved portal in an editable view renders each
+    /// cell as an `f<field_id>` input off these ids so a per-row commit collects the
+    /// right terminal fields (the same `f<id>` contract as base-record edit). Empty
+    /// for every non-portal object and for an unresolved portal frame.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) portal_field_ids: Vec<i64>,
     /// Portal (#169): one entry per related record in the resolved set, after the
     /// display-only filter (#112) and the declared sort. Each carries the terminal
     /// record id (stamped `data-related-id`) and its user-field values in column
@@ -401,6 +408,17 @@ pub(crate) struct ObjectView {
 pub(crate) struct PortalRowView {
     pub(crate) id: i64,
     pub(crate) cells: Vec<String>,
+    /// Portal inline edit (#170): the `/related/*` endpoints this row's editor
+    /// posts to, precomputed server-side so the shared `.rec-edit` controller
+    /// drives a child record with no client route-building. `open`/`revert`
+    /// acquire and release the terminal row's lock; `action` commits it through
+    /// `update_related_record`. Empty on the design canvas / non-editable render.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) open_url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) action_url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) revert_url: String,
 }
 
 /// A bindable field on the layout's primary table — the Field tool's dropdown
@@ -628,19 +646,25 @@ pub(crate) fn prepare_object(o: ObjectMeta) -> PreparedObject {
 /// than issuing a related read with no base record.
 pub(crate) struct PortalCtx<'a> {
     pub(crate) sol: &'a Solution,
+    /// The layout the portal lives on — used to address the row's `/related/*`
+    /// edit endpoints (#170), which are scoped under `/browse/:layout/…`.
+    pub(crate) layout_id: i64,
     pub(crate) base_table: i64,
     pub(crate) base_id: i64,
 }
 
-/// Resolve a portal object's bound route against `ctx` into its `(columns, rows)`
-/// (#169). `columns` are the terminal table's user-field names; `rows` are the
-/// related records after the display-only filter (#112) and the declared sort.
+/// Resolve a portal object's bound route against `ctx` into its
+/// `(columns, field_ids, rows)` (#169/#170). `columns` are the terminal table's
+/// user-field names; `field_ids` are the backing field ids, parallel to the
+/// columns (so an editable row can emit `f<id>` inputs, #170); `rows` are the
+/// related records after the display-only filter (#112) and the declared sort,
+/// each carrying its inline-edit endpoint URLs.
 ///
-/// A blank/unresolvable binding yields `([], [])` so the frame renders its
+/// A blank/unresolvable binding yields `([], [], [])` so the frame renders its
 /// unresolved-placeholder branch; a route that resolves to zero related records
-/// yields `(columns, [])` so the header renders over a clean empty body.
-fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> (Vec<String>, Vec<PortalRowView>) {
-    let empty = (Vec::new(), Vec::new());
+/// yields `(columns, field_ids, [])` so the header renders over a clean empty body.
+fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> (Vec<String>, Vec<i64>, Vec<PortalRowView>) {
+    let empty = (Vec::new(), Vec::new(), Vec::new());
     let Some(binding) = o.binding.as_deref().filter(|b| !b.is_empty()) else {
         return empty;
     };
@@ -657,14 +681,24 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> (Vec<String>, Vec<PortalRo
         .unwrap_or_default();
     apply_portal_sort(o.props.as_deref(), &fields, &mut records);
     let columns = fields.iter().map(|f| f.name.clone()).collect();
+    let field_ids = fields.iter().map(|f| f.id).collect();
+    // Per-row inline-edit endpoints (#170), scoped to this portal object and the
+    // terminal row id: `/browse/:layout/:base/related/:obj/:rec[/open|/revert]`.
+    let base = format!(
+        "/browse/{}/{}/related/{}",
+        ctx.layout_id, ctx.base_id, o.id
+    );
     let rows = records
         .into_iter()
         .map(|r| PortalRowView {
+            open_url: format!("{base}/{}/open", r.id),
+            action_url: format!("{base}/{}", r.id),
+            revert_url: format!("{base}/{}/revert", r.id),
             id: r.id,
             cells: r.cells,
         })
         .collect();
-    (columns, rows)
+    (columns, field_ids, rows)
 }
 
 /// Parse a portal's optional display-only read filter (#112) from its `props`
@@ -746,9 +780,9 @@ fn prepared_object_view(
     portal: Option<&PortalCtx>,
 ) -> ObjectView {
     let o = &p.meta;
-    let (portal_columns, portal_rows) = match (o.kind.is_portal(), portal) {
+    let (portal_columns, portal_field_ids, portal_rows) = match (o.kind.is_portal(), portal) {
         (true, Some(ctx)) => resolve_portal(o, ctx),
-        _ => (Vec::new(), Vec::new()),
+        _ => (Vec::new(), Vec::new(), Vec::new()),
     };
     let (field, field_id, label, raw_value, field_kind) = resolve_object(o, by_name);
     let mut text_style = p.text_style.clone();
@@ -790,6 +824,7 @@ fn prepared_object_view(
         raw: raw_value,
         shape_style: p.shape_style.clone(),
         portal_columns,
+        portal_field_ids,
         portal_rows,
     }
 }
@@ -1039,6 +1074,7 @@ pub(crate) fn build_form_record(
     // Portals in the Form resolve their related rows against THIS record (#169).
     let portal = PortalCtx {
         sol,
+        layout_id,
         base_table: table.id,
         base_id: id,
     };
@@ -1101,6 +1137,7 @@ pub(crate) fn build_list(
         // Each row's portals anchor on that row's record (#169).
         let portal = PortalCtx {
             sol,
+            layout_id,
             base_table: table.id,
             base_id,
         };

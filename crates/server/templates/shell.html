@@ -670,6 +670,13 @@
         if (e.key === 'Enter') { e.preventDefault(); commit(); if (document.activeElement) document.activeElement.blur(); }
         else if (e.key === 'Escape') { e.preventDefault(); revert(); }
       });
+      // A portal row (#170) is a `.rec-edit` scope nested inside the base record's
+      // own `.rec-edit`. Stop its focus events from bubbling so editing a related
+      // row opens/commits ONLY that child record, never the enclosing base record.
+      if (el.dataset.related != null) {
+        el.addEventListener('focusin', function (e) { e.stopPropagation(); });
+        el.addEventListener('focusout', function (e) { e.stopPropagation(); });
+      }
     });
     // Issue 9: clicking a List row selects that record — navigate with `?rec=`.
     // A field box fills nearly the whole row, so most clicks land on its <input>;

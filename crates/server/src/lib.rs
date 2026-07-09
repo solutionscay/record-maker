@@ -44,7 +44,10 @@ use routes::layouts::{
     create_layout, delete_layout, list_layouts, rename_layout, reorder_layouts,
     set_layout_enabled,
 };
-use routes::records::{create_record, delete_record, open_record, revert_record, save_record};
+use routes::records::{
+    create_record, delete_record, open_record, open_related_record, revert_record,
+    revert_related_record, save_record, save_related_record,
+};
 use routes::schema::{
     create_schema_field, create_schema_relationship, create_schema_table, create_value_list,
     delete_schema_field, delete_schema_relationship, delete_schema_table, delete_value_list,
@@ -211,6 +214,20 @@ pub fn app(state: AppState) -> Router {
         .route("/browse/:layout/:id/open", post(open_record))
         .route("/browse/:layout/:id/revert", post(revert_record))
         .route("/browse/:layout/:id/delete", post(delete_record))
+        // Portal related-record inline edit (#170): open/commit/revert a CHILD
+        // record addressed by (base record, portal object, terminal row).
+        .route(
+            "/browse/:layout/:base/related/:obj/:rec",
+            post(save_related_record),
+        )
+        .route(
+            "/browse/:layout/:base/related/:obj/:rec/open",
+            post(open_related_record),
+        )
+        .route(
+            "/browse/:layout/:base/related/:obj/:rec/revert",
+            post(revert_related_record),
+        )
         .route(
             "/schema/tables",
             get(schema_tables).post(create_schema_table),

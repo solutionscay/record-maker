@@ -50,6 +50,7 @@ fn field_obj(field_id: i64, value: &str, read_only: bool) -> ObjectView {
         raw: value.to_string(),
         shape_style: String::new(),
         portal_columns: Vec::new(),
+        portal_field_ids: Vec::new(),
         portal_rows: Vec::new(),
     }
 }
@@ -161,6 +162,113 @@ fn portal_object_renders_related_rows_in_form_view() {
     let totals: Vec<&str> = portal.portal_rows.iter().map(|r| r.cells[0].as_str()).collect();
     assert!(totals.contains(&"42") && totals.contains(&"17"));
     assert!(portal.portal_rows.iter().all(|r| r.id > 0));
+}
+
+/// #170: a portal's related rows are editable in Browse. Each row renders as its
+/// own `.rec-edit` scope whose cells are `f<terminal_field_id>` inputs wired to
+/// the `/related/*` open/commit/revert endpoints, and POSTing a commit writes the
+/// CHILD record through `update_related_record` — the base-record edit lifecycle
+/// re-pointed at a terminal row.
+#[tokio::test]
+async fn portal_related_row_inline_edit_commits_child_record() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    let customers = sol
+        .create_table(
+            "Customers",
+            &[NewField { name: "Name".into(), kind: FieldKind::Text }],
+        )
+        .unwrap();
+    let invoices = sol
+        .create_table(
+            "Invoices",
+            &[
+                NewField { name: "Total".into(), kind: FieldKind::Number },
+                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+            ],
+        )
+        .unwrap();
+    let cust_pk = sol
+        .all_fields(customers)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name.eq_ignore_ascii_case("id"))
+        .map(|f| f.id)
+        .unwrap();
+    let fk = field_named(&sol, invoices, "CustomerId");
+    sol.create_relationship(&NewRelationship {
+        name: "customer".into(),
+        from_table: invoices,
+        to_table: customers,
+        from_field: fk,
+        to_field: cust_pk,
+    })
+    .unwrap()
+    .unwrap();
+    sol.set_relationship_referential(sol.relationships().unwrap()[0].id, true, true)
+        .unwrap();
+
+    let cust_tbl = sol.table_by_id(customers).unwrap().unwrap();
+    let name = sol
+        .field_by_id(customers, field_named(&sol, customers, "Name"))
+        .unwrap()
+        .unwrap();
+    let ada = sol.insert_record(&cust_tbl, &[(&name, "Ada".into())]).unwrap();
+    let route = sol.resolve_path(customers, "customer").unwrap();
+    let total_fid = field_named(&sol, invoices, "Total");
+    let total = sol.field_by_id(invoices, total_fid).unwrap().unwrap();
+    let inv = sol
+        .create_related_record(&route, ada, &[(&total, "42".into())], None)
+        .unwrap();
+
+    // Place a portal bound to the "customer" reverse route on the Form body.
+    let form = sol
+        .layouts_for_table(customers)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.view == "form")
+        .unwrap();
+    let body = body_part(&sol, form.id);
+    let portal_id = sol
+        .create_object(
+            form.id,
+            &record_maker_engine::NewObject {
+                part_id: body.id,
+                kind: ObjectKind::Portal,
+                x: 10,
+                y: 10,
+                w: 300,
+                h: 120,
+                binding: Some("customer".into()),
+                content: None,
+                props: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+    let state = AppState::new(sol);
+
+    // The rendered Form marks each related row as an editable `.rec-edit` scope
+    // wired to the terminal row's `/related/*` endpoints, with an `f<id>` input.
+    let (status, html) = get_body(state.clone(), &format!("/browse/{}?view=form", form.id)).await;
+    assert_eq!(status, StatusCode::OK);
+    let action = format!("/browse/{}/{}/related/{}/{}", form.id, ada, portal_id, inv);
+    assert!(html.contains(&format!(r#"data-action="{action}""#)), "row wired to related commit endpoint");
+    assert!(html.contains(&format!(r#"data-open="{action}/open""#)), "row wired to related open endpoint");
+    assert!(html.contains(&format!(r#"name="f{total_fid}""#)), "terminal field renders an editable input");
+
+    // Committing the row writes the CHILD record through the related layer.
+    let (status, _) = post_form_body(state.clone(), &action, &format!("f{total_fid}=99")).await;
+    assert_eq!(status, StatusCode::OK);
+    let saved = state
+        .sol
+        .lock()
+        .unwrap()
+        .read_related_records(&route, ada)
+        .unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].id, inv);
+    assert_eq!(saved[0].cells[0], "99", "commit updated the terminal record");
 }
 
 fn field_named(sol: &Solution, table_id: i64, name: &str) -> i64 {

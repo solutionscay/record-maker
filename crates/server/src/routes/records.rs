@@ -9,9 +9,24 @@ use axum::{
     response::{IntoResponse, Redirect},
 };
 
+use record_maker_engine::{ResolvedRoute, Solution};
+
 use crate::validate::{collect_values, validation_message};
 use crate::viewmodel::{clamp_rec, layout_table, view_param};
 use crate::AppState;
+
+/// Resolve a portal object's bound anchor route for edit actions (#170). Looks the
+/// portal object up on `layout_id`, reads its route path off the `binding` slot
+/// (the same slot a field binding rides), and resolves it against the layout's
+/// base table into a [`ResolvedRoute`] whose `terminal_table` is the child table a
+/// related edit writes to. `None` for an unknown layout/object or a blank /
+/// unresolvable binding — the caller maps that to a 4xx.
+fn portal_route(sol: &Solution, layout_id: i64, object_id: i64) -> Option<ResolvedRoute> {
+    let (_lay, table) = layout_table(sol, layout_id)?;
+    let obj = sol.object_by_id(layout_id, object_id).ok().flatten()?;
+    let binding = obj.binding.filter(|b| !b.is_empty())?;
+    sol.resolve_path(table.id, &binding).ok()
+}
 
 /// Create a record from the new-record form (inputs named `f<field_id>`).
 pub(crate) async fn create_record(
@@ -128,4 +143,80 @@ pub(crate) async fn delete_record(
         }
     }
     Redirect::to(&target)
+}
+
+// ---------------------------------------------------------------------------
+// Portal related-record inline edit (#170).
+//
+// A portal row is a `.rec-edit` scope whose open/commit/revert re-use the base
+// record lifecycle above, re-pointed at a CHILD (terminal) record through the
+// engine's related layer (`update_related_record`). The route is derived from the
+// portal object's bound anchor; the lock registry is the same `(table_id, id)`
+// HashSet, now keyed on the terminal table + terminal row. `base_id` rides the URL
+// for symmetry with create/delete (#171/#172) but an update needs only the route
+// and the terminal row id. Commits arrive via `sendBeacon` (no response is read),
+// so — like the base save — validation failures return the same 400 + message and
+// otherwise the write is unwrapped.
+// ---------------------------------------------------------------------------
+
+/// Open a related (child) record for editing: acquire the terminal row's lock.
+/// 200 once held; 404 for an unknown layout/portal or unresolvable route.
+pub(crate) async fn open_related_record(
+    State(st): State<AppState>,
+    Path((layout_id, _base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
+) -> impl IntoResponse {
+    let terminal_table = {
+        let sol = st.sol.lock().unwrap();
+        match portal_route(&sol, layout_id, object_id) {
+            Some(route) => route.terminal_table,
+            None => return (StatusCode::NOT_FOUND, "no such portal route"),
+        }
+    };
+    st.locks.lock().unwrap().insert((terminal_table, rec_id));
+    (StatusCode::OK, "open")
+}
+
+/// Commit a related (child) record: write the buffered terminal-field values via
+/// `update_related_record`, then release the lock. Mirrors [`save_record`], scoped
+/// to the child row. Inputs are the same `f<field_id>` contract, here over the
+/// TERMINAL table's fields.
+pub(crate) async fn save_related_record(
+    State(st): State<AppState>,
+    Path((layout_id, _base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let Some(route) = portal_route(&sol, layout_id, object_id) else {
+        return (StatusCode::NOT_FOUND, "no such portal route".to_string()).into_response();
+    };
+    let fields = match sol.fields(route.terminal_table) {
+        Ok(fields) => fields,
+        Err(_) => return (StatusCode::NOT_FOUND, "no such related table").into_response(),
+    };
+    let values = collect_values(&fields, &form);
+    let saved = sol.update_related_record(&route, rec_id, &values);
+    if let Some(msg) = validation_message(&saved) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+    saved.unwrap();
+    st.locks.lock().unwrap().remove(&(route.terminal_table, rec_id));
+    (StatusCode::OK, "saved").into_response()
+}
+
+/// Revert a related (child) record: release the terminal row's lock without
+/// writing (the Escape path). Mirrors [`revert_record`].
+pub(crate) async fn revert_related_record(
+    State(st): State<AppState>,
+    Path((layout_id, _base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
+) -> impl IntoResponse {
+    if let Some(route) = {
+        let sol = st.sol.lock().unwrap();
+        portal_route(&sol, layout_id, object_id)
+    } {
+        st.locks
+            .lock()
+            .unwrap()
+            .remove(&(route.terminal_table, rec_id));
+    }
+    (StatusCode::OK, "reverted")
 }

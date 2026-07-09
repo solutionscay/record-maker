@@ -58,6 +58,11 @@ export interface ObjectView {
    * — the renderer keys off it: present ⇒ render the related-row region, absent ⇒
    * the unresolved route frame. */
   portalColumns?: string[];
+  /** Portal inline edit (#170): the terminal field id backing each column, parallel
+   * to `portalColumns`. In an editable Browse view each cell renders as an
+   * `f<fieldId>` input off these ids so a per-row commit collects the right terminal
+   * fields. Omitted when empty. */
+  portalFieldIds?: number[];
   /** Portal (#169): one entry per related record (after the #112 filter + declared
    * sort), each carrying the terminal record id and its cell values in column
    * order. Omitted when empty. */
@@ -69,6 +74,12 @@ export interface ObjectView {
 export interface PortalRowView {
   id: number;
   cells: string[];
+  /** Portal inline edit (#170): the `/related/*` endpoints this row's `.rec-edit`
+   * scope posts to (open/commit/revert), precomputed server-side. Omitted on the
+   * design canvas / non-editable render. */
+  openUrl?: string;
+  actionUrl?: string;
+  revertUrl?: string;
 }
 
 /** A bindable field on the layout's primary table — the Field tool's dropdown

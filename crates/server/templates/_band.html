@@ -38,14 +38,27 @@
        (`data-related-id` addresses it for #170/#172). An empty column set means
        unresolved (design canvas / blank binding) — show the route frame instead;
        a resolved route with zero rows renders the header over a clean empty body.
-       The Svelte `Band` mirrors this branch-for-branch (the #44 parity contract). #}
+       In an editable view each related row is its own `.rec-edit` scope (#170):
+       focusing a cell opens+locks that CHILD record, blur/Enter commits it via
+       `update_related_record`, Escape reverts — the same open/commit/lock loop as
+       a base record, re-pointed at the terminal row's `/related/*` endpoints. The
+       row is marked `data-related` so the shared controller keeps its focus events
+       from bubbling to the enclosing base-record editor. Cells bind `f<field_id>`
+       off `portal_field_ids` (parallel to the columns) so the commit collects the
+       right terminal fields. The Svelte `Band` (display-only canvas) mirrors the
+       read-only row branch; the editable input subtree legitimately diverges, just
+       as an ordinary field's does (the #44 parity contract). #}
     <div class="fm-portal" data-route="{{ o.binding }}">
       {% if o.portal_columns.is_empty() %}
       <span class="fm-portal-tag">{{ o.binding }}</span>
       {% else %}
       <div class="fm-portal-head">{% for c in o.portal_columns %}<span class="fm-portal-cell">{{ c }}</span>{% endfor %}</div>
       {% for r in o.portal_rows %}
+      {% if editable %}
+      <div class="fm-portal-row rec-edit" data-related-id="{{ r.id }}" data-related="1" data-open="{{ r.open_url }}" data-action="{{ r.action_url }}" data-revert="{{ r.revert_url }}">{% for c in r.cells %}<input class="fm-portal-cell fm-finput" name="f{{ o.portal_field_ids[loop.index0] }}" value="{{ c }}" autocomplete="off">{% endfor %}</div>
+      {% else %}
       <div class="fm-portal-row" data-related-id="{{ r.id }}">{% for c in r.cells %}<span class="fm-portal-cell">{{ c }}</span>{% endfor %}</div>
+      {% endif %}
       {% endfor %}
       {% endif %}
     </div>

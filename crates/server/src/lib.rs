@@ -45,8 +45,9 @@ use routes::layouts::{
     set_layout_enabled,
 };
 use routes::records::{
-    create_record, create_related_record, delete_record, delete_related_record, open_record,
-    open_related_record, revert_record, revert_related_record, save_record, save_related_record,
+    create_record, create_related_record, delete_record, delete_related_record,
+    draft_save_record, draft_save_related_record, open_record, open_related_record, revert_record,
+    revert_related_record, save_record, save_related_record,
 };
 use routes::schema::{
     create_schema_field, create_schema_relationship, create_schema_table, create_value_list,
@@ -69,6 +70,13 @@ pub struct AppState {
     /// lifecycle is the point, and the registry is where multi-user lock
     /// enforcement will later hook in (#40).
     pub locks: Arc<Mutex<HashSet<(i64, i64)>>>,
+    /// Never-committed DRAFT records (#173), keyed `(table_id, record_id)`
+    /// parallel to [`AppState::locks`]. A New record is minted as a draft (its
+    /// required + unique gates deferred) and lives here until the record-EXIT
+    /// commit promotes it (removes it) or an Escape/revert deletes it. In-process
+    /// is enough today (single-user desktop); this is where the mint→commit
+    /// lifecycle diverges from a plain edit.
+    pub drafts: Arc<Mutex<HashSet<(i64, i64)>>>,
     /// Base directory the `/ui/*` handler serves the built editor bundle from.
     /// Configurable so the desktop shell (#16) can point it at its bundled
     /// resource dir; defaults to [`DEFAULT_UI_DIR`] for CLI/dev use.
@@ -82,6 +90,7 @@ impl AppState {
         AppState {
             sol: Arc::new(Mutex::new(sol)),
             locks: Arc::new(Mutex::new(HashSet::new())),
+            drafts: Arc::new(Mutex::new(HashSet::new())),
             ui_base_dir: DEFAULT_UI_DIR.to_string(),
         }
     }
@@ -94,6 +103,11 @@ impl AppState {
 
     fn lock_held(&self, key: (i64, i64)) -> bool {
         self.locks.lock().unwrap().contains(&key)
+    }
+
+    /// Whether `(table_id, record_id)` is a never-committed draft (#173).
+    pub fn is_draft(&self, key: (i64, i64)) -> bool {
+        self.drafts.lock().unwrap().contains(&key)
     }
 }
 
@@ -211,6 +225,11 @@ pub fn app(state: AppState) -> Router {
         .route("/", get(index))
         .route("/browse/:layout", get(browse).post(create_record))
         .route("/browse/:layout/:id", post(save_record))
+        // Draft per-field partial save (#173): while a record is a draft, a
+        // field focus-out persists progress WITHOUT the required/unique gate and
+        // without touching the lock/draft registries. The record-EXIT commit is
+        // still the plain `save_record` route above (full gate + promote).
+        .route("/browse/:layout/:id/draft", post(draft_save_record))
         .route("/browse/:layout/:id/open", post(open_record))
         .route("/browse/:layout/:id/revert", post(revert_record))
         .route("/browse/:layout/:id/delete", post(delete_record))
@@ -227,6 +246,12 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/browse/:layout/:base/related/:obj/:rec",
             post(save_related_record),
+        )
+        // Draft per-field partial save for a related (child) draft (#173),
+        // mirroring the base `/draft` route.
+        .route(
+            "/browse/:layout/:base/related/:obj/:rec/draft",
+            post(draft_save_related_record),
         )
         .route(
             "/browse/:layout/:base/related/:obj/:rec/open",

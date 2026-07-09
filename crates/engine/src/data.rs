@@ -109,7 +109,7 @@ impl Solution {
         self.insert_record_mode(table, values, ValidationMode::Draft)
     }
 
-    fn insert_record_mode(
+    pub(crate) fn insert_record_mode(
         &self,
         table: &TableMeta,
         values: &[(&FieldMeta, String)],
@@ -250,7 +250,7 @@ impl Solution {
         self.update_record_mode(table, id, values, ValidationMode::Draft)
     }
 
-    fn update_record_mode(
+    pub(crate) fn update_record_mode(
         &self,
         table: &TableMeta,
         id: i64,

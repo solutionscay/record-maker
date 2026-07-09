@@ -1375,66 +1375,66 @@ async fn record_commits_enforce_required_unique_range_and_value_list_constraints
         .find(|l| l.view == "form")
         .unwrap();
     let state = state_for(sol);
+    let layout = form_layout.id;
 
-    let (status, body) = post_form_body(
-        state.clone(),
-        &format!("/browse/{}", form_layout.id),
-        &format!("f{}=&f{}=5&f{}=Open", number.id, total.id, status_field.id),
-    )
-    .await;
+    // The physical id of the newest record (record_ids is ORDER BY id), so a test
+    // can address the draft a New just minted for its record-EXIT commit.
+    let last_id = |st: &AppState| -> i64 {
+        let sol = st.sol.lock().unwrap();
+        let table = sol.table_by_id(table_id).unwrap().unwrap();
+        *sol.record_ids(&table).unwrap().last().unwrap()
+    };
+    let create = |st: AppState, num: &str, tot: &str, stat: &str| {
+        let body = format!("f{}={num}&f{}={tot}&f{}={stat}", number.id, total.id, status_field.id);
+        async move { post_form_body(st, &format!("/browse/{layout}"), &body).await }
+    };
+    let commit = |st: AppState, id: i64, num: &str, tot: &str, stat: &str| {
+        let body = format!("f{}={num}&f{}={tot}&f{}={stat}", number.id, total.id, status_field.id);
+        async move { post_form_body(st, &format!("/browse/{layout}/{id}"), &body).await }
+    };
+
+    // New mints a DRAFT: a blank required (primary) field NO LONGER 400s at create
+    // time (#173) — required is deferred to the record-EXIT commit.
+    let (status, _) = create(state.clone(), "", "5", "Open").await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "blank required field mints a draft");
+    let draft_id = last_id(&state);
+    assert!(state.is_draft((table_id, draft_id)), "the new record is registered as a draft");
+
+    // But the record-EXIT commit runs the FULL gate: committing the still-blank
+    // required field is rejected and the record stays a draft (kept open).
+    let (status, body) = commit(state.clone(), draft_id, "", "5", "Open").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body.contains("Number"));
-    assert!(body.contains("required"));
+    assert!(body.contains("Number") && body.contains("required"));
+    assert!(state.is_draft((table_id, draft_id)), "a rejected commit keeps the draft open");
 
-    let (status, body) = post_form_body(
-        state.clone(),
-        &format!("/browse/{}", form_layout.id),
-        &format!(
-            "f{}=INV-1&f{}=15&f{}=Open",
-            number.id, total.id, status_field.id
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body.contains("Total"));
-    assert!(body.contains("at most 10"));
+    // Draft leniency stops at required + uniqueness: type/range/value-list on a
+    // PRESENT value are still enforced at mint time.
+    let (status, body) = create(state.clone(), "INV-1", "15", "Open").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "draft still enforces range");
+    assert!(body.contains("Total") && body.contains("at most 10"));
 
-    let (status, body) = post_form_body(
-        state.clone(),
-        &format!("/browse/{}", form_layout.id),
-        &format!(
-            "f{}=INV-1&f{}=5&f{}=Draft",
-            number.id, total.id, status_field.id
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body.contains("Status"));
-    assert!(body.contains("value list"));
+    let (status, body) = create(state.clone(), "INV-1", "5", "Draft").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "draft still enforces value-list membership");
+    assert!(body.contains("Status") && body.contains("value list"));
 
-    let (status, _body) = post_form_body(
-        state.clone(),
-        &format!("/browse/{}", form_layout.id),
-        &format!(
-            "f{}=INV-1&f{}=5&f{}=Open%0AClosed",
-            number.id, total.id, status_field.id
-        ),
-    )
-    .await;
+    // Uniqueness is deferred at mint, so the first INV-1 draft commits cleanly and
+    // is promoted out of the draft set.
+    let (status, _) = create(state.clone(), "INV-1", "5", "Open").await;
     assert_eq!(status, StatusCode::SEE_OTHER);
+    let first = last_id(&state);
+    let (status, _) = commit(state.clone(), first, "INV-1", "5", "Open").await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert!(!state.is_draft((table_id, first)), "a clean commit promotes the draft");
 
-    let (status, body) = post_form_body(
-        state,
-        &format!("/browse/{}", form_layout.id),
-        &format!(
-            "f{}=INV-1&f{}=6&f{}=Closed",
-            number.id, total.id, status_field.id
-        ),
-    )
-    .await;
+    // A second INV-1 mints as a draft too (duplicate tolerated transiently), but
+    // its record-EXIT commit trips the FULL unique gate and stays a draft.
+    let (status, _) = create(state.clone(), "INV-1", "5", "Open").await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "a duplicate unique value is allowed as a draft");
+    let dup = last_id(&state);
+    let (status, body) = commit(state.clone(), dup, "INV-1", "5", "Open").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body.contains("Number"));
-    assert!(body.contains("unique"));
+    assert!(body.contains("Number") && body.contains("unique"));
+    assert!(state.is_draft((table_id, dup)), "a rejected unique commit keeps the draft open");
 }
 
 #[tokio::test]
@@ -3571,4 +3571,255 @@ async fn browse_applies_value_format_in_form_list_and_table() {
             "{label} keeps the raw date in data-raw for safe commit"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// #173 — new-record draft lifecycle (server).
+// ---------------------------------------------------------------------------
+
+/// A one-table fixture with a `Number` primary field (⇒ required + unique) and a
+/// free-text `Note`, plus its Form layout id. The shared shape for the draft
+/// lifecycle tests below.
+fn draft_fixture() -> (AppState, i64, i64, i64, i64) {
+    let mut sol = Solution::open_in_memory().unwrap();
+    let table_id = sol
+        .create_table(
+            "Invoices",
+            &[
+                NewField { name: "Number".into(), kind: FieldKind::Text },
+                NewField { name: "Note".into(), kind: FieldKind::Text },
+            ],
+        )
+        .unwrap();
+    let number = field_named(&sol, table_id, "Number");
+    let note = field_named(&sol, table_id, "Note");
+    sol.update_field_options(table_id, number, r#"{"validation":{"primary":true}}"#)
+        .unwrap();
+    let layout = sol
+        .layouts_for_table(table_id)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.view == "form")
+        .unwrap()
+        .id;
+    (state_for(sol), table_id, layout, number, note)
+}
+
+fn newest_id(st: &AppState, table_id: i64) -> i64 {
+    let sol = st.sol.lock().unwrap();
+    let table = sol.table_by_id(table_id).unwrap().unwrap();
+    *sol.record_ids(&table).unwrap().last().unwrap()
+}
+
+fn record_count(st: &AppState, table_id: i64) -> usize {
+    let sol = st.sol.lock().unwrap();
+    let table = sol.table_by_id(table_id).unwrap().unwrap();
+    sol.record_ids(&table).unwrap().len()
+}
+
+fn read_note(st: &AppState, table_id: i64, note_fid: i64, id: i64) -> String {
+    let sol = st.sol.lock().unwrap();
+    let table = sol.table_by_id(table_id).unwrap().unwrap();
+    let note = sol.field_by_id(table_id, note_fid).unwrap().unwrap();
+    sol.get_record(&table, std::slice::from_ref(&note), id)
+        .unwrap()
+        .unwrap()[0]
+        .clone()
+}
+
+/// New mints a blank record even when the table has a required field, and the
+/// per-field `/draft` save persists partial progress WITHOUT the required/unique
+/// gate — the user can tab between fields with `Number` still blank.
+#[tokio::test]
+async fn new_mints_blank_draft_and_draft_saves_skip_required_and_unique() {
+    let (state, table_id, layout, number, note) = draft_fixture();
+
+    // The bug fix: a blank New on a required-field table no longer 400s; it mints
+    // a draft and redirects onto it.
+    let (status, _) =
+        post_form_body(state.clone(), &format!("/browse/{layout}"), &format!("f{number}=&f{note}=")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let id = newest_id(&state, table_id);
+    assert!(state.is_draft((table_id, id)), "New registers the record as a draft");
+
+    // A per-field draft save persists Note while Number is still blank — required
+    // is deferred, so this does NOT 400, and the record stays a draft (open).
+    let (status, _) = post_form_body(
+        state.clone(),
+        &format!("/browse/{layout}/{id}/draft"),
+        &format!("f{number}=&f{note}=hello"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "draft field-save does not enforce required");
+    assert_eq!(read_note(&state, table_id, note, id), "hello", "partial progress persisted");
+    assert!(state.is_draft((table_id, id)), "a draft save keeps the record a draft");
+}
+
+/// The record-EXIT commit is the FULL gate: it rejects an incomplete draft (kept
+/// open) and, once complete, promotes it out of the draft set.
+#[tokio::test]
+async fn record_exit_commit_rejects_then_promotes_a_draft() {
+    let (state, table_id, layout, number, note) = draft_fixture();
+    let (status, _) =
+        post_form_body(state.clone(), &format!("/browse/{layout}"), &format!("f{number}=&f{note}=")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let id = newest_id(&state, table_id);
+
+    // Commit with the required Number still blank → 400, draft stays open.
+    let (status, body) = post_form_body(
+        state.clone(),
+        &format!("/browse/{layout}/{id}"),
+        &format!("f{number}=&f{note}=x"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("Number") && body.contains("required"));
+    assert!(state.is_draft((table_id, id)), "a rejected commit keeps the draft open");
+
+    // Commit with Number filled → promoted (redirect + removed from the draft set).
+    let (status, _) = post_form_body(
+        state.clone(),
+        &format!("/browse/{layout}/{id}"),
+        &format!("f{number}=INV-1&f{note}=x"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert!(!state.is_draft((table_id, id)), "a complete commit promotes the draft");
+    assert_eq!(record_count(&state, table_id), 1);
+}
+
+/// Escape/revert on a never-committed draft DELETES the row; Escape on an
+/// existing (committed) record only releases its lock — the row survives.
+#[tokio::test]
+async fn revert_deletes_a_fresh_draft_but_spares_an_existing_record() {
+    let (state, table_id, layout, number, note) = draft_fixture();
+
+    // A fresh draft that Escape deletes outright.
+    let (status, _) =
+        post_form_body(state.clone(), &format!("/browse/{layout}"), &format!("f{number}=&f{note}=")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let draft = newest_id(&state, table_id);
+    assert_eq!(record_count(&state, table_id), 1);
+    let (status, _) =
+        post_form_body(state.clone(), &format!("/browse/{layout}/{draft}/revert"), "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(record_count(&state, table_id), 0, "reverting a fresh draft deletes it");
+    assert!(!state.is_draft((table_id, draft)), "the draft registration is cleared");
+
+    // A committed record that Escape must NOT delete.
+    let (status, _) =
+        post_form_body(state.clone(), &format!("/browse/{layout}"), &format!("f{number}=&f{note}=")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let existing = newest_id(&state, table_id);
+    let (status, _) = post_form_body(
+        state.clone(),
+        &format!("/browse/{layout}/{existing}"),
+        &format!("f{number}=INV-9&f{note}="),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert!(!state.is_draft((table_id, existing)));
+    let (status, _) =
+        post_form_body(state.clone(), &format!("/browse/{layout}/{existing}/revert"), "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(record_count(&state, table_id), 1, "reverting an existing record spares the row");
+}
+
+/// The portal blank create-row mints its related record as a DRAFT too (#171):
+/// create succeeds even with the terminal's required field blank, the terminal is
+/// registered as a draft, and reverting the child scope deletes it.
+#[tokio::test]
+async fn portal_create_new_mints_a_related_draft_and_reverts_it() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    let customers = sol
+        .create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+        .unwrap();
+    let invoices = sol
+        .create_table(
+            "Invoices",
+            &[
+                NewField { name: "Total".into(), kind: FieldKind::Number },
+                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+            ],
+        )
+        .unwrap();
+    let cust_pk = sol
+        .all_fields(customers)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name.eq_ignore_ascii_case("id"))
+        .map(|f| f.id)
+        .unwrap();
+    let fk = field_named(&sol, invoices, "CustomerId");
+    sol.create_relationship(&NewRelationship {
+        name: "customer".into(),
+        from_table: invoices,
+        to_table: customers,
+        from_field: fk,
+        to_field: cust_pk,
+    })
+    .unwrap()
+    .unwrap();
+    let rel_id = sol.relationships().unwrap()[0].id;
+    sol.set_relationship_referential(rel_id, true, false).unwrap();
+    // Make the terminal's Total REQUIRED: pre-#173 the portal create would 400.
+    let total_fid = field_named(&sol, invoices, "Total");
+    sol.update_field_options(invoices, total_fid, r#"{"validation":{"required":true}}"#)
+        .unwrap();
+
+    let cust_tbl = sol.table_by_id(customers).unwrap().unwrap();
+    let name = sol
+        .field_by_id(customers, field_named(&sol, customers, "Name"))
+        .unwrap()
+        .unwrap();
+    let ada = sol.insert_record(&cust_tbl, &[(&name, "Ada".into())]).unwrap();
+    let route = sol.resolve_path(customers, "customer").unwrap();
+
+    let form = sol
+        .layouts_for_table(customers)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.view == "form")
+        .unwrap();
+    let body = body_part(&sol, form.id);
+    let portal_id = sol
+        .create_object(
+            form.id,
+            &record_maker_engine::NewObject {
+                part_id: body.id,
+                kind: ObjectKind::Portal,
+                x: 10,
+                y: 10,
+                w: 300,
+                h: 120,
+                binding: Some("customer".into()),
+                content: None,
+                props: None,
+                parent_object_id: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id))
+        .unwrap()
+        .unwrap();
+
+    let state = AppState::new(sol);
+    let create_url = format!("/browse/{}/{}/related/{}", form.id, ada, portal_id);
+
+    // Blank required Total mints the terminal as a DRAFT (no 400).
+    let (status, _) = post_form_body(state.clone(), &create_url, &format!("f{total_fid}=")).await;
+    assert_eq!(status, StatusCode::OK, "portal create defers required, minting a draft");
+    let rows = state.sol.lock().unwrap().read_related_records(&route, ada).unwrap();
+    assert_eq!(rows.len(), 1, "the related draft exists");
+    let term_id = rows[0].id;
+    assert!(state.is_draft((invoices, term_id)), "the terminal is registered as a draft");
+
+    // Reverting the child scope deletes the fresh terminal draft.
+    let revert_url = format!("/browse/{}/{}/related/{}/{}/revert", form.id, ada, portal_id, term_id);
+    let (status, _) = post_form_body(state.clone(), &revert_url, "").await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = state.sol.lock().unwrap().read_related_records(&route, ada).unwrap();
+    assert_eq!(rows.len(), 0, "reverting a fresh related draft deletes it");
+    assert!(!state.is_draft((invoices, term_id)), "the terminal draft registration is cleared");
 }

@@ -30,6 +30,7 @@ use rusqlite::params_from_iter;
 use rusqlite::types::Value;
 
 use crate::model::{FieldMeta, RelationshipMeta, TableMeta};
+use crate::options::ValidationMode;
 use crate::path::{HopDirection, ResolvedRoute, RouteClass};
 use crate::Record;
 use crate::Solution;
@@ -277,6 +278,34 @@ impl Solution {
         values: &[(&FieldMeta, String)],
         associate_existing: Option<i64>,
     ) -> Result<i64> {
+        self.create_related_record_mode(route, base_id, values, associate_existing, ValidationMode::Full)
+    }
+
+    /// Mint a related record as a DRAFT (#173): identical to
+    /// [`Solution::create_related_record`] — same determined-stamp gate, FK
+    /// stamping and (for M:N) atomic join row — but the minted terminal (and any
+    /// rows written on its behalf) defer required + uniqueness to the record-EXIT
+    /// commit, so a portal's trailing blank row can create a related record even
+    /// when the terminal table has a required field. Returns the terminal id to
+    /// register in the caller's draft set.
+    pub fn create_related_record_draft(
+        &self,
+        route: &ResolvedRoute,
+        base_id: i64,
+        values: &[(&FieldMeta, String)],
+        associate_existing: Option<i64>,
+    ) -> Result<i64> {
+        self.create_related_record_mode(route, base_id, values, associate_existing, ValidationMode::Draft)
+    }
+
+    fn create_related_record_mode(
+        &self,
+        route: &ResolvedRoute,
+        base_id: i64,
+        values: &[(&FieldMeta, String)],
+        associate_existing: Option<i64>,
+        mode: ValidationMode,
+    ) -> Result<i64> {
         if route.hops.is_empty() {
             bail!(RelatedCrudError::NotARelatedRoute);
         }
@@ -308,7 +337,9 @@ impl Solution {
                                 )?;
                                 Ok(existing)
                             }
-                            None => self.insert_stamped(&child_table, values, &fk, base_key),
+                            None => {
+                                self.insert_stamped_mode(&child_table, values, &fk, base_key, mode)
+                            }
                         }
                     }
                     // base is the child; the parent (to_table) is the related
@@ -319,11 +350,16 @@ impl Solution {
                         let base_fk = self.related_field(rel.from_table, rel.from_field)?;
                         let parent_id = match associate_existing {
                             Some(existing) => existing,
-                            None => self.insert_record(&parent_table, values)?,
+                            None => self.insert_record_mode(&parent_table, values, mode)?,
                         };
                         let parent_key =
                             self.key_value(rel.to_table, rel.to_field, parent_id)?;
-                        self.update_record(&base_table, base_id, &[(&base_fk, parent_key)])?;
+                        self.update_record_mode(
+                            &base_table,
+                            base_id,
+                            &[(&base_fk, parent_key)],
+                            mode,
+                        )?;
                         Ok(parent_id)
                     }
                 }
@@ -346,13 +382,14 @@ impl Solution {
                 self.in_transaction(|s| {
                     let terminal_id = match associate_existing {
                         Some(existing) => existing,
-                        None => s.insert_record(&terminal_table, values)?,
+                        None => s.insert_record_mode(&terminal_table, values, mode)?,
                     };
                     let terminal_key =
                         s.key_value(terminal.to_table, terminal.to_field, terminal_id)?;
-                    s.insert_record(
+                    s.insert_record_mode(
                         &join_table,
                         &[(&join_fk_base, base_key), (&join_fk_term, terminal_key)],
+                        mode,
                     )?;
                     Ok(terminal_id)
                 })
@@ -450,13 +487,16 @@ impl Solution {
 
     // --- helpers -----------------------------------------------------------
 
-    /// Insert into `table` with `values`, overriding/stamping `fk` = `key`.
-    fn insert_stamped(
+    /// Insert into `table` with `values`, overriding/stamping `fk` = `key`,
+    /// running the given [`ValidationMode`] (Draft defers required + uniqueness
+    /// for the #173 draft mint; the FK stamp itself is unchanged).
+    fn insert_stamped_mode(
         &self,
         table: &TableMeta,
         values: &[(&FieldMeta, String)],
         fk: &FieldMeta,
         key: String,
+        mode: ValidationMode,
     ) -> Result<i64> {
         let mut vals: Vec<(&FieldMeta, String)> = values
             .iter()
@@ -464,7 +504,7 @@ impl Solution {
             .map(|(f, v)| (*f, v.clone()))
             .collect();
         vals.push((fk, key));
-        self.insert_record(table, &vals)
+        self.insert_record_mode(table, &vals, mode)
     }
 
     /// The current value of key field `field_id` on row `row_id` of `table_id`

@@ -40,13 +40,18 @@ pub(crate) async fn create_record(
         if let Some((lay, table)) = layout_table(&sol, layout_id) {
             let fields = sol.fields(table.id).unwrap();
             let values = collect_values(&fields, &form);
-            // Validation is enforced inside the engine's insert; a rejected
-            // write surfaces here as the same 400 + message as always.
-            let inserted = sol.insert_record(&table, &values);
+            // New mints a blank record as a DRAFT (#173): required + uniqueness
+            // are deferred to the record-EXIT commit, so a table with a required
+            // field can still mint a blank New record. Type/range/value-list on
+            // any present value are still enforced here and surface as the same
+            // 400 + message as always.
+            let inserted = sol.insert_record_draft(&table, &values);
             if let Some(msg) = validation_message(&inserted) {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
-            inserted.unwrap();
+            let new_id = inserted.unwrap();
+            // Register the draft so the eventual commit (or Escape) can find it.
+            st.drafts.lock().unwrap().insert((table.id, new_id));
             // Land on the new record: it sorts last by id (record_ids is ORDER BY id).
             let total = sol.record_ids(&table).unwrap().len();
             let view = view_param(&form, &lay.view);
@@ -56,9 +61,16 @@ pub(crate) async fn create_record(
     Redirect::to(&target).into_response()
 }
 
-/// Commit a record: write the buffered field values, release the edit lock, and
-/// stay on the record. The form carries `view`/`rec` so the redirect lands back
-/// on the same record in the same view (the "commit on exit" half of #40).
+/// Commit a record on record-EXIT: write the buffered field values under the
+/// FULL validation gate, release the edit lock, and stay on the record. This is
+/// the promotion point for a draft (#173): the required + uniqueness gates that
+/// New deferred fire here. On a validation failure the write returns 400 and the
+/// record stays a draft (and locked) — the client keeps the record open and
+/// surfaces the message. On success the record is promoted (removed from the
+/// draft set); for an existing (non-draft) record the remove is a harmless no-op,
+/// so its behavior is unchanged. The form carries `view`/`rec` so the redirect
+/// lands back on the same record in the same view (the "commit on exit" half of
+/// #40).
 pub(crate) async fn save_record(
     State(st): State<AppState>,
     Path((layout_id, id)): Path<(i64, i64)>,
@@ -70,20 +82,50 @@ pub(crate) async fn save_record(
         if let Some((lay, table)) = layout_table(&sol, layout_id) {
             let fields = sol.fields(table.id).unwrap();
             let values = collect_values(&fields, &form);
-            // Validation is enforced inside the engine's update; a rejected
-            // write surfaces here as the same 400 + message as always.
+            // FULL gate: a rejected write surfaces here as the same 400 + message
+            // as always AND leaves the draft registered/open (early return).
             let saved = sol.update_record(&table, id, &values);
             if let Some(msg) = validation_message(&saved) {
                 return (StatusCode::BAD_REQUEST, msg).into_response();
             }
             saved.unwrap();
             st.locks.lock().unwrap().remove(&(table.id, id));
+            // Promote: a committed draft is now an ordinary record. No-op for a
+            // record that was never a draft.
+            st.drafts.lock().unwrap().remove(&(table.id, id));
             let view = view_param(&form, &lay.view);
             let rec = clamp_rec(&form, sol.record_ids(&table).unwrap().len() as i64);
             target = format!("/browse/{layout_id}?view={view}&rec={rec}");
         }
     }
     Redirect::to(&target).into_response()
+}
+
+/// Persist partial progress on a DRAFT record (#173) without committing it: run
+/// the DRAFT gate (type/range/value-list on present values, but required +
+/// uniqueness deferred) so the user can tab between fields — including leaving a
+/// required field blank or transiently duplicating a unique value — before the
+/// record-EXIT commit ([`save_record`]) runs the full gate. Does NOT touch the
+/// lock or draft registries: the record stays open and a draft. A surviving rule
+/// (a bad present value) still returns 400 + message; otherwise 200. Wired to the
+/// per-field focus-out on a draft's inputs; existing records never post here.
+pub(crate) async fn draft_save_record(
+    State(st): State<AppState>,
+    Path((layout_id, id)): Path<(i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let Some((_lay, table)) = layout_table(&sol, layout_id) else {
+        return (StatusCode::NOT_FOUND, "no such layout".to_string()).into_response();
+    };
+    let fields = sol.fields(table.id).unwrap();
+    let values = collect_values(&fields, &form);
+    let saved = sol.update_record_draft(&table, id, &values);
+    if let Some(msg) = validation_message(&saved) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+    saved.unwrap();
+    (StatusCode::OK, "saved".to_string()).into_response()
 }
 
 /// Open a record for editing: acquire its in-process lock. 200 once held (the
@@ -104,17 +146,24 @@ pub(crate) async fn open_record(
     (StatusCode::OK, "open")
 }
 
-/// Revert: release the edit lock without writing (the "Escape" path of #40). The
-/// client discards its buffer and reloads to the committed values.
+/// Revert (the "Escape" path of #40). For an existing record this releases the
+/// edit lock without writing; the client discards its buffer and reloads to the
+/// committed values. For a never-committed DRAFT (#173) there is nothing to
+/// revert TO — the record only ever existed as this draft — so Escape DELETES it,
+/// then clears its draft + lock registrations. The client reloads onto a clamped
+/// neighbor.
 pub(crate) async fn revert_record(
     State(st): State<AppState>,
     Path((layout_id, id)): Path<(i64, i64)>,
 ) -> impl IntoResponse {
-    if let Some(table_id) = {
-        let sol = st.sol.lock().unwrap();
-        layout_table(&sol, layout_id).map(|(_lay, table)| table.id)
-    } {
-        st.locks.lock().unwrap().remove(&(table_id, id));
+    let sol = st.sol.lock().unwrap();
+    if let Some((_lay, table)) = layout_table(&sol, layout_id) {
+        if st.is_draft((table.id, id)) {
+            // A fresh draft has no prior committed state: discard the row itself.
+            sol.delete_record(&table, id).unwrap();
+            st.drafts.lock().unwrap().remove(&(table.id, id));
+        }
+        st.locks.lock().unwrap().remove(&(table.id, id));
     }
     (StatusCode::OK, "reverted")
 }
@@ -194,29 +243,65 @@ pub(crate) async fn save_related_record(
         Err(_) => return (StatusCode::NOT_FOUND, "no such related table").into_response(),
     };
     let values = collect_values(&fields, &form);
+    // Record-EXIT commit for the child scope: FULL gate. A 400 keeps the terminal
+    // draft registered/open; success releases the lock and promotes.
     let saved = sol.update_related_record(&route, rec_id, &values);
     if let Some(msg) = validation_message(&saved) {
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
     saved.unwrap();
     st.locks.lock().unwrap().remove(&(route.terminal_table, rec_id));
+    st.drafts.lock().unwrap().remove(&(route.terminal_table, rec_id));
     (StatusCode::OK, "saved").into_response()
 }
 
-/// Revert a related (child) record: release the terminal row's lock without
-/// writing (the Escape path). Mirrors [`revert_record`].
+/// Persist partial progress on a related (child) DRAFT (#173) without committing
+/// it: the DRAFT gate over the terminal table's fields, leaving the terminal
+/// row's lock + draft registration intact. Mirrors [`draft_save_record`] for a
+/// portal row.
+pub(crate) async fn draft_save_related_record(
+    State(st): State<AppState>,
+    Path((layout_id, _base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let sol = st.sol.lock().unwrap();
+    let Some(route) = portal_route(&sol, layout_id, object_id) else {
+        return (StatusCode::NOT_FOUND, "no such portal route".to_string()).into_response();
+    };
+    let table = match sol.table_by_id(route.terminal_table) {
+        Ok(Some(table)) => table,
+        _ => return (StatusCode::NOT_FOUND, "no such related table".to_string()).into_response(),
+    };
+    let fields = sol.fields(route.terminal_table).unwrap_or_default();
+    let values = collect_values(&fields, &form);
+    let saved = sol.update_record_draft(&table, rec_id, &values);
+    if let Some(msg) = validation_message(&saved) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+    saved.unwrap();
+    (StatusCode::OK, "saved".to_string()).into_response()
+}
+
+/// Revert a related (child) record (the Escape path). For an existing terminal
+/// row this releases its lock without writing. For a never-committed terminal
+/// DRAFT (#173) — the row the portal's blank create-row just minted — Escape
+/// DELETES the terminal record and clears its draft + lock registrations, the
+/// child-scope mirror of [`revert_record`]. (The common portal case is a direct
+/// to-many child, whose terminal row IS the record to discard.)
 pub(crate) async fn revert_related_record(
     State(st): State<AppState>,
     Path((layout_id, _base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
 ) -> impl IntoResponse {
-    if let Some(route) = {
-        let sol = st.sol.lock().unwrap();
-        portal_route(&sol, layout_id, object_id)
-    } {
-        st.locks
-            .lock()
-            .unwrap()
-            .remove(&(route.terminal_table, rec_id));
+    let sol = st.sol.lock().unwrap();
+    if let Some(route) = portal_route(&sol, layout_id, object_id) {
+        let key = (route.terminal_table, rec_id);
+        if st.is_draft(key) {
+            if let Ok(Some(table)) = sol.table_by_id(route.terminal_table) {
+                sol.delete_record(&table, rec_id).unwrap();
+            }
+            st.drafts.lock().unwrap().remove(&key);
+        }
+        st.locks.lock().unwrap().remove(&key);
     }
     (StatusCode::OK, "reverted")
 }
@@ -250,13 +335,23 @@ pub(crate) async fn create_related_record(
         }
     };
     let values = collect_values(&fields, &form);
-    let created = sol.create_related_record(&route, base_id, &values, None);
-    // Validation rejection surfaces as the same 400 + message as a base create.
+    // Mint the related record as a DRAFT (#173), the portal-row parallel of the
+    // base New: required + uniqueness on the terminal are deferred to the child
+    // scope's record-EXIT commit. Type/range/value-list on present values still
+    // apply and surface as the same 400 + message as a base create.
+    let created = sol.create_related_record_draft(&route, base_id, &values, None);
     if let Some(msg) = validation_message(&created) {
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
     match created {
-        Ok(_) => (StatusCode::OK, "created".to_string()).into_response(),
+        Ok(terminal_id) => {
+            // Register the terminal draft so its own commit/Escape can find it.
+            st.drafts
+                .lock()
+                .unwrap()
+                .insert((route.terminal_table, terminal_id));
+            (StatusCode::OK, "created".to_string()).into_response()
+        }
         // A refusal here means the affordance rendered despite the gate (or a
         // crafted request): map each RelatedCrudError to a precise status.
         Err(e) => {

@@ -32,6 +32,8 @@
     {% endif %}
     {% else if o.shape %}
     <div class="fm-shape fm-{{ o.kind }}" style="{{ o.shape_style }}"></div>
+    {% else if o.kind == "portal" %}
+    <div class="fm-portal" data-route="{{ o.binding }}"><span class="fm-portal-tag">{{ o.binding }}</span></div>
     {% else %}
     <span class="fm-text"{% if o.text_style != "" %} style="{{ o.text_style }}"{% endif %}>{{ o.content }}</span>
     {% endif %}

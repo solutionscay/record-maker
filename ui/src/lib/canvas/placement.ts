@@ -81,6 +81,11 @@ export class PlacementController {
       doc.setTool('pointer');
       return;
     }
+    if (tool === 'portal' && !doc.toolRoute) {
+      llog('place', 'portal tool armed but no route chosen — nothing to draw');
+      doc.setTool('pointer');
+      return;
+    }
     this.#drawing = {
       tool,
       fieldIds,
@@ -224,6 +229,9 @@ export class PlacementController {
           w: finalBox.w,
           h: finalBox.h,
           content: tool === 'text' ? 'Text' : null,
+          // A portal binds the armed relationship route on placement (#168);
+          // the server stores it in the object's `binding` slot.
+          binding: tool === 'portal' ? this.#ctx.doc.toolRoute : null,
           props: this.#placementProps(tool, drawing, finalBox),
           rec: this.#ctx.doc.rec,
         });

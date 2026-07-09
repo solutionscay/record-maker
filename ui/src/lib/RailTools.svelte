@@ -27,6 +27,7 @@
     { id: 'rect', label: 'Rectangle', icon: 'rect' },
     { id: 'ellipse', label: 'Ellipse', icon: 'ellipse' },
     { id: 'line', label: 'Line', icon: 'minus' },
+    { id: 'portal', label: 'Portal (related list)', icon: 'view-list' },
   ];
   const PART_KINDS: { id: string; label: string }[] = [
     { id: 'header', label: 'Header' },
@@ -38,8 +39,15 @@
 
   let fieldIds = $state<number[]>([]);
   let createLabel = $state(true);
+  let routePath = $state('');
   let partKind = $state('body');
   let busy = $state(false);
+
+  // Default the Portal route picker to the first declared route so arming the
+  // tool never starts on a blank selection when routes exist.
+  $effect(() => {
+    if (routePath === '' && doc.relatedRoutes.length > 0) routePath = doc.relatedRoutes[0].path;
+  });
 
   // A form is a single-record view: sub/grand summaries are report-only, so a form
   // layout offers header/body/footer only (Issue 3). List/Table keep all five.
@@ -96,11 +104,14 @@
   // ── Mode / create zones ─────────────────────────────────────────────────
 
   function pickTool(t: ToolKind): void {
-    llog('tool', 'rail: pick tool', { tool: t, fieldIds, createLabel });
-    doc.setTool(t, t === 'field' ? fieldIds : null, createLabel);
+    llog('tool', 'rail: pick tool', { tool: t, fieldIds, createLabel, routePath });
+    doc.setTool(t, t === 'field' ? fieldIds : null, createLabel, t === 'portal' ? routePath : '');
   }
   function onFieldChange(): void {
     if (doc.activeTool === 'field') doc.setTool('field', fieldIds, createLabel);
+  }
+  function onRouteChange(): void {
+    if (doc.activeTool === 'portal') doc.setTool('portal', null, true, routePath);
   }
   function onCreateLabelChange(): void {
     if (doc.activeTool === 'field') doc.setTool('field', fieldIds, createLabel);
@@ -186,6 +197,25 @@
       />
       <span>Create label</span>
     </label>
+  {/if}
+  {#if doc.activeTool === 'portal'}
+    <div class="le-control le-control-stack">
+      <span>Related list</span>
+      {#if doc.relatedRoutes.length === 0}
+        <span class="le-hint">No relationships defined for this table.</span>
+      {:else}
+        <select
+          class="le-select"
+          bind:value={routePath}
+          onchange={onRouteChange}
+          title="Relationship route the portal shows (FK-first — routes are declared, never created here)"
+        >
+          {#each doc.relatedRoutes as r (r.relationshipId)}
+            <option value={r.path}>{r.name} → {r.tableName}</option>
+          {/each}
+        </select>
+      {/if}
+    </div>
   {/if}
   <div class="le-combo-row">
     <select class="le-select" bind:value={partKind} title="Band kind">

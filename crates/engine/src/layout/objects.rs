@@ -339,8 +339,11 @@ impl Solution {
         Ok(n)
     }
 
-    /// Persist a field object's binding, scoped to its owning layout. The caller
-    /// supplies the already validated dot-path binding for the layout's table.
+    /// Persist a binding dot-path on a field or portal object, scoped to its
+    /// owning layout. The caller supplies the already validated dot-path: a
+    /// field-value path (`Table.Field`) for a `field`, or a declared relationship
+    /// route path for a `portal` (#168 — the anchor rides the same slot). The
+    /// kind guard keeps text/shape objects (which have no data binding) untouched.
     pub fn set_object_binding(
         &self,
         layout_id: i64,
@@ -349,7 +352,7 @@ impl Solution {
     ) -> Result<usize> {
         let n = self.app.execute(
             "UPDATE meta_object SET binding=?1 \
-             WHERE id=?2 AND kind='field' \
+             WHERE id=?2 AND kind IN ('field', 'portal') \
                AND part_id IN (SELECT id FROM meta_part WHERE layout_id=?3)",
             params![binding, object_id, layout_id],
         )?;

@@ -7,6 +7,7 @@
   import FieldSelect from '../FieldSelect.svelte';
   import {
     setObjectBinding as persistBinding,
+    setObjectBindingPath as persistBindingPath,
     setObjectContent as persistContent,
     setObjectReadOnly as persistReadOnly,
   } from '../persist';
@@ -46,6 +47,22 @@
     }
   }
 
+  async function setSelectedRoute(path: string): Promise<void> {
+    // Re-anchor a portal to another declared relationship route (#168). The path
+    // is written VERBATIM through the binding-path endpoint (FK-first: the route
+    // is picked from the layout's declared routes, never authored).
+    if (selected.kind !== 'portal' || !path) return;
+    llog('persist', 'inspector: set portal route', { id: selected.id, path });
+    try {
+      const view = await persistBindingPath(layoutId, selected.id, path, doc.rec);
+      doc.setProp(selected.id, 'binding', view.binding);
+      doc.refreshResolved(view);
+      doc.mark();
+    } catch (e) {
+      reportPersistError(doc, 'set portal route', e);
+    }
+  }
+
   async function setSelectedReadOnly(readOnly: boolean): Promise<void> {
     llog('persist', 'inspector: set read-only', { id: selected.id, readOnly });
     doc.setProp(selected.id, 'readOnly', readOnly);
@@ -61,7 +78,9 @@
 </script>
 
 <section class="insp-sec">
-  <span class="side-label">{selected.kind === 'text' ? 'Text' : 'Binding'}</span>
+  <span class="side-label"
+    >{selected.kind === 'text' ? 'Text' : selected.kind === 'portal' ? 'Related list' : 'Binding'}</span
+  >
   {#if selected.kind === 'field'}
     <FieldSelect
       fields={doc.fields}
@@ -84,6 +103,24 @@
         <span class="toggle-track"><span class="toggle-knob"></span></span>
       </label>
     </div>
+  {:else if selected.kind === 'portal'}
+    {#if doc.relatedRoutes.length === 0}
+      <span class="le-hint">No relationships defined for this table.</span>
+    {:else}
+      <select
+        class="ctl-input"
+        value={selected.binding}
+        title="Relationship route the portal shows"
+        onchange={(e) => setSelectedRoute(e.currentTarget.value)}
+      >
+        {#each doc.relatedRoutes as r (r.relationshipId)}
+          <option value={r.path}>{r.name} → {r.tableName}</option>
+        {/each}
+      </select>
+    {/if}
+    {#if selected.binding}
+      <span class="le-hint">{selected.binding}</span>
+    {/if}
   {:else}
     <input
       class="ctl-input"

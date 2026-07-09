@@ -38,6 +38,8 @@
         <span class="fm-fvalue" style={o.textStyle || null}>{fieldText(o)}</span>
       {:else if o.shape}
         <div class="fm-shape fm-{o.kind}" style={o.shapeStyle}></div>
+      {:else if o.kind === 'portal'}
+        <div class="fm-portal" data-route={o.binding}><span class="fm-portal-tag">{o.binding}</span></div>
       {:else}
         <span class="fm-text" style={o.textStyle || null}>{o.content}</span>
       {/if}

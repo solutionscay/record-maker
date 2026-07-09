@@ -89,7 +89,7 @@ export interface PartDoc {
  * fields — carried in [`EditorDoc.toolFieldIds`]. Part bands are added by a
  * separate rail action (they stack, not click-placed), so they are not a placement
  * tool. */
-export type ToolKind = 'pointer' | 'text' | 'line' | 'rect' | 'ellipse' | 'field';
+export type ToolKind = 'pointer' | 'text' | 'line' | 'rect' | 'ellipse' | 'field' | 'portal';
 
 /** The server-resolved render projection of an object (#44/#60): whether it is a
  * bound `field` (its field id, label, live value) or a `shape` (its derived
@@ -258,6 +258,10 @@ export class EditorDoc {
   #toolFieldIds = $state<number[]>([]);
   /** Whether a field placement should also create a static label object. */
   #toolCreateLabel = $state(true);
+  /** The relationship route path the `portal` tool binds on placement (#168) —
+   * a declared route dot-path from [`EditorDoc.relatedRoutes`], never authored.
+   * Empty for every other tool. */
+  #toolRoute = $state('');
   /** Canvas zoom factor (#62 Zoom zone): 1 = 100%. A viewport concern — applied as
    * a CSS scale on the stage, never persisted, never undoable. */
   #zoom = $state(1);
@@ -904,14 +908,27 @@ export class EditorDoc {
     return this.#toolCreateLabel;
   }
 
+  /** The route path the `portal` tool will bind on placement; empty otherwise. */
+  get toolRoute(): string {
+    return this.#toolRoute;
+  }
+
   /** Arm a Create-zone tool. `pointer` returns the canvas to select/drag; for the
-   * `field` tool, `fieldIds` are the fields a placement binds (ignored otherwise). */
-  setTool(tool: ToolKind, fieldIds: number | number[] | null = null, createLabel = true): void {
+   * `field` tool, `fieldIds` are the fields a placement binds; for the `portal`
+   * tool, `route` is the relationship-route dot-path a placement binds (#168).
+   * Both are ignored for other tools. */
+  setTool(
+    tool: ToolKind,
+    fieldIds: number | number[] | null = null,
+    createLabel = true,
+    route = '',
+  ): void {
     this.#activeTool = tool;
     const ids = tool === 'field' ? (Array.isArray(fieldIds) ? fieldIds.slice() : fieldIds === null ? [] : [fieldIds]) : [];
     this.#toolFieldIds = ids;
     this.#toolCreateLabel = tool === 'field' ? createLabel : true;
-    llog('tool', 'setTool', { tool, fieldIds: this.#toolFieldIds, createLabel: this.#toolCreateLabel });
+    this.#toolRoute = tool === 'portal' ? route : '';
+    llog('tool', 'setTool', { tool, fieldIds: this.#toolFieldIds, createLabel: this.#toolCreateLabel, route: this.#toolRoute });
   }
 
   // ── session: canvas zoom (#62 Zoom zone) ─────────────────────────────────

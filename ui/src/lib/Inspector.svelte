@@ -28,6 +28,7 @@
     rect: 'Rectangle',
     ellipse: 'Ellipse',
     line: 'Line',
+    portal: 'Portal',
   };
 
   let busy = $state(false);
@@ -83,7 +84,9 @@
         ? doc.fields.find((f) => f.id === selectedBindingFieldId)?.name || selected.binding || ''
         : selected.kind === 'text'
           ? 'Label'
-          : ''
+          : selected.kind === 'portal'
+            ? selected.binding || 'Related list'
+            : ''
       : selectedPart
         ? partKindLabel(selectedPart.kind)
         : '',
@@ -145,7 +148,7 @@
   {:else if selected}
     <ArrangeSection {doc} {layoutId} bind:busy />
     <div class="insp-div"></div>
-    {#if selected.kind === 'field' || selected.kind === 'text'}
+    {#if selected.kind === 'field' || selected.kind === 'text' || selected.kind === 'portal'}
       <ObjectSection {doc} {layoutId} {selected} fieldId={selectedBindingFieldId} />
     {/if}
 

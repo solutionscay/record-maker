@@ -23,6 +23,8 @@ export function defaultBox(tool: ToolKind): DefaultBox {
       return { w: 96, h: 24 };
     case 'field':
       return { w: 200, h: 24 };
+    case 'portal':
+      return { w: 280, h: 120 }; // a related-list container is a tall region (#168)
     default:
       return { w: 80, h: 60 }; // rect / ellipse
   }

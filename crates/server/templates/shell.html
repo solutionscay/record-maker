@@ -221,6 +221,14 @@
     .fm-line { position: absolute; left: 0; right: 0; top: 50%; height: 2px;
                transform: translateY(-50%); background: #888; border: 0; }
     .fm-obj:has(.fm-line) { overflow: visible; pointer-events: none; }
+    /* A portal (#168) — a related-list container binding a relationship route.
+       Its rows/records render in #169; today the frame shows the bound route so
+       the designer can place, size, and re-anchor it. */
+    .fm-portal { width: 100%; height: 100%; box-sizing: border-box; overflow: hidden;
+                 background: #fbfcfe; border: 1px dashed #b9c2cc; border-radius: 2px; }
+    .fm-portal-tag { display: inline-block; margin: .2rem; padding: .05rem .35rem;
+                     font-size: .68rem; color: #5b6675; background: #eef2f7;
+                     border-radius: 3px; white-space: nowrap; }
     /* Editable field input (Form view, open/commit editing #40). */
     .fm-edit { margin: 0; }
     /* Always transparent so the object's fill (set on the .fm-field box) shows

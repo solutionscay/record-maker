@@ -478,6 +478,14 @@ pub(crate) async fn create_design_object(
             ObjectKind::Text => Some(body.content.clone().unwrap_or_default()),
             _ => None,
         };
+        // A portal binds a declared relationship route: its dot-path rides the
+        // same `binding` slot a field uses (#168). FK-first — the path is only
+        // ever SELECTED from the layout's declared routes, never authored here.
+        let binding = if kind == ObjectKind::Portal {
+            body.binding.clone()
+        } else {
+            None
+        };
         let props = body.props.as_ref().map(|v| v.to_string());
         let new = NewObject {
             part_id: body.part_id,
@@ -486,7 +494,7 @@ pub(crate) async fn create_design_object(
             y: body.y,
             w: body.w,
             h: body.h,
-            binding: None,
+            binding,
             content,
             props,
         };

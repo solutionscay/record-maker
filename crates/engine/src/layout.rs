@@ -125,10 +125,14 @@ impl PartKind {
 ///   editable). A field's label is one of these, auto-spawned beside the field.
 /// - `Rect` / `Line` / `Ellipse` — **shapes**: no data, no text; drawn as a styled
 ///   box from `props` (fill / stroke / radius) at the object's geometry and `z`.
+/// - `Portal` — a **related-list container** (#168): binds a declared relationship
+///   route (its dot-path rides the `binding` slot, exactly like a field binding)
+///   and renders a repeating region of the related table's records (#169). FK-first
+///   — a portal only SELECTS an existing route, it never creates one.
 ///
 /// The closed set the canvas and engine agree on (#43/#60); stored as text in
-/// `meta_object.kind`. Further kinds (button / portal / image) join this enum when
-/// their rendering lands, so the set stays exactly what can render.
+/// `meta_object.kind`. Further kinds (button / image) join this enum when their
+/// rendering lands, so the set stays exactly what can render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectKind {
     Field,
@@ -136,6 +140,7 @@ pub enum ObjectKind {
     Rect,
     Line,
     Ellipse,
+    Portal,
 }
 
 impl ObjectKind {
@@ -146,6 +151,7 @@ impl ObjectKind {
             ObjectKind::Rect => "rect",
             ObjectKind::Line => "line",
             ObjectKind::Ellipse => "ellipse",
+            ObjectKind::Portal => "portal",
         }
     }
 
@@ -156,6 +162,7 @@ impl ObjectKind {
             "rect" => ObjectKind::Rect,
             "line" => ObjectKind::Line,
             "ellipse" => ObjectKind::Ellipse,
+            "portal" => ObjectKind::Portal,
             _ => return None,
         })
     }
@@ -163,6 +170,12 @@ impl ObjectKind {
     /// Whether this kind is data-bound (resolves a `binding` to a live value).
     pub fn is_field(self) -> bool {
         matches!(self, ObjectKind::Field)
+    }
+
+    /// Whether this kind is a portal — a related-list container binding a
+    /// relationship route (#168). Its `binding` holds the route dot-path.
+    pub fn is_portal(self) -> bool {
+        matches!(self, ObjectKind::Portal)
     }
 
     /// Whether this kind is a drawn shape (rendered from `props`, no data/text).
@@ -175,12 +188,13 @@ impl ObjectKind {
 
     /// Every object kind, in declaration order — for building the per-kind
     /// capability table the design model exports.
-    pub const ALL: [ObjectKind; 5] = [
+    pub const ALL: [ObjectKind; 6] = [
         ObjectKind::Field,
         ObjectKind::Text,
         ObjectKind::Rect,
         ObjectKind::Line,
         ObjectKind::Ellipse,
+        ObjectKind::Portal,
     ];
 
     /// The kind's capability record — see [`ObjectCapabilities`]. THE single
@@ -206,6 +220,18 @@ impl ObjectKind {
                 bindable: false,
             },
             ObjectKind::Rect | ObjectKind::Line | ObjectKind::Ellipse => ObjectCapabilities {
+                fill: true,
+                stroke: true,
+                text_format: false,
+                content_slot: false,
+                bindable: false,
+            },
+            // A portal frame accepts a fill/border (its container box) but has no
+            // text formatting or content slot. `bindable` is false: it does NOT
+            // resolve a field `binding` to a value — its `binding` slot instead
+            // carries a relationship route path, picked (never typed) from the
+            // layout's declared routes, so the field-binding UI must not target it.
+            ObjectKind::Portal => ObjectCapabilities {
                 fill: true,
                 stroke: true,
                 text_format: false,
@@ -847,12 +873,16 @@ mod tests {
             ObjectKind::Rect,
             ObjectKind::Line,
             ObjectKind::Ellipse,
+            ObjectKind::Portal,
         ] {
             assert_eq!(ObjectKind::parse(k.as_str()), Some(k));
         }
         assert!(PartKind::parse("nope").is_none());
         assert!(ObjectKind::parse("nope").is_none());
         assert!(ObjectKind::Field.is_field() && !ObjectKind::Text.is_field());
+        // A portal is neither a field nor a shape; it is its own container kind.
+        assert!(ObjectKind::Portal.is_portal() && !ObjectKind::Field.is_portal());
+        assert!(!ObjectKind::Portal.is_field() && !ObjectKind::Portal.is_shape());
         // Shapes are the drawn kinds; field/text are not shapes.
         assert!(
             ObjectKind::Rect.is_shape()

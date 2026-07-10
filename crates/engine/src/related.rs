@@ -172,6 +172,59 @@ impl Solution {
         self.read_related_records_filtered(route, base_id, &RelatedFilter::none())
     }
 
+    /// Resolve one field on a table *along* a related route for a concrete
+    /// terminal row (#180). `route_depth` is one-based: depth 1 is the first
+    /// relationship's result table, and `route.hops.len()` is the terminal table.
+    ///
+    /// For an intermediate table, choose the first route row whose remaining
+    /// suffix reaches `terminal_id`. Determined portal routes normally have one
+    /// such association row; first-by-id keeps duplicate associations stable.
+    pub fn related_route_field_value(
+        &self,
+        route: &ResolvedRoute,
+        base_id: i64,
+        terminal_id: i64,
+        route_depth: usize,
+        field_id: i64,
+    ) -> Result<String> {
+        if route_depth == 0 || route_depth > route.hops.len() {
+            bail!("route field depth is outside the related route");
+        }
+        let table_id = route.hops[route_depth - 1].result_table;
+        let table = self.related_table(table_id)?;
+        let field = self.related_field(table_id, field_id)?;
+        let prefix = ResolvedRoute {
+            base_table: route.base_table,
+            hops: route.hops[..route_depth].to_vec(),
+            terminal_table: table_id,
+            terminal_field: None,
+            class: RouteClass::Undetermined,
+        };
+        let candidates = self.route_record_set(&prefix, base_id)?;
+        let row_id = if route_depth == route.hops.len() {
+            candidates.into_iter().find(|id| *id == terminal_id)
+        } else {
+            let suffix = ResolvedRoute {
+                base_table: table_id,
+                hops: route.hops[route_depth..].to_vec(),
+                terminal_table: route.terminal_table,
+                terminal_field: None,
+                class: RouteClass::Undetermined,
+            };
+            candidates.into_iter().find(|candidate| {
+                self.route_record_set(&suffix, *candidate)
+                    .is_ok_and(|ids| ids.contains(&terminal_id))
+            })
+        };
+        let Some(row_id) = row_id else {
+            return Ok(String::new());
+        };
+        Ok(self
+            .get_record(&table, std::slice::from_ref(&field), row_id)?
+            .and_then(|cells| cells.into_iter().next())
+            .unwrap_or_default())
+    }
+
     /// **Read** the related record set for `route` from base record `base_id`,
     /// narrowed by a **display-only** `filter` (#112).
     ///

@@ -907,8 +907,8 @@ export class EditorDoc {
    * and to the OWNING portal when the sole selected object is one of its columns —
    * so placing a column (which then selects the column) keeps the scope for the
    * next column. Carries the portal object id (the child's `parentObjectId`), the
-   * declared route path, the related table's display name, and its user fields (the
-   * column picker's choices), all pulled from the matching declared route.
+   * declared route path, terminal display name, and fields from every traversed
+   * route table (the grouped column-picker choices).
    *
    * The whole selection must resolve to ONE portal: the portal itself, and/or its
    * own columns (each column's `parentObjectId` = that portal). This tolerates the

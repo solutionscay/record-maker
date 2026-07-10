@@ -23,8 +23,8 @@
   }: { doc: EditorDoc; layoutId?: string; selected: Readonly<ObjectDoc>; fieldId: number | null } = $props();
 
   // SELECT-TO-SCOPE (#168/#169): a selected field that is a portal COLUMN (it has a
-  // parent portal) binds to the portal's RELATED table, not the primary one — so its
-  // Binding row must offer the related fields and rebind ROUTE-RELATIVE. When the
+  // parent portal) binds to a table along the portal route, not the primary one —
+  // so its Binding row offers the grouped route fields and rebinds route-relative. When the
   // sole selection is this column, `doc.scopedPortal` resolves its owning portal
   // (route path + related fields). A plain top-level field leaves this null and
   // keeps the primary-table picker + fieldId rebind untouched.
@@ -37,9 +37,16 @@
   // binding's trailing field-name segment back to a related field id by name.
   let columnFieldId = $derived.by(() => {
     if (!columnPortal) return fieldId;
+    const exact = columnPortal.fields.find(
+      (f) => `${f.routePath ?? columnPortal.path}.${f.name}`.toLowerCase() === selected.binding.toLowerCase(),
+    );
+    if (exact) return exact.id;
     const seg = (selected.binding.split('.').pop() ?? '').toLowerCase();
     return columnPortal.fields.find((f) => f.name.toLowerCase() === seg)?.id ?? null;
   });
+  let columnField = $derived(
+    columnPortal ? (columnPortal.fields.find((field) => field.id === columnFieldId) ?? null) : null,
+  );
 
   async function setSelectedBinding(nextFieldId: number): Promise<void> {
     if (selected.kind !== 'field' || !Number.isFinite(nextFieldId)) return;
@@ -53,9 +60,14 @@
       if (scope) {
         const f = scope.fields.find((c) => c.id === nextFieldId);
         if (!f) return;
-        const path = `${scope.path}.${f.name}`;
+        const path = `${f.routePath ?? scope.path}.${f.name}`;
+        const readOnly = f.system || (f.routePath !== undefined && f.routePath !== scope.path);
         llog('persist', 'inspector: set portal column binding', { id: selected.id, path });
         view = await persistBindingPath(layoutId, selected.id, path, doc.rec);
+        if (selected.readOnly !== readOnly) {
+          view = await persistReadOnly(layoutId, selected.id, readOnly, doc.rec);
+          doc.setProp(selected.id, 'readOnly', readOnly);
+        }
       } else {
         llog('persist', 'inspector: set field binding', { id: selected.id, fieldId: nextFieldId });
         view = await persistBinding(layoutId, selected.id, nextFieldId, doc.rec);
@@ -126,8 +138,8 @@
     }
   });
 
-  /** The declared route the selected portal is bound to (its related-table fields
-   * feed the column picker), or null when the selection isn't a bound portal. */
+  /** The declared route the selected portal is bound to (all traversed-table
+   * fields feed the grouped column picker), or null when not a bound portal. */
   let portalRoute = $derived(
     selected.kind === 'portal'
       ? (doc.relatedRoutes.find((r) => r.path === selected.binding) ?? null)
@@ -154,7 +166,7 @@
   >
   {#if selected.kind === 'field'}
     {#if columnPortal}
-      <span class="le-hint">Column of {columnPortal.tableName} (portal)</span>
+      <span class="le-hint">Column from {columnField?.tableName ?? columnPortal.tableName}</span>
     {/if}
     <FieldSelect
       fields={columnPortal ? columnPortal.fields : doc.fields}

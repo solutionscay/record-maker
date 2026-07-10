@@ -422,6 +422,10 @@ pub(crate) struct ObjectView {
     /// edit). Empty for every non-portal object and for an unresolved portal frame.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) portal_field_ids: Vec<i64>,
+    /// Whether each authored portal column edits the terminal record. Fields on
+    /// intermediate route tables and system/read-only fields render as values.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) portal_column_editable: Vec<bool>,
     /// Portal (#169): one entry per related record in the resolved set, after the
     /// display-only filter (#112) and the declared sort. Each carries the terminal
     /// record id (stamped `data-related-id`) and its value for each AUTHORED column,
@@ -504,6 +508,17 @@ pub(crate) struct FieldChoice {
     /// The system primary key (#156) — the rail marks it distinctly and a field
     /// object bound to it is created read-only by default.
     pub(crate) system: bool,
+    /// Portal route authoring (#180): the table this related field belongs to.
+    /// Empty for ordinary base-table field choices.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) table_name: String,
+    /// The relationship prefix that reaches `table_name` from the portal base.
+    /// The server appends the field name to persist the column binding.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) route_path: String,
+    /// One-based depth of that table in the selected route. Zero for base fields.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub(crate) route_depth: i64,
 }
 
 /// A relationship route the layout can choose for related data. These are
@@ -526,10 +541,8 @@ pub(crate) struct RelatedRouteChoice {
     /// one hop; the first multi-hop portal slice carries the determined
     /// `to-many join -> to-one terminal` pair (#179).
     hops: Vec<RelatedRouteHopChoice>,
-    /// The terminal (related) table's user fields — the column picker's choices
-    /// when authoring inside a portal bound to this route (#168/#169). Same
-    /// `FieldChoice` shape the primary-table Field tool offers, so the rail can
-    /// retarget its picker to the related table without a second fetch.
+    /// All fields from every result table along the route, grouped client-side by
+    /// their `table_name`/`route_depth` metadata (#180).
     fields: Vec<FieldChoice>,
 }
 
@@ -547,9 +560,7 @@ pub(crate) struct RelatedRouteHopChoice {
     table_name: String,
 }
 
-/// Project a table's fields into the Field-tool `FieldChoice` list (#48/#62) —
-/// shared by the design model's primary-table fields and each related route's
-/// terminal-table fields (#168/#169), so both offer the identical shape.
+/// Project base-table fields into the Field-tool `FieldChoice` list (#48/#62).
 pub(crate) fn field_choices(fields: &[FieldMeta]) -> Vec<FieldChoice> {
     fields
         .iter()
@@ -558,6 +569,32 @@ pub(crate) fn field_choices(fields: &[FieldMeta]) -> Vec<FieldChoice> {
             name: f.name.clone(),
             kind: f.kind.as_str().to_string(),
             system: f.is_system(),
+            table_name: String::new(),
+            route_path: String::new(),
+            route_depth: 0,
+        })
+        .collect()
+}
+
+/// Route-scoped field choices for portal columns (#180). Unlike the base Field
+/// tool, these carry the relationship prefix and table label needed to group the
+/// picker and bind a column to an intermediate or terminal route table.
+fn related_field_choices(
+    fields: &[FieldMeta],
+    table_name: &str,
+    route_path: &str,
+    route_depth: i64,
+) -> Vec<FieldChoice> {
+    fields
+        .iter()
+        .map(|f| FieldChoice {
+            id: f.id,
+            name: f.name.clone(),
+            kind: f.kind.as_str().to_string(),
+            system: f.is_system(),
+            table_name: table_name.to_string(),
+            route_path: route_path.to_string(),
+            route_depth,
         })
         .collect()
 }
@@ -795,6 +832,7 @@ struct PortalResolved {
     resolved: bool,
     columns: Vec<String>,
     field_ids: Vec<i64>,
+    column_editable: Vec<bool>,
     /// #168: the repeating-row template height — the tallest authored column field
     /// object's `h`. Sizes the header + each value row so the fixed-height portal
     /// box shows a geometry-driven number of rows and scrolls the rest. `0` when the
@@ -838,20 +876,18 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         .read_related_records_filtered(&route, ctx.base_id, &filter)
         .unwrap_or_default();
     apply_portal_sort(o.props.as_deref(), &fields, &mut records);
-    // Columns are the portal's AUTHORED children (#168/#169, Model B): each child
-    // `field` object binds route-relative (`<route>.<field>`) to the terminal
-    // table. Resolve each column's binding's last segment to a terminal field —
-    // that gives the header name, the backing `field_id` (for `f<id>` edit inputs),
-    // and the cell INDEX to pull from every related record. A child that doesn't
-    // resolve to a terminal field (deleted/renamed) is skipped. The portal renders
-    // ONLY these columns — not the whole terminal table.
+    // Columns are the portal's AUTHORED child fields. A binding may stop at any
+    // table along the portal route (`join.Status`) or at the terminal table
+    // (`join.course.Title`). Resolve it as a prefix of the portal route; only a
+    // non-system terminal-table field remains editable (#180).
     let children = ctx
         .sol
         .object_children(ctx.layout_id, o.id)
         .unwrap_or_default();
     let mut columns: Vec<String> = Vec::new();
     let mut field_ids: Vec<i64> = Vec::new();
-    let mut col_idx: Vec<usize> = Vec::new();
+    let mut column_depths: Vec<usize> = Vec::new();
+    let mut column_editable: Vec<bool> = Vec::new();
     // The row-template height is the tallest authored column's `h` — the row slot
     // the designer sized. It drives both the header and each value row so the
     // fixed-height portal box shows `floor(body / row)` rows and scrolls the rest.
@@ -863,13 +899,42 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         let Some(binding) = child.binding.as_deref().filter(|b| !b.is_empty()) else {
             continue;
         };
-        let seg = binding.rsplit('.').next().unwrap_or(binding).to_lowercase();
-        if let Some(pos) = fields.iter().position(|f| f.name.to_lowercase() == seg) {
-            columns.push(fields[pos].name.clone());
-            field_ids.push(fields[pos].id);
-            col_idx.push(pos);
-            row_height = row_height.max(child.h);
+        let Ok(column_route) = ctx.sol.resolve_path(ctx.base_table, binding) else {
+            continue;
+        };
+        let Some(field_id) = column_route.terminal_field else {
+            continue;
+        };
+        let depth = column_route.hops.len();
+        if depth == 0 || depth > route.hops.len() {
+            continue;
         }
+        let is_prefix = column_route
+            .hops
+            .iter()
+            .zip(route.hops.iter())
+            .all(|(column, portal)| {
+                column.relationship_id == portal.relationship_id
+                    && column.direction == portal.direction
+            });
+        if !is_prefix {
+            continue;
+        }
+        let Some(field) = ctx
+            .sol
+            .field_by_id(column_route.terminal_table, field_id)
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        columns.push(field.name.clone());
+        field_ids.push(field.id);
+        column_depths.push(depth);
+        column_editable.push(
+            depth == route.hops.len() && !field.is_system() && !child.read_only,
+        );
+        row_height = row_height.max(child.h);
     }
     // The anchoring relationship (the route's first hop) carries the referential
     // flags (#110) that gate both the create-new and the delete/unlink affordances.
@@ -908,11 +973,17 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
             editable: row_editable,
             // Terminal-row draft-ness (#173), keyed on the terminal table.
             draft: ctx.drafts.contains(&(route.terminal_table, r.id)),
-            // Only the authored columns' values, in column order (parallel to
-            // `columns`/`field_ids`), not the whole terminal record.
-            cells: col_idx
+            // Resolve every authored prefix/terminal field against this concrete
+            // terminal row. Intermediate values select the association row whose
+            // remaining route suffix reaches `r.id` (#180).
+            cells: field_ids
                 .iter()
-                .map(|&i| r.cells.get(i).cloned().unwrap_or_default())
+                .zip(column_depths.iter())
+                .map(|(&field_id, &depth)| {
+                    ctx.sol
+                        .related_route_field_value(&route, ctx.base_id, r.id, depth, field_id)
+                        .unwrap_or_default()
+                })
                 .collect(),
         })
         .collect();
@@ -932,6 +1003,7 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         resolved: true,
         columns,
         field_ids,
+        column_editable,
         row_height,
         rows,
         can_create,
@@ -1026,6 +1098,7 @@ fn prepared_object_view(
         resolved: portal_resolved,
         columns: portal_columns,
         field_ids: portal_field_ids,
+        column_editable: portal_column_editable,
         row_height: portal_row_height,
         rows: portal_rows,
         can_create: portal_can_create,
@@ -1075,6 +1148,7 @@ fn prepared_object_view(
         portal_columns,
         portal_row_height,
         portal_field_ids,
+        portal_column_editable,
         portal_rows,
         portal_can_create,
         portal_create_url,
@@ -1160,7 +1234,12 @@ pub(crate) fn related_route_choices(sol: &Solution, table: &TableMeta) -> Vec<Re
             to_table: first.to_table,
             to_field: first.to_field,
             hops: vec![first_hop.clone()],
-            fields: field_choices(&sol.fields(terminal.id).unwrap_or_default()),
+            fields: related_field_choices(
+                &sol.all_fields(terminal.id).unwrap_or_default(),
+                &terminal.name,
+                &first.name,
+                1,
+            ),
         });
 
         // Phase 3 (#179): after a reverse/to-many anchor, offer a forward/to-one
@@ -1192,6 +1271,18 @@ pub(crate) fn related_route_choices(sol: &Solution, table: &TableMeta) -> Vec<Re
                 table_id: second_terminal.id,
                 table_name: second_terminal.name.clone(),
             };
+            let mut route_fields = related_field_choices(
+                &sol.all_fields(terminal.id).unwrap_or_default(),
+                &terminal.name,
+                &first.name,
+                1,
+            );
+            route_fields.extend(related_field_choices(
+                &sol.all_fields(second_terminal.id).unwrap_or_default(),
+                &second_terminal.name,
+                &path,
+                2,
+            ));
             routes.push(RelatedRouteChoice {
                 relationship_id: first.id,
                 name: format!("{} → {}", first.name, second.name),
@@ -1205,7 +1296,7 @@ pub(crate) fn related_route_choices(sol: &Solution, table: &TableMeta) -> Vec<Re
                 to_table: first.to_table,
                 to_field: first.to_field,
                 hops: vec![first_hop.clone(), second_hop],
-                fields: field_choices(&sol.fields(second_terminal.id).unwrap_or_default()),
+                fields: route_fields,
             });
         }
     }

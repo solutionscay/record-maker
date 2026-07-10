@@ -54,6 +54,7 @@ fn field_obj(field_id: i64, value: &str, read_only: bool) -> ObjectView {
         portal_columns: Vec::new(),
         portal_row_height: 0,
         portal_field_ids: Vec::new(),
+        portal_column_editable: Vec::new(),
         portal_rows: Vec::new(),
         portal_can_create: false,
         portal_create_url: String::new(),
@@ -207,6 +208,7 @@ async fn multi_hop_portal_round_trips_many_to_many_and_scopes_mutations() {
             &[
                 NewField { name: "StudentId".into(), kind: FieldKind::Text },
                 NewField { name: "CourseId".into(), kind: FieldKind::Text },
+                NewField { name: "Role".into(), kind: FieldKind::Text },
             ],
         )
         .unwrap();
@@ -243,6 +245,12 @@ async fn multi_hop_portal_round_trips_many_to_many_and_scopes_mutations() {
     let title = sol.field_by_id(courses, title_id).unwrap().unwrap();
     let math = sol.create_related_record(&route, ada, &[(&title, "Math".into())], None).unwrap();
     let private = sol.create_related_record(&route, grace, &[(&title, "Private".into())], None).unwrap();
+    let role_id = field_named(&sol, enrollments, "Role");
+    let role = sol.field_by_id(enrollments, role_id).unwrap().unwrap();
+    let enrollment_route = sol.resolve_path(students, "student_enrollment").unwrap();
+    let ada_enrollment = sol.route_record_set(&enrollment_route, ada).unwrap()[0];
+    let enrollment_table = sol.table_by_id(enrollments).unwrap().unwrap();
+    sol.update_record(&enrollment_table, ada_enrollment, &[(&role, "Lead".into())]).unwrap();
 
     let form = sol.layouts_for_table(students).unwrap().into_iter().find(|l| l.view == "form").unwrap();
     let body = body_part(&sol, form.id);
@@ -261,6 +269,19 @@ async fn multi_hop_portal_round_trips_many_to_many_and_scopes_mutations() {
     assert_eq!(authored["hops"].as_array().unwrap().len(), 2);
     assert_eq!(authored["hops"][0]["cardinality"], "toMany");
     assert_eq!(authored["hops"][1]["cardinality"], "toOne");
+    let route_fields = authored["fields"].as_array().unwrap();
+    assert!(route_fields.iter().any(|f| {
+        f["tableName"] == "Enrollments"
+            && f["name"] == "Role"
+            && f["routePath"] == "student_enrollment"
+            && f["routeDepth"] == 1
+    }));
+    assert!(route_fields.iter().any(|f| {
+        f["tableName"] == "Courses"
+            && f["name"] == "Title"
+            && f["routePath"] == "student_enrollment.enrollment_course"
+            && f["routeDepth"] == 2
+    }));
 
     // Place the multi-hop portal and one terminal Course column through the same
     // endpoints used by the route picker and drag-to-place UI.
@@ -287,11 +308,25 @@ async fn multi_hop_portal_round_trips_many_to_many_and_scopes_mutations() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "a portal route cannot terminate in a field");
-    let (status, column) = post_json_body(
+    let (status, join_column) = post_json_body(
         state.clone(),
         &format!("/design/{}/object", form.id),
         &serde_json::json!({
             "partId": body.id, "kind": "field", "x": 20, "y": 20,
+            "w": 120, "h": 24, "fieldId": role_id, "parentObjectId": portal_id
+        }).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{join_column}");
+    let join_column: serde_json::Value = serde_json::from_str(&join_column).unwrap();
+    let join_field = join_column.as_array().unwrap().iter().find(|o| o["kind"] == "field").unwrap();
+    assert_eq!(join_field["binding"], "student_enrollment.Role");
+    assert_eq!(join_field["readOnly"], true, "intermediate columns seed read-only");
+    let (status, column) = post_json_body(
+        state.clone(),
+        &format!("/design/{}/object", form.id),
+        &serde_json::json!({
+            "partId": body.id, "kind": "field", "x": 150, "y": 20,
             "w": 120, "h": 24, "fieldId": title_id, "parentObjectId": portal_id
         }).to_string(),
     )
@@ -300,6 +335,8 @@ async fn multi_hop_portal_round_trips_many_to_many_and_scopes_mutations() {
 
     let (status, html) = get_body(state.clone(), &format!("/browse/{}?view=form&rec=1", form.id)).await;
     assert_eq!(status, StatusCode::OK);
+    assert!(html.contains(r#"<span class="fm-portal-cell">Lead</span>"#), "join field renders read-only");
+    assert!(html.contains(&format!(r#"name="f{title_id}""#)), "terminal field stays editable");
     assert!(html.contains("Math"), "Ada sees her terminal Course");
     assert!(!html.contains("Private"), "another Student's Course does not leak into the portal");
 
@@ -3826,17 +3863,19 @@ async fn design_model_related_routes_are_derived_from_fk_constraints() {
     assert_eq!(orders_route["fromTable"], orders);
     assert_eq!(orders_route["toTable"], customers);
 
-    // #168/#169: each route ships its terminal (related) table's user fields, so
-    // the rail can retarget the column picker without a second fetch. The reverse
-    // orders route lands on Orders → its CustomerId/Total fields.
+    // #168/#169/#180: every table along a route ships all of its fields, including
+    // the read-only system id, plus the route prefix used for column binding.
     let orders_fields = orders_route["fields"].as_array().expect("route fields");
     let order_field_names: Vec<&str> = orders_fields
         .iter()
         .map(|f| f["name"].as_str().unwrap())
         .collect();
-    assert_eq!(order_field_names, vec!["CustomerId", "Total"]);
-    assert_eq!(orders_fields[0]["id"], order_fields[0].id);
+    assert_eq!(order_field_names, vec!["ID", "CustomerId", "Total"]);
+    assert_eq!(orders_fields[1]["id"], order_fields[0].id);
     assert!(orders_fields[0]["kind"].is_string(), "field kind rides too");
+    assert_eq!(orders_fields[0]["tableName"], "Orders");
+    assert_eq!(orders_fields[0]["routePath"], "orders");
+    assert_eq!(orders_fields[0]["routeDepth"], 1);
 
     let region_route = routes
         .iter()
@@ -3846,14 +3885,14 @@ async fn design_model_related_routes_are_derived_from_fk_constraints() {
     assert_eq!(region_route["cardinality"], "toOne");
     assert_eq!(region_route["tableId"], regions);
     assert_eq!(region_route["tableName"], "Regions");
-    // The forward region route lands on Regions → its single Name field.
+    // The forward region route lands on Regions → system ID + Name.
     let region_field_names: Vec<&str> = region_route["fields"]
         .as_array()
         .expect("route fields")
         .iter()
         .map(|f| f["name"].as_str().unwrap())
         .collect();
-    assert_eq!(region_field_names, vec!["Name"]);
+    assert_eq!(region_field_names, vec!["ID", "Name"]);
 
     assert!(
         routes.iter().all(|route| route["name"] != "payments"),

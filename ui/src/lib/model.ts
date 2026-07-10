@@ -80,6 +80,9 @@ export interface ObjectView {
    * `f<fieldId>` input off these ids so a per-row commit collects the right terminal
    * fields. Omitted when empty. */
   portalFieldIds?: number[];
+  /** Parallel editability flags: intermediate route fields and system/read-only
+   * terminal fields render as values instead of row editor inputs. */
+  portalColumnEditable?: boolean[];
   /** Portal (#169): one entry per related record (after the #112 filter + declared
    * sort), each carrying the terminal record id and its cell values in column
    * order. Omitted when empty. */
@@ -119,6 +122,11 @@ export interface FieldChoice {
   /** The system primary key (#156) — a field object bound to it is created
    * read-only by default. Mirrors the server. */
   system: boolean;
+  /** Portal route field metadata. Present only when this choice belongs to a
+   * table traversed by the selected portal route. */
+  tableName?: string;
+  routePath?: string;
+  routeDepth?: number;
 }
 
 /** A related-data route available from the layout's base table. Routes are
@@ -138,10 +146,8 @@ export interface RelatedRouteChoice {
   /** Relationship traversals in order. Direct routes have one; the determined
    * join-table route has a to-many hop followed by a to-one hop. */
   hops: RelatedRouteHopChoice[];
-  /** The terminal (related) table's user fields — the column picker's choices when
-   * authoring inside a portal bound to this route (#168/#169). Same `FieldChoice`
-   * shape the primary-table Field tool offers, so the rail retargets its picker to
-   * the related table without a second fetch. Mirrors the server. */
+  /** Fields from every result table along this route, annotated with their table,
+   * route prefix, and depth for grouped portal-column authoring. */
   fields: FieldChoice[];
 }
 

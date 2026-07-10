@@ -76,6 +76,7 @@
   let selectedField = $derived(fields.find((f) => f.id === value) ?? null);
   let selectedSet = $derived(new Set(values));
   let selectedFields = $derived(fields.filter((f) => selectedSet.has(f.id)));
+  let terminalRoutePath = $derived(fields.at(-1)?.routePath ?? '');
   let hasTriggerSelection = $derived(multi ? selectedFields.length > 0 : selectedField !== null);
   let triggerLabel = $derived(
     multi
@@ -84,15 +85,25 @@
           ? 'No fields'
           : placeholder
         : selectedFields.length === 1
-          ? selectedFields[0].name
+          ? selectedFields[0].tableName
+            ? `${selectedFields[0].tableName} · ${selectedFields[0].name}`
+            : selectedFields[0].name
           : `${selectedFields.length} fields`
-      : selectedField?.name ?? (isEmpty ? 'No fields' : placeholder),
+      : selectedField
+        ? selectedField.tableName
+          ? `${selectedField.tableName} · ${selectedField.name}`
+          : selectedField.name
+        : isEmpty
+          ? 'No fields'
+          : placeholder,
   );
   let triggerIcon = $derived(multi ? selectedFields[0]?.kind : selectedField?.kind);
   let filtered = $derived(
     query.trim() === ''
       ? fields.slice()
-      : fields.filter((f) => f.name.toLowerCase().includes(query.trim().toLowerCase())),
+      : fields.filter((f) =>
+          `${f.tableName ?? ''} ${f.name}`.toLowerCase().includes(query.trim().toLowerCase()),
+        ),
   );
 
   function openPopover(): void {
@@ -184,7 +195,7 @@
   });
   $effect(() => {
     if (!open || !listEl) return;
-    const el = listEl.children[highlight] as HTMLElement | undefined;
+    const el = listEl.querySelector<HTMLElement>(`[data-field-index="${highlight}"]`);
     el?.scrollIntoView({ block: 'nearest' });
   });
 
@@ -263,6 +274,12 @@
       />
       <ul class="fs-list" role="listbox" aria-multiselectable={multi || undefined} bind:this={listEl}>
         {#each filtered as f, i (f.id)}
+          {#if f.tableName && (i === 0 || filtered[i - 1]?.tableName !== f.tableName)}
+            <li class="fs-group" role="presentation">
+              <span>{f.tableName}</span>
+              {#if f.routeDepth}<span>{f.routeDepth} {f.routeDepth === 1 ? 'hop' : 'hops'}</span>{/if}
+            </li>
+          {/if}
           <!-- Combobox pattern: arrow/Enter/Escape are handled on the filter input
                above; the row click is a pointer affordance for the same commit. -->
           <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -272,6 +289,7 @@
             class="fs-opt"
             class:fs-active={i === highlight}
             class:fs-selected={multi && selectedSet.has(f.id)}
+            data-field-index={i}
             draggable={dragToPlace}
             onpointerenter={() => (highlight = i)}
             onclick={(e) => choose(f, e)}
@@ -282,8 +300,8 @@
             {/if}
             <Icon name={iconFor(f.kind)} />
             <span class="fs-name">{f.name}</span>
-            {#if f.system}
-              <span class="fs-badge" title="System primary key — placed read-only by default">Read-only</span>
+            {#if f.system || (f.routePath && f.routePath !== terminalRoutePath)}
+              <span class="fs-badge" title="This field is read-only in the portal">Read-only</span>
             {/if}
           </li>
         {/each}
@@ -397,6 +415,28 @@
     font-size: 13px;
     color: var(--rm-text);
     cursor: pointer;
+  }
+  .fs-group {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 8px 3px;
+    color: var(--rm-text-dim);
+    font-size: 10.5px;
+    font-weight: 650;
+    letter-spacing: .03em;
+    text-transform: uppercase;
+  }
+  .fs-group:not(:first-child) {
+    margin-top: 4px;
+    border-top: .5px solid var(--rm-border);
+  }
+  .fs-group span:last-child {
+    font-weight: 500;
+    letter-spacing: 0;
+    text-transform: none;
+    opacity: .75;
   }
   .fs-opt[draggable='true'] {
     cursor: grab;

@@ -462,12 +462,22 @@ pub(crate) async fn create_design_object(
                     let route = sol
                         .resolve_path(table.id, route_path)
                         .map_err(|e| AppError::bad_request(format!("bad portal route: {e}")))?;
-                    let related = sol.fields(route.terminal_table).unwrap();
-                    let f = related
-                        .iter()
-                        .find(|f| f.id == fid)
-                        .ok_or_else(|| AppError::bad_request("no such related field"))?;
-                    (format!("{route_path}.{}", f.name), f.name.clone(), f.is_system())
+                    let segments: Vec<&str> = route_path.split('.').collect();
+                    let mut picked = None;
+                    for (index, hop) in route.hops.iter().enumerate() {
+                        let route_fields = sol.all_fields(hop.result_table).unwrap_or_default();
+                        if let Some(field) = route_fields.into_iter().find(|f| f.id == fid) {
+                            let prefix = segments[..=index].join(".");
+                            let read_only = field.is_system() || index + 1 < route.hops.len();
+                            picked = Some((
+                                format!("{prefix}.{}", field.name),
+                                field.name,
+                                read_only,
+                            ));
+                            break;
+                        }
+                    }
+                    picked.ok_or_else(|| AppError::bad_request("no such related field"))?
                 }
                 None => {
                     let f = fields

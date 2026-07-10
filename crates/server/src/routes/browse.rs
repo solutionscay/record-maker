@@ -74,7 +74,9 @@ pub(crate) async fn browse(
 
     match view {
         "form" => {
-            let fields = sol.fields(table.id).unwrap();
+            // `all_fields`: a manually-placed system-PK field object (#156) must
+            // resolve its live value like any other placed field.
+            let fields = sol.all_fields(table.id).unwrap();
             let record = build_form_record(&sol, layout_id, &table, &fields, &ids, rec, &drafts);
             Html(
                 FormTemplate {
@@ -88,7 +90,8 @@ pub(crate) async fn browse(
             .into_response()
         }
         "list" => {
-            let fields = sol.fields(table.id).unwrap();
+            // `all_fields`: see the Form branch above.
+            let fields = sol.all_fields(table.id).unwrap();
             let (header, rows, footer) = build_list(&sol, layout_id, &table, &fields, rec, &drafts);
             Html(
                 ListTemplate {
@@ -104,7 +107,8 @@ pub(crate) async fn browse(
             .into_response()
         }
         _ => {
-            let fields = sol.fields(table.id).unwrap();
+            // `all_fields`: see the Form branch above.
+            let fields = sol.all_fields(table.id).unwrap();
             // One parts+objects fetch feeds both the placed columns and the bands.
             let parts = layout_parts_with_objects(&sol, layout_id);
             let columns = table_body_columns(&parts, &fields);
@@ -151,6 +155,7 @@ pub(crate) async fn browse(
                                     value,
                                     display,
                                     style,
+                                    read_only: c.read_only,
                                 }
                             })
                             .collect(),

@@ -1,9 +1,14 @@
 {# A layout part rendered as a band of absolutely-positioned objects. Shared by
    Form view (#25) and List view (#26) so both render objects identically.
    `editable` is the view-level flag; a per-object read-only flag (#43)
-   suppresses the input even in an editable view, so a read-only object always
-   renders its value as a non-editable span. `z` sets the CSS stacking order for
-   overlapping objects (the z-order contract).
+   suppresses the WRITABLE input even in an editable view, but a read-only
+   object in an editable view still renders a native `readonly` input (not a
+   plain span) so its value stays focusable/selectable/copyable — e.g. a
+   manually-placed primary key (#156) copied for a hand-built join — without
+   being part of the submitted form (no `name`, so `recordBody()` never
+   collects it; harmless regardless since the engine drops any system-field
+   write unconditionally, see `data.rs::update_record_mode`). `z` sets the CSS
+   stacking order for overlapping objects (the z-order contract).
 
    Each object renders by kind (#60): a `field` renders its VALUE only (an input
    in an editable view unless read-only) — its caption is a separate `text`
@@ -27,6 +32,8 @@
       {% when None %}
       <span class="fm-fvalue"{% if o.text_style != "" %} style="{{ o.text_style }}"{% endif %}>{{ o.value }}</span>
       {% endmatch %}
+    {% else if editable && o.read_only %}
+      <input class="fm-finput" value="{{ o.value }}" readonly autocomplete="off"{% if o.text_style != "" %} style="{{ o.text_style }}"{% endif %}>
     {% else %}
     <span class="fm-fvalue"{% if o.text_style != "" %} style="{{ o.text_style }}"{% endif %}>{{ o.value }}</span>
     {% endif %}

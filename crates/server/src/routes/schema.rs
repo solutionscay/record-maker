@@ -342,9 +342,9 @@ fn field_schema_view_for_table(sol: &Solution, table_id: i64, field: FieldMeta) 
 
 /// Align a field's reference constraint with the relationship store: parse the
 /// posted `reference` key, then hand the whole sync to the engine's single
-/// transactional [`Solution::set_field_reference`] op. The status mapping is
-/// unchanged: bad payload → 400, missing source/target field → 404 (with the
-/// engine error's message), anything else → 409.
+/// transactional [`Solution::set_field_reference`] op. Status mapping: bad
+/// payload → 400, missing source/target field → 404 (with the engine error's
+/// message), a duplicate relationship name → 409, anything else → 409.
 fn sync_reference_constraint(
     sol: &mut Solution,
     table_id: i64,
@@ -355,6 +355,9 @@ fn sync_reference_constraint(
         reference_constraint(options).map_err(|msg| (StatusCode::BAD_REQUEST, msg.to_string()))?;
     sol.set_field_reference(table_id, field_id, reference.as_ref())
         .map_err(|e| match e.downcast_ref::<FieldReferenceError>() {
+            // A name clash is a conflict, not a missing target — the source and
+            // target fields both exist, the chosen name is just already taken.
+            Some(FieldReferenceError::DuplicateName) => (StatusCode::CONFLICT, e.to_string()),
             Some(err) => (StatusCode::NOT_FOUND, err.to_string()),
             None => (StatusCode::CONFLICT, e.to_string()),
         })

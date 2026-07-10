@@ -1280,6 +1280,7 @@ mod tests {
                 200,
                 24,
                 None,
+                false,
             )
             .unwrap()
             .expect("created");
@@ -1292,12 +1293,13 @@ mod tests {
         assert_eq!(field.kind, ObjectKind::Field);
         assert_eq!(field.binding.as_deref(), Some("Customers.Email"));
         assert!(field.content.is_none());
+        assert!(!field.read_only, "not marked read-only by default");
         assert!(label.x < field.x, "label sits left of the value");
         assert_eq!((field.x, field.y), (120, 40));
 
         // Foreign part ⇒ no-op, nothing inserted.
         assert!(
-            s.create_field_object(lay.id, 999_999, "Customers.Name", "Name", 0, 0, 1, 1, None)
+            s.create_field_object(lay.id, 999_999, "Customers.Name", "Name", 0, 0, 1, 1, None, false)
                 .unwrap()
                 .is_none()
         );
@@ -1821,6 +1823,7 @@ mod tests {
                 100,
                 24,
                 Some(portal),
+                false,
             )
             .unwrap()
             .expect("pair");

@@ -976,6 +976,9 @@ impl Solution {
         if !self.relationship_refs_are_valid(rel)? {
             return Ok(None);
         }
+        if self.relationship_name_in_use(&rel.name, None)? {
+            bail!(FieldReferenceError::DuplicateName);
+        }
         let source = self
             .field_by_id(rel.from_table, rel.from_field)?
             .context("validated source field")?;
@@ -1024,6 +1027,9 @@ impl Solution {
         };
         if !self.relationship_refs_are_valid(rel)? {
             return Ok(None);
+        }
+        if self.relationship_name_in_use(&rel.name, Some(id))? {
+            bail!(FieldReferenceError::DuplicateName);
         }
         let source = self
             .field_by_id(rel.from_table, rel.from_field)?
@@ -1165,6 +1171,20 @@ impl Solution {
             && self.table_by_id(rel.to_table)?.is_some()
             && self.field_by_id(rel.from_table, rel.from_field)?.is_some()
             && self.field_by_id(rel.to_table, rel.to_field)?.is_some())
+    }
+
+    /// Whether another relationship already carries `name`, compared the same way
+    /// `Solution::match_hop` resolves a route segment (ASCII-case-insensitive).
+    /// `exclude_id` is the relationship being updated (skip its own row); pass
+    /// `None` when creating. Relationship names are the route tokens portals bind,
+    /// so they must be globally unique for a related-list route to resolve.
+    fn relationship_name_in_use(&self, name: &str, exclude_id: Option<i64>) -> Result<bool> {
+        Ok(self.app.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta_relationship \
+             WHERE name=?1 COLLATE NOCASE AND id != ?2)",
+            params![name, exclude_id.unwrap_or(0)],
+            |r| r.get(0),
+        )?)
     }
 
     fn rebuild_physical_table(&mut self, table: &TableMeta, fields: &[FieldMeta]) -> Result<()> {
@@ -1316,6 +1336,7 @@ fn value_ref_to_string(v: ValueRef<'_>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::options::FieldReferenceError;
     use crate::{
         Cardinality, FieldKind, NewField, NewRelationship, NewValueList, Solution, ValueListItem,
     };
@@ -1778,6 +1799,109 @@ mod tests {
         assert_eq!(renamed.name, "bill_to");
         assert_eq!(s.delete_relationship(rel.id).unwrap(), 1);
         assert!(s.relationships().unwrap().is_empty());
+    }
+
+    #[test]
+    fn relationship_names_are_globally_unique_case_insensitively() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let customers = s
+            .create_table(
+                "Customers",
+                &[NewField {
+                    name: "Id".into(),
+                    kind: FieldKind::Number,
+                }],
+            )
+            .unwrap();
+        let invoices = s
+            .create_table(
+                "Invoices",
+                &[
+                    NewField {
+                        name: "Customer Id".into(),
+                        kind: FieldKind::Number,
+                    },
+                    NewField {
+                        name: "Alt Id".into(),
+                        kind: FieldKind::Number,
+                    },
+                ],
+            )
+            .unwrap();
+        let customer_id = s.fields(customers).unwrap()[0].id;
+        let invoice_customer_id = s.fields(invoices).unwrap()[0].id;
+        let invoice_alt_id = s.fields(invoices).unwrap()[1].id;
+
+        let rel = s
+            .create_relationship(&NewRelationship {
+                name: "customer".into(),
+                from_table: invoices,
+                to_table: customers,
+                from_field: invoice_customer_id,
+                to_field: customer_id,
+            })
+            .unwrap()
+            .unwrap();
+
+        // A second relationship (valid refs) may NOT reuse the name, even in a
+        // different case — that's the comparison `match_hop` resolves routes with.
+        let err = s
+            .create_relationship(&NewRelationship {
+                name: "Customer".into(),
+                from_table: invoices,
+                to_table: customers,
+                from_field: invoice_alt_id,
+                to_field: customer_id,
+            })
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<FieldReferenceError>(),
+            Some(&FieldReferenceError::DuplicateName),
+        );
+
+        // A distinct name is fine; renaming it ONTO the taken name is rejected…
+        let other = s
+            .create_relationship(&NewRelationship {
+                name: "alt".into(),
+                from_table: invoices,
+                to_table: customers,
+                from_field: invoice_alt_id,
+                to_field: customer_id,
+            })
+            .unwrap()
+            .unwrap();
+        let err = s
+            .update_relationship(
+                other.id,
+                &NewRelationship {
+                    name: "customer".into(),
+                    from_table: invoices,
+                    to_table: customers,
+                    from_field: invoice_alt_id,
+                    to_field: customer_id,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<FieldReferenceError>(),
+            Some(&FieldReferenceError::DuplicateName),
+        );
+
+        // …but a relationship may keep (or re-case) its OWN name on update.
+        let renamed = s
+            .update_relationship(
+                rel.id,
+                &NewRelationship {
+                    name: "CUSTOMER".into(),
+                    from_table: invoices,
+                    to_table: customers,
+                    from_field: invoice_customer_id,
+                    to_field: customer_id,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.name, "CUSTOMER");
     }
 
     #[test]

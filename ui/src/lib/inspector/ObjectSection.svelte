@@ -90,6 +90,12 @@
     // is picked from the layout's declared routes, never authored).
     if (selected.kind !== 'portal' || !path) return;
     llog('persist', 'inspector: set portal route', { id: selected.id, path });
+    // Optimistic: update the reactive binding synchronously so the one-way
+    // <select value={selected.binding}> stays on the picked option. Without this,
+    // Svelte re-asserts the pre-round-trip binding on the change-event flush and
+    // the control snaps back to the portal's original route (mirrors the
+    // setProp-before-await order in PartSection / FormatSection).
+    doc.setProp(selected.id, 'binding', path);
     try {
       const view = await persistBindingPath(layoutId, selected.id, path, doc.rec);
       doc.setProp(selected.id, 'binding', view.binding);

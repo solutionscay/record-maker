@@ -498,6 +498,9 @@ pub(crate) struct FieldChoice {
     pub(crate) name: String,
     /// Logical field kind (`FieldKind::as_str`) so the rail can draw type icons (#79).
     pub(crate) kind: String,
+    /// The system primary key (#156) — the rail marks it distinctly and a field
+    /// object bound to it is created read-only by default.
+    pub(crate) system: bool,
 }
 
 /// A relationship route the layout can choose for related data. These are
@@ -533,6 +536,7 @@ pub(crate) fn field_choices(fields: &[FieldMeta]) -> Vec<FieldChoice> {
             id: f.id,
             name: f.name.clone(),
             kind: f.kind.as_str().to_string(),
+            system: f.is_system(),
         })
         .collect()
 }
@@ -568,6 +572,10 @@ pub(crate) struct FieldView {
 pub(crate) struct TableColumn {
     pub(crate) field: FieldMeta,
     pub(crate) format: Option<serde_json::Value>,
+    /// The placed object's per-object editability (#40/#43) — carried through so
+    /// Table Browse cells honor it exactly like Form/List (a manually-placed
+    /// primary key, #156, stays read-only in every view).
+    pub(crate) read_only: bool,
 }
 
 pub(crate) struct RecordView {
@@ -589,6 +597,10 @@ pub(crate) struct CellView {
     /// Inline CSS for the cell input (e.g. the value-dependent negative color);
     /// empty when unstyled.
     pub(crate) style: String,
+    /// The column's per-object editability (#40/#43) — a read-only cell renders
+    /// a native `readonly` input (focusable/selectable, not submitted) instead of
+    /// an editable one, matching Form/List.
+    pub(crate) read_only: bool,
 }
 
 #[derive(Template)]
@@ -1064,7 +1076,8 @@ pub(crate) fn object_view_for_rec(
     rec: Option<i64>,
 ) -> Option<ObjectView> {
     let (_lay, table) = layout_table(sol, layout_id)?;
-    let fields = sol.fields(table.id).ok()?;
+    // `all_fields`: the mutated object may be bound to the system primary key (#156).
+    let fields = sol.all_fields(table.id).ok()?;
     let by_name = by_name_for_rec(sol, &table, &fields, rec);
     let object = sol.object_by_id(layout_id, object_id).ok()??;
     Some(object_view(&object, &by_name))
@@ -1432,6 +1445,7 @@ pub(crate) fn table_body_columns(
                 TableColumn {
                     field: fields[idx].clone(),
                     format,
+                    read_only: o.read_only,
                 },
             ));
         }

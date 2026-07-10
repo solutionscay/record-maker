@@ -115,7 +115,9 @@ pub(crate) async fn design_model(
     let ids = sol.record_ids(&table).unwrap();
     let total = ids.len() as i64;
     let rec = clamp_rec(&q, total);
-    let fields = sol.fields(table.id).unwrap();
+    // `all_fields`: the Field tool's choices and any already-placed object's live
+    // value must both see the system primary key (#156), which `fields()` excludes.
+    let fields = sol.all_fields(table.id).unwrap();
     // Bind to the record at `rec` when present; otherwise render geometry blank.
     let by_name = if rec >= 1 {
         match sol
@@ -401,7 +403,10 @@ pub(crate) async fn create_design_object(
     };
     let kind =
         ObjectKind::parse(&body.kind).ok_or_else(|| AppError::bad_request("bad object kind"))?;
-    let fields = sol.fields(table.id).unwrap();
+    // `all_fields` (not `fields`, which excludes the system primary key #156):
+    // the PK must be resolvable both as a field-tool choice and as a live value
+    // for the object this handler just placed, now that it's manually placeable.
+    let fields = sol.all_fields(table.id).unwrap();
     let by_name = by_name_for_rec(&sol, &table, &fields, body.rec);
 
     let created_ids: Vec<i64> = if kind == ObjectKind::Field {
@@ -416,7 +421,13 @@ pub(crate) async fn create_design_object(
             // portal's route, pick the field from the terminal (related) table, and
             // build `<route>.<field>` (e.g. `sensors.reading`). Top-level placement
             // binds `<PrimaryTable>.<field>` against the layout's own fields.
-            let (binding, label) = match body.parent_object_id {
+            // `read_only` seeds from the source field's system-ness (#156) — a
+            // manually-placed primary key starts read-only; every other field
+            // starts editable, matching today's behavior. Portal columns bind the
+            // related table's `fields()` (system PK excluded), so that branch's
+            // `read_only` is always false — placing the PK as a portal column
+            // stays out of scope.
+            let (binding, label, read_only) = match body.parent_object_id {
                 Some(parent) => {
                     let portal = sol
                         .object_by_id(layout_id, parent)
@@ -435,14 +446,14 @@ pub(crate) async fn create_design_object(
                         .iter()
                         .find(|f| f.id == fid)
                         .ok_or_else(|| AppError::bad_request("no such related field"))?;
-                    (format!("{route_path}.{}", f.name), f.name.clone())
+                    (format!("{route_path}.{}", f.name), f.name.clone(), f.is_system())
                 }
                 None => {
                     let f = fields
                         .iter()
                         .find(|f| f.id == fid)
                         .ok_or_else(|| AppError::bad_request("no such field"))?;
-                    (format!("{}.{}", table.name, f.name), f.name.clone())
+                    (format!("{}.{}", table.name, f.name), f.name.clone(), f.is_system())
                 }
             };
             match sol
@@ -458,6 +469,7 @@ pub(crate) async fn create_design_object(
                     // Portal-column containment (#168/#169): a column created inside
                     // a portal is owned by it via the self-FK; top-level is `None`.
                     body.parent_object_id,
+                    read_only,
                 )
                 .unwrap()
             {
@@ -624,8 +636,9 @@ pub(crate) async fn restore_design_objects(
         RestoreResult::IdInUse => return Err(AppError::conflict("id in use")),
     }
     // The record projection is identical for every restored object, so resolve
-    // the fields + record once instead of per object.
-    let fields = sol.fields(table.id).unwrap();
+    // the fields + record once instead of per object. `all_fields`: a restored
+    // object may be a manually-placed system-PK field (#156).
+    let fields = sol.all_fields(table.id).unwrap();
     let by_name = by_name_for_rec(&sol, &table, &fields, body.rec);
     let mut views = Vec::with_capacity(restores.len());
     for o in &restores {
@@ -886,15 +899,22 @@ pub(crate) async fn update_object_binding(
     let Some((_lay, table)) = layout_table(&sol, layout_id) else {
         return Err(AppError::no_such_layout(layout_id));
     };
-    let fields = sol.fields(table.id).unwrap();
+    // `all_fields`: the rebind target may be the system primary key (#156).
+    let fields = sol.all_fields(table.id).unwrap();
     let field = fields
         .iter()
         .find(|f| f.id == body.field_id)
         .ok_or_else(|| AppError::bad_request("no such field"))?;
+    let is_system = field.is_system();
     let binding = format!("{}.{}", table.name, field.name);
     let updated = sol
         .set_object_binding(layout_id, object_id, &binding)
         .unwrap();
+    // Rebinding TO the primary key seeds read-only, same as placing it fresh
+    // (#156) — the inspector's toggle can still override it afterward.
+    if updated > 0 && is_system {
+        sol.set_object_read_only(layout_id, object_id, true).unwrap();
+    }
     updated_object_view(&sol, layout_id, object_id, body.rec, updated)
 }
 

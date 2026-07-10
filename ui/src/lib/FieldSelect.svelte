@@ -266,6 +266,9 @@
             {/if}
             <Icon name={iconFor(f.kind)} />
             <span class="fs-name">{f.name}</span>
+            {#if f.system}
+              <span class="fs-badge" title="System primary key — placed read-only by default">Read-only</span>
+            {/if}
           </li>
         {/each}
         {#if filtered.length === 0}
@@ -404,6 +407,17 @@
     font-size: 12px;
     color: var(--rm-text-dim);
     text-align: center;
+  }
+  .fs-badge {
+    flex: 0 0 auto;
+    margin-left: auto;
+    padding-left: 8px;
+    font-size: 11px;
+    color: var(--rm-text-dim);
+  }
+  .fs-active .fs-badge {
+    color: inherit;
+    opacity: 0.75;
   }
   .fs-actions {
     display: flex;

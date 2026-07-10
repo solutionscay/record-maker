@@ -154,10 +154,10 @@ fn portal_object_renders_related_rows_in_form_view() {
     // Author two columns (Total, then CustomerId) as the portal's child field
     // objects, bound ROUTE-RELATIVE to the terminal (Invoices) table (#168/#169).
     // Column order follows visual x, so Total (x=20) sorts before CustomerId (x=140).
-    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id))
+    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id), false)
         .unwrap()
         .unwrap();
-    sol.create_field_object(form.id, body.id, "customer.CustomerId", "CustomerId", 140, 20, 100, 24, Some(portal_id))
+    sol.create_field_object(form.id, body.id, "customer.CustomerId", "CustomerId", 140, 20, 100, 24, Some(portal_id), false)
         .unwrap()
         .unwrap();
 
@@ -402,7 +402,7 @@ async fn portal_related_row_inline_edit_commits_child_record() {
         .unwrap();
     // Author a Total column (child field, route-relative) so the portal renders a
     // Total cell per related row — the inline-edit input keys off it (#168/#170).
-    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id))
+    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id), false)
         .unwrap()
         .unwrap();
 
@@ -509,7 +509,7 @@ async fn portal_blank_row_creates_related_record_when_allowed() {
         .unwrap();
 
     // Author a Total column so the create/blank row carries an `f<id>` input for it.
-    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id))
+    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id), false)
         .unwrap()
         .unwrap();
 
@@ -640,7 +640,7 @@ async fn portal_row_deletes_related_record_when_allowed() {
 
     // Author a Total column so the portal renders a row (with a delete affordance)
     // per related record (#168/#172).
-    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id))
+    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id), false)
         .unwrap()
         .unwrap();
 
@@ -1230,6 +1230,76 @@ async fn schema_table_and_field_routes_manage_metadata_and_physical_table() {
     let mut expected = vec!["id".to_string()];
     expected.extend(sol.all_fields(table_id).unwrap().iter().map(|f| f.phys.clone()));
     assert_eq!(columns, expected);
+}
+
+#[tokio::test]
+async fn duplicate_relationship_name_reference_is_rejected_with_conflict() {
+    let state = state_for(Solution::open_in_memory().unwrap());
+
+    // Target table — its system PK is what the two references point at.
+    let (status, resp) =
+        post_json_body(state.clone(), "/schema/tables", r#"{"name":"Gateway","fields":[]}"#).await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    let gateway_id = serde_json::from_str::<serde_json::Value>(&resp).unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let (_, gw_fields) = get_body(state.clone(), &format!("/schema/tables/{gateway_id}/fields")).await;
+    let gw_pk = serde_json::from_str::<serde_json::Value>(&gw_fields).unwrap()[0]["id"]
+        .as_i64()
+        .unwrap();
+
+    // Source table with two FK fields that will both try to name their route the same.
+    let (status, resp) = post_json_body(
+        state.clone(),
+        "/schema/tables",
+        r#"{"name":"Sensor","fields":[{"name":"gw_a","kind":"text"},{"name":"gw_b","kind":"text"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    let sensor_id = serde_json::from_str::<serde_json::Value>(&resp).unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let (_, s_fields) = get_body(state.clone(), &format!("/schema/tables/{sensor_id}/fields")).await;
+    let s_fields: serde_json::Value = serde_json::from_str(&s_fields).unwrap();
+    let gw_a = s_fields[1]["id"].as_i64().unwrap();
+    let gw_b = s_fields[2]["id"].as_i64().unwrap();
+
+    let reference = |field: i64, name: &str| {
+        serde_json::json!({
+            "name": if field == gw_a { "gw_a" } else { "gw_b" },
+            "kind": "text",
+            "options": { "reference": { "name": name, "toTable": gateway_id, "toField": gw_pk } }
+        })
+        .to_string()
+    };
+
+    // First reference claims the name — OK.
+    let (status, resp) = post_json_body(
+        state.clone(),
+        &format!("/schema/tables/{sensor_id}/fields/{gw_a}"),
+        &reference(gw_a, "gateway_id"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+
+    // Second reference reusing the name (even in a different case) is a conflict,
+    // not a silent second route sharing the token.
+    let (status, resp) = post_json_body(
+        state.clone(),
+        &format!("/schema/tables/{sensor_id}/fields/{gw_b}"),
+        &reference(gw_b, "GATEWAY_ID"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{resp}");
+
+    // A distinct name for the second reference goes through.
+    let (status, resp) = post_json_body(
+        state.clone(),
+        &format!("/schema/tables/{sensor_id}/fields/{gw_b}"),
+        &reference(gw_b, "gateway_id_2"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
 }
 
 #[tokio::test]
@@ -3804,7 +3874,7 @@ async fn portal_create_new_mints_a_related_draft_and_reverts_it() {
         )
         .unwrap()
         .unwrap();
-    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id))
+    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id), false)
         .unwrap()
         .unwrap();
 

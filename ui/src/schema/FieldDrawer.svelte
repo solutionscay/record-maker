@@ -95,7 +95,6 @@
 
   $effect(() => {
     if (!referenceEnabled) return;
-    if (!referenceName.trim()) referenceName = (name.trim() || 'relationship').toLocaleLowerCase().replace(/\s+/g, '_');
     if (referenceToTable == null || !store.tableById(referenceToTable)) {
       referenceToTable = store.tables[0]?.id ?? null;
     }
@@ -103,7 +102,31 @@
     if (referenceToField == null || !fields.some((f) => f.id === referenceToField)) {
       referenceToField = fields[0]?.id ?? null;
     }
+    // Default to a globally-unique name (the source/target table pair), because a
+    // relationship name is the route token a portal binds and must be unique
+    // across the whole solution — the bare FK field name collides across tables.
+    if (!referenceName.trim()) referenceName = defaultReferenceName();
   });
+
+  const normName = (s: string): string => s.trim().toLocaleLowerCase().replace(/\s+/g, '_');
+
+  /** `<fromTable>_<toTable>`, suffixed `_2`, `_3`… until free (case-insensitively),
+   *  skipping this field's own relationship. Mirrors the store's uniqueness guard. */
+  function defaultReferenceName(): string {
+    const from = store.tableById(tableId)?.name ?? 'relationship';
+    const to = referenceToTable == null ? '' : (store.tableById(referenceToTable)?.name ?? '');
+    const base = normName(to ? `${from}_${to}` : from) || 'relationship';
+    const taken = (candidate: string): boolean =>
+      store.relationships.some(
+        (r) =>
+          !(r.fromTable === tableId && r.fromField === (field?.id ?? Number.NaN)) &&
+          normName(r.name) === candidate,
+      );
+    if (!taken(base)) return base;
+    for (let i = 2; ; i++) {
+      if (!taken(`${base}_${i}`)) return `${base}_${i}`;
+    }
+  }
 
   function optionsDraft(): FieldOptions {
     const validation: NonNullable<FieldOptions['validation']> = {};

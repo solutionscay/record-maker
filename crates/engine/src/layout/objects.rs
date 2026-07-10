@@ -246,6 +246,12 @@ impl Solution {
     /// `parent` (#168/#169, Model B) is the owning portal when the pair is placed
     /// as a portal COLUMN; both the label and the value become children of it, so
     /// they cascade-delete and move with the portal. `None` for a top-level place.
+    ///
+    /// `read_only` seeds the value object's per-object editability (#40/#43) at
+    /// creation — the caller sets it `true` when the bound field is the system
+    /// primary key (#156), so a manually-placed PK object starts read-only
+    /// instead of round-tripping through a separate toggle.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_field_object(
         &mut self,
         layout_id: i64,
@@ -257,6 +263,7 @@ impl Solution {
         w: i64,
         h: i64,
         parent: Option<i64>,
+        read_only: bool,
     ) -> Result<Option<(i64, i64)>> {
         if !self.part_in_layout(part_id, layout_id)? {
             return Ok(None);
@@ -275,9 +282,9 @@ impl Solution {
         )?;
         let label_id = tx.last_insert_rowid();
         tx.execute(
-            "INSERT INTO meta_object(part_id, kind, x, y, w, h, binding, parent_object_id) \
-             VALUES (?1, 'field', ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![part_id, x, y, w, h, binding, parent],
+            "INSERT INTO meta_object(part_id, kind, x, y, w, h, binding, parent_object_id, read_only) \
+             VALUES (?1, 'field', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![part_id, x, y, w, h, binding, parent, read_only],
         )?;
         let field_id = tx.last_insert_rowid();
         tx.commit()?;

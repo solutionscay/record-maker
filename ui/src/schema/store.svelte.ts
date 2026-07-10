@@ -269,15 +269,18 @@ export class SchemaStore {
       if (!this.tableById(reference.toTable) || !this.fieldById(reference.toTable, reference.toField)) {
         return this.fail('Choose a valid reference target.');
       }
+      // Relationship names are the route tokens portals bind, and the engine
+      // resolves a route by name from any base table (forward OR reverse), so a
+      // name must be unique across the WHOLE solution — not just this table.
+      // Exclude only this field's own relationship (matched by from side).
       if (
         this.relationships.some(
           (r) =>
-            r.fromTable === tableId &&
-            r.fromField !== (id ?? Number.NaN) &&
+            !(r.fromTable === tableId && r.fromField === (id ?? Number.NaN)) &&
             normName(r.name) === normName(reference.name),
         )
       ) {
-        return this.fail('Relationship names must be unique for the source table.');
+        return this.fail(`A relationship named "${reference.name.trim()}" already exists.`);
       }
     }
     if (id == null) {

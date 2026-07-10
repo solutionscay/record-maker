@@ -267,12 +267,21 @@
     .fm-finput { flex: 1 1 auto; min-width: 0; border: 0; outline: none; font: inherit;
                  padding: .15rem .45rem; color: inherit; background: transparent; }
     .fm-finput:focus { box-shadow: inset 0 0 0 1px #f0c36d; }
+    /* A read-only field (#43) rendered as a native `readonly` input so its value
+       stays selectable/copyable (e.g. a placed primary key, #156) — a faint tint
+       and a lighter focus ring than an editable field's distinguish "select to
+       copy" from "click to edit". */
+    .fm-finput:read-only { background: rgba(0,0,0,.025); cursor: text; }
+    .fm-finput:read-only:focus { box-shadow: inset 0 0 0 1px #c9ced6; }
     .rec-edit { margin: 0; }
     /* Editable Table cells (#40). */
     td:has(.cell-input) { padding: 0; }
     .cell-input { width: 100%; box-sizing: border-box; border: 1px solid transparent;
                   background: transparent; font: inherit; padding: .4rem .6rem; }
     .cell-input:focus { outline: none; border-color: #f0c36d; }
+    /* A read-only Table cell (#43) — same "select to copy" cue as .fm-finput. */
+    .cell-input:read-only { background: rgba(0,0,0,.025); cursor: text; }
+    .cell-input:read-only:focus { border-color: #c9ced6; }
     /* List view — the Body band repeated per record, scrolling between the fixed
        header/footer bands (#26); fills the pane like Form/Table. */
     .fm-list { position: relative; background: #fff; width: 100%; height: 100%;
@@ -716,8 +725,14 @@
         }).catch(function () {});
       }
       function revert() { if (!open) return; open = false; beacon(el.dataset.revert); location.reload(); }
-      el.addEventListener('focusin', openRec);
-      el.addEventListener('focusout', function (e) { if (!el.contains(e.relatedTarget)) commit(); });
+      // A `readonly` input (a read-only field rendered focusable/selectable for
+      // copying, e.g. a placed primary key #156) never changes, so its focus
+      // must not open/lock the record and its blur must not commit one.
+      function isReadonlyTarget(e) { return !!(e.target && e.target.readOnly); }
+      el.addEventListener('focusin', function (e) { if (!isReadonlyTarget(e)) openRec(); });
+      el.addEventListener('focusout', function (e) {
+        if (!isReadonlyTarget(e) && !el.contains(e.relatedTarget)) commit();
+      });
       el.addEventListener('keydown', function (e) {
         if (e.key === 'Enter') { e.preventDefault(); commit(); if (document.activeElement) document.activeElement.blur(); }
         else if (e.key === 'Escape') { e.preventDefault(); revert(); }

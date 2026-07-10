@@ -115,6 +115,9 @@ export interface FieldChoice {
   /** Logical field kind (`text`/`number`/`date`/`time`/`timestamp`/`bool`) so the
    * pickers can draw a type icon next to each name (#79). Mirrors the server. */
   kind: string;
+  /** The system primary key (#156) — a field object bound to it is created
+   * read-only by default. Mirrors the server. */
+  system: boolean;
 }
 
 /** A related-data route available from the layout's base table. Routes are

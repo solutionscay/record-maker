@@ -18,7 +18,11 @@
             data-revert="/browse/{{ layout_id }}/{{ r.id }}/revert"
             {% if r.draft %}data-draft="1" {% endif %}data-view="table" data-rec="{{ loop.index }}">
           {% for c in r.cells %}
+          {% if c.read_only %}
+          <td><input class="cell-input" value="{{ c.display }}" readonly{% if c.style != "" %} style="{{ c.style }}"{% endif %} autocomplete="off"></td>
+          {% else %}
           <td><input class="cell-input" name="f{{ c.field_id }}" value="{{ c.display }}"{% if c.display != c.value %} data-raw="{{ c.value }}" data-fmt="{{ c.display }}"{% endif %}{% if c.style != "" %} style="{{ c.style }}"{% endif %} autocomplete="off"></td>
+          {% endif %}
           {% endfor %}
         </tr>
         {% endfor %}

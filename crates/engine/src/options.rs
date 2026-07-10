@@ -40,6 +40,12 @@ impl FieldMeta {
     pub fn options_value(&self) -> Value {
         options_value(&self.options)
     }
+
+    /// Whether this is the table's system primary key (#156) — auto-minted,
+    /// value-immutable, undeletable. See [`FieldOptions::system`].
+    pub fn is_system(&self) -> bool {
+        FieldOptions::parse(&self.options).system
+    }
 }
 
 /// Typed view of a field's options bag — the keys the engine enforces.
@@ -372,6 +378,10 @@ pub enum FieldReferenceError {
     SourceFieldMissing,
     TargetFieldMissing,
     RelationshipFieldsMissing,
+    /// Another relationship already uses this name. Names are the route tokens
+    /// `Solution::resolve_path` matches on (case-insensitively), so they must be
+    /// globally unique or a portal/related-list route can't be addressed.
+    DuplicateName,
 }
 
 impl fmt::Display for FieldReferenceError {
@@ -380,6 +390,7 @@ impl fmt::Display for FieldReferenceError {
             Self::SourceFieldMissing => "source field not found",
             Self::TargetFieldMissing => "target field not found",
             Self::RelationshipFieldsMissing => "relationship fields not found",
+            Self::DuplicateName => "a relationship with this name already exists",
         })
     }
 }

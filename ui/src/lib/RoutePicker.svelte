@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { RelatedRouteChoice, RelatedRouteHopChoice } from './model';
+  import type { RelatedRouteChoice } from './model';
 
   let {
     routes,
@@ -13,93 +13,48 @@
     class?: string;
   } = $props();
 
-  /** A relationship id alone is not directional for a self-reference, so the
-   * picker keys a hop by both pieces even though #179 currently authors the
-   * ordinary reverse-then-forward join-table shape. */
-  function hopKey(h: RelatedRouteHopChoice): string {
-    return `${h.relationshipId}:${h.direction}`;
+  function hopLabel(count: number): string {
+    return `${count} ${count === 1 ? 'hop' : 'hops'}`;
   }
 
-  function sameHop(a: RelatedRouteHopChoice, b: RelatedRouteHopChoice): boolean {
-    return hopKey(a) === hopKey(b);
+  function routePath(route: RelatedRouteChoice): string {
+    return route.hops.map((hop) => hop.name).join(' → ');
   }
 
-  function uniqueHops(hops: RelatedRouteHopChoice[]): RelatedRouteHopChoice[] {
-    const seen = new Set<string>();
-    return hops.filter((h) => {
-      const key = hopKey(h);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+  function optionLabel(route: RelatedRouteChoice): string {
+    return `${route.tableName} — ${hopLabel(route.hops.length)} · ${routePath(route)}`;
   }
 
-  let selectedRoute = $derived(routes.find((r) => r.path === value) ?? null);
-  let firstOptions = $derived(uniqueHops(routes.flatMap((r) => r.hops.slice(0, 1))));
-  let selectedFirst = $derived(selectedRoute?.hops[0] ?? firstOptions[0] ?? null);
-  let secondOptions = $derived(
-    selectedFirst
-      ? uniqueHops(
-          routes
-            .filter((r) => r.hops.length > 1 && sameHop(r.hops[0], selectedFirst!))
-            .map((r) => r.hops[1]),
-        )
-      : [],
+  let orderedRoutes = $derived(
+    routes
+      .slice()
+      .sort(
+        (a, b) =>
+          a.hops.length - b.hops.length ||
+          a.tableName.localeCompare(b.tableName) ||
+          a.path.localeCompare(b.path),
+      ),
   );
-
-  function chooseFirst(key: string): void {
-    const route = routes.find((r) => r.hops.length === 1 && hopKey(r.hops[0]) === key);
-    if (route) onchange?.(route.path);
-  }
-
-  function chooseSecond(key: string): void {
-    if (!selectedFirst) return;
-    if (key === '') {
-      chooseFirst(hopKey(selectedFirst));
-      return;
-    }
-    const route = routes.find(
-      (r) =>
-        r.hops.length === 2 &&
-        sameHop(r.hops[0], selectedFirst!) &&
-        hopKey(r.hops[1]) === key,
-    );
-    if (route) onchange?.(route.path);
-  }
+  let selectedRoute = $derived(routes.find((r) => r.path === value) ?? null);
 </script>
 
 <div class="route-picker {className}">
   <select
-    class="ctl-input route-hop"
-    value={selectedFirst ? hopKey(selectedFirst) : ''}
-    title="First relationship hop"
-    onchange={(e) => chooseFirst(e.currentTarget.value)}
+    class="ctl-input route-select"
+    value={value}
+    title="Related table shown by this portal"
+    aria-label="Related table"
+    onchange={(e) => onchange?.(e.currentTarget.value)}
   >
-    {#each firstOptions as hop (hopKey(hop))}
-      <option value={hopKey(hop)}>
-        {hop.name} ({hop.cardinality === 'toMany' ? '∞' : '1'}) → {hop.tableName}
-      </option>
+    {#each orderedRoutes as route (route.path)}
+      <option value={route.path}>{optionLabel(route)}</option>
     {/each}
   </select>
 
-  {#if selectedFirst && secondOptions.length > 0}
-    <select
-      class="ctl-input route-hop"
-      value={selectedRoute?.hops[1] ? hopKey(selectedRoute.hops[1]) : ''}
-      title="Optional second relationship hop"
-      onchange={(e) => chooseSecond(e.currentTarget.value)}
-    >
-      <option value="">Use {selectedFirst.tableName}</option>
-      {#each secondOptions as hop (hopKey(hop))}
-        <option value={hopKey(hop)}>
-          {hop.name} ({hop.cardinality === 'toMany' ? '∞' : '1'}) → {hop.tableName}
-        </option>
-      {/each}
-    </select>
-  {/if}
-
   {#if selectedRoute}
-    <span class="le-hint route-path">{selectedRoute.path}</span>
+    <span class="le-hint route-path">
+      {hopLabel(selectedRoute.hops.length)} via {routePath(selectedRoute)}
+    </span>
   {/if}
 </div>
 
@@ -110,7 +65,7 @@
     gap: 6px;
     min-width: 0;
   }
-  .route-hop {
+  .route-select {
     width: 100%;
   }
   .route-path {

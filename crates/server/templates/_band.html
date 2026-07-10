@@ -63,7 +63,7 @@
       {% else %}
       <div class="fm-portal-head">{% for c in o.portal_columns %}<span class="fm-portal-cell">{{ c }}</span>{% endfor %}</div>
       {% for r in o.portal_rows %}
-      {% if editable %}
+      {% if editable && r.editable %}
       {# Delete/unlink affordance (#172): a per-row button removes the NEAREST
          related record via `delete_related_record` (to-many deletes the child;
          forward to-one / M:N unlinks, the terminal survives). Rendered only when

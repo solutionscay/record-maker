@@ -24,8 +24,28 @@ use crate::AppState;
 fn portal_route(sol: &Solution, layout_id: i64, object_id: i64) -> Option<ResolvedRoute> {
     let (_lay, table) = layout_table(sol, layout_id)?;
     let obj = sol.object_by_id(layout_id, object_id).ok().flatten()?;
+    if !obj.kind.is_portal() {
+        return None;
+    }
     let binding = obj.binding.filter(|b| !b.is_empty())?;
     sol.resolve_path(table.id, &binding).ok()
+}
+
+/// Defense-in-depth for every terminal-row mutation: the URL's record id must be
+/// in this portal route's resolved set for this base record. Without this check a
+/// crafted related URL could address an unrelated row on the same terminal table.
+fn portal_route_contains(
+    sol: &Solution,
+    route: &ResolvedRoute,
+    base_id: i64,
+    rec_id: i64,
+) -> bool {
+    sol.route_record_set(route, base_id)
+        .is_ok_and(|ids| ids.contains(&rec_id))
+}
+
+fn portal_route_is_editable(route: &ResolvedRoute) -> bool {
+    route.class.create_determined()
 }
 
 /// Create a record from the new-record form (inputs named `f<field_id>`).
@@ -212,12 +232,18 @@ pub(crate) async fn delete_record(
 /// 200 once held; 404 for an unknown layout/portal or unresolvable route.
 pub(crate) async fn open_related_record(
     State(st): State<AppState>,
-    Path((layout_id, _base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
+    Path((layout_id, base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
 ) -> impl IntoResponse {
     let terminal_table = {
         let sol = st.sol.lock().unwrap();
         match portal_route(&sol, layout_id, object_id) {
-            Some(route) => route.terminal_table,
+            Some(route) if !portal_route_is_editable(&route) => {
+                return (StatusCode::CONFLICT, "portal route is read-only")
+            }
+            Some(route) if portal_route_contains(&sol, &route, base_id, rec_id) => {
+                route.terminal_table
+            }
+            Some(_) => return (StatusCode::NOT_FOUND, "record is not in portal route"),
             None => return (StatusCode::NOT_FOUND, "no such portal route"),
         }
     };
@@ -231,13 +257,20 @@ pub(crate) async fn open_related_record(
 /// TERMINAL table's fields.
 pub(crate) async fn save_related_record(
     State(st): State<AppState>,
-    Path((layout_id, _base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
+    Path((layout_id, base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
     Form(form): Form<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let sol = st.sol.lock().unwrap();
     let Some(route) = portal_route(&sol, layout_id, object_id) else {
         return (StatusCode::NOT_FOUND, "no such portal route".to_string()).into_response();
     };
+    if !portal_route_is_editable(&route) {
+        return (StatusCode::CONFLICT, "portal route is read-only".to_string()).into_response();
+    }
+    if !portal_route_contains(&sol, &route, base_id, rec_id) {
+        return (StatusCode::NOT_FOUND, "record is not in portal route".to_string())
+            .into_response();
+    }
     let fields = match sol.fields(route.terminal_table) {
         Ok(fields) => fields,
         Err(_) => return (StatusCode::NOT_FOUND, "no such related table").into_response(),
@@ -261,13 +294,20 @@ pub(crate) async fn save_related_record(
 /// portal row.
 pub(crate) async fn draft_save_related_record(
     State(st): State<AppState>,
-    Path((layout_id, _base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
+    Path((layout_id, base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
     Form(form): Form<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let sol = st.sol.lock().unwrap();
     let Some(route) = portal_route(&sol, layout_id, object_id) else {
         return (StatusCode::NOT_FOUND, "no such portal route".to_string()).into_response();
     };
+    if !portal_route_is_editable(&route) {
+        return (StatusCode::CONFLICT, "portal route is read-only".to_string()).into_response();
+    }
+    if !portal_route_contains(&sol, &route, base_id, rec_id) {
+        return (StatusCode::NOT_FOUND, "record is not in portal route".to_string())
+            .into_response();
+    }
     let table = match sol.table_by_id(route.terminal_table) {
         Ok(Some(table)) => table,
         _ => return (StatusCode::NOT_FOUND, "no such related table".to_string()).into_response(),
@@ -290,15 +330,22 @@ pub(crate) async fn draft_save_related_record(
 /// to-many child, whose terminal row IS the record to discard.)
 pub(crate) async fn revert_related_record(
     State(st): State<AppState>,
-    Path((layout_id, _base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
+    Path((layout_id, base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
 ) -> impl IntoResponse {
     let sol = st.sol.lock().unwrap();
     if let Some(route) = portal_route(&sol, layout_id, object_id) {
+        if !portal_route_is_editable(&route) {
+            return (StatusCode::CONFLICT, "portal route is read-only");
+        }
+        if !portal_route_contains(&sol, &route, base_id, rec_id) {
+            return (StatusCode::NOT_FOUND, "record is not in portal route");
+        }
         let key = (route.terminal_table, rec_id);
         if st.is_draft(key) {
-            if let Ok(Some(table)) = sol.table_by_id(route.terminal_table) {
-                sol.delete_record(&table, rec_id).unwrap();
-            }
+            // Revert cancels the allowed create regardless of allow_delete. For
+            // M:N this removes the join row before deleting the uncommitted
+            // terminal, avoiding a dangling association (#179).
+            sol.discard_related_draft(&route, base_id, rec_id).unwrap();
             st.drafts.lock().unwrap().remove(&key);
         }
         st.locks.lock().unwrap().remove(&key);
@@ -386,6 +433,10 @@ pub(crate) async fn delete_related_record(
     let Some(route) = portal_route(&sol, layout_id, object_id) else {
         return (StatusCode::NOT_FOUND, "no such portal route".to_string()).into_response();
     };
+    if !portal_route_contains(&sol, &route, base_id, rec_id) {
+        return (StatusCode::NOT_FOUND, "record is not in portal route".to_string())
+            .into_response();
+    }
     match sol.delete_related_record(&route, base_id, rec_id) {
         Ok(()) => {
             st.locks

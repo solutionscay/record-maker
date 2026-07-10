@@ -99,6 +99,7 @@ export interface ObjectView {
 export interface PortalRowView {
   id: number;
   cells: string[];
+  editable?: boolean;
   /** Portal inline edit (#170): the `/related/*` endpoints this row's `.rec-edit`
    * scope posts to (open/commit/revert), precomputed server-side. Omitted on the
    * design canvas / non-editable render. */
@@ -134,11 +135,23 @@ export interface RelatedRouteChoice {
   fromField: number;
   toTable: number;
   toField: number;
+  /** Relationship traversals in order. Direct routes have one; the determined
+   * join-table route has a to-many hop followed by a to-one hop. */
+  hops: RelatedRouteHopChoice[];
   /** The terminal (related) table's user fields — the column picker's choices when
    * authoring inside a portal bound to this route (#168/#169). Same `FieldChoice`
    * shape the primary-table Field tool offers, so the rail retargets its picker to
    * the related table without a second fetch. Mirrors the server. */
   fields: FieldChoice[];
+}
+
+export interface RelatedRouteHopChoice {
+  relationshipId: number;
+  name: string;
+  direction: 'forward' | 'reverse';
+  cardinality: 'toOne' | 'toMany';
+  tableId: number;
+  tableName: string;
 }
 
 /** One layout part (band) and the objects it contains, ordered back→front. */

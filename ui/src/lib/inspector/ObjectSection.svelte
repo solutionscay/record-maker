@@ -4,10 +4,9 @@
   // server-resolved fieldId — never re-derived from the binding string
   // client-side (#134) — so the root passes it in alongside the object.
   import type { EditorDoc, ObjectDoc } from '../doc.svelte';
-  import type { ObjectView } from '../model';
   import FieldSelect from '../FieldSelect.svelte';
+  import RoutePicker from '../RoutePicker.svelte';
   import {
-    deleteObjects,
     setObjectBinding as persistBinding,
     setObjectBindingPath as persistBindingPath,
     setObjectContent as persistContent,
@@ -95,7 +94,7 @@
     // setProp-before-await order in PartSection / FormatSection).
     doc.setProp(selected.id, 'binding', path);
     try {
-      const view = await persistBindingPath(layoutId, selected.id, path, doc.rec);
+      const view = await persistBindingPath(layoutId, selected.id, path, doc.rec, true);
       doc.setProp(selected.id, 'binding', view.binding);
       doc.refreshResolved(view);
       doc.mark();
@@ -104,17 +103,16 @@
     }
   }
 
-  // ── Portal columns (#168): author a portal's columns from ITS inspector, not the
-  // left rail. When a portal is selected, resolve its bound route (so the picker
-  // offers the related table's fields) and enumerate its authored column children
-  // (the field objects whose `parentObjectId` is this portal), so the user can
-  // add and remove columns here. FK-first: a column binds a declared route field.
+  // ── Portal columns (#168): ADD a portal's columns from its inspector (the left
+  // rail is for top-level tools). When a portal is selected, resolve its bound
+  // route so the picker offers the related table's fields. FK-first: a column
+  // binds a declared route field.
   //
   // Adding uses the SAME gesture as the rail's "Field to place": a multi-select
   // list you select then DRAG onto the portal (dragToPlace + a portal-column drag
-  // payload). The canvas drop handler (placement.ts) does the parent-aware create;
-  // this component just holds the picker's selection. No click-to-append path.
-  let busyCols = $state(false);
+  // payload). The canvas drop handler (placement.ts) does the parent-aware create.
+  // Columns (and their labels) are ordinary objects — remove them on the canvas
+  // like any other object; there is no bespoke column manager here.
   /** Fields selected in the Columns picker, staged for the drag onto the portal. */
   let colFieldIds = $state<number[]>([]);
   // Clear the staged column selection when the selected portal changes, so ids
@@ -135,61 +133,6 @@
       ? (doc.relatedRoutes.find((r) => r.path === selected.binding) ?? null)
       : null,
   );
-
-  /** Every object owned by the selected portal (columns AND their spawned caption
-   * labels), pulled from the render model. Empty unless a portal is selected. */
-  let portalChildren = $derived.by<ObjectView[]>(() => {
-    if (selected.kind !== 'portal') return [];
-    const out: ObjectView[] = [];
-    for (const p of doc.renderModel.parts) {
-      for (const o of p.objects) {
-        if (o.parentObjectId === selected.id) out.push(o);
-      }
-    }
-    return out;
-  });
-
-  /** The portal's authored columns (field children) in visual order — the same
-   * `(x, y, z, id)` order the server enumerates them in for the header row. */
-  let portalColumns = $derived(
-    portalChildren
-      .filter((o) => o.kind === 'field')
-      .slice()
-      .sort((a, b) => a.x - b.x || a.y - b.y || a.z - b.z || a.id - b.id),
-  );
-
-  /** A column's display name: its binding's trailing segment mapped back to the
-   * related field by name, falling back to the resolved label or the raw segment. */
-  function columnName(o: ObjectView): string {
-    const seg = (o.binding.split('.').pop() ?? '').toLowerCase();
-    const f = portalRoute?.fields.find((c) => c.name.toLowerCase() === seg);
-    return f?.name ?? o.label ?? seg;
-  }
-
-  /** Remove a column from the selected portal — deleting the field child AND the
-   * header label the server spawned for it, as one undoable step. A portal column's
-   * label is a top header: `create_field_object` places it directly ABOVE the value
-   * (`x = col.x`, `y = max(0, col.y - col.h)`), not the left caption a top-level
-   * field gets — so pair on that geometry. */
-  async function removeColumn(col: ObjectView): Promise<void> {
-    if (busyCols) return;
-    const labelY = Math.max(0, col.y - col.h);
-    const label = portalChildren.find(
-      (o) => o.kind === 'text' && o.y === labelY && o.x === col.x,
-    );
-    const ids = label ? [col.id, label.id] : [col.id];
-    busyCols = true;
-    llog('persist', 'inspector: remove portal column', { portal: selected.id, ids });
-    try {
-      await deleteObjects(layoutId, ids);
-      for (const id of ids) doc.removeObject(id);
-      doc.mark();
-    } catch (e) {
-      reportPersistError(doc, 'remove portal column', e);
-    } finally {
-      busyCols = false;
-    }
-  }
 
   async function setSelectedReadOnly(readOnly: boolean): Promise<void> {
     llog('persist', 'inspector: set read-only', { id: selected.id, readOnly });
@@ -238,19 +181,11 @@
     {#if doc.relatedRoutes.length === 0}
       <span class="le-hint">No relationships defined for this table.</span>
     {:else}
-      <select
-        class="ctl-input"
+      <RoutePicker
+        routes={doc.relatedRoutes}
         value={selected.binding}
-        title="Relationship route the portal shows"
-        onchange={(e) => setSelectedRoute(e.currentTarget.value)}
-      >
-        {#each doc.relatedRoutes as r (r.relationshipId)}
-          <option value={r.path}>{r.name} → {r.tableName}</option>
-        {/each}
-      </select>
-    {/if}
-    {#if selected.binding}
-      <span class="le-hint">{selected.binding}</span>
+        onchange={setSelectedRoute}
+      />
     {/if}
   {:else}
     <input
@@ -262,45 +197,21 @@
   {/if}
 </section>
 
-{#if selected.kind === 'portal'}
+{#if selected.kind === 'portal' && portalRoute}
   <section class="insp-sec">
-    <span class="side-label">Columns</span>
-    {#if !portalRoute}
-      <span class="le-hint">Bind a related list route above to add columns.</span>
-    {:else}
-      <FieldSelect
-        fields={portalRoute.fields}
-        value={colFieldIds[0] ?? null}
-        values={colFieldIds}
-        multi
-        dragToPlace
-        portalDrag={{ portalId: selected.id, route: portalRoute.path }}
-        placeholder="Fields to add…"
-        title="Select {portalRoute.tableName} fields, then drag onto the portal to add columns; Shift-click range, Ctrl/Cmd-click individual"
-        onselect={(id) => (colFieldIds = [id])}
-        onselectMany={(ids) => (colFieldIds = ids)}
-        onclear={() => (colFieldIds = [])}
-      />
-      <span class="le-hint">Drag the selected field{colFieldIds.length === 1 ? '' : 's'} onto the portal to add {colFieldIds.length === 1 ? 'a column' : 'columns'}.</span>
-      {#if portalColumns.length === 0}
-        <span class="le-hint">No columns yet — select field(s) above and drag onto the portal.</span>
-      {:else}
-        <ul class="col-list">
-          {#each portalColumns as col (col.id)}
-            <li class="col-row">
-              <span class="col-name">{columnName(col)}</span>
-              <button
-                type="button"
-                class="col-del"
-                title="Remove column"
-                aria-label="Remove column"
-                disabled={busyCols}
-                onclick={() => removeColumn(col)}>×</button
-              >
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    {/if}
+    <span class="side-label">Field to place</span>
+    <FieldSelect
+      fields={portalRoute.fields}
+      value={colFieldIds[0] ?? null}
+      values={colFieldIds}
+      multi
+      dragToPlace
+      portalDrag={{ portalId: selected.id, route: portalRoute.path }}
+      placeholder="Fields to add…"
+      title="Field to place; Shift-click range, Ctrl/Cmd-click individual, or drag onto the portal"
+      onselect={(id) => (colFieldIds = [id])}
+      onselectMany={(ids) => (colFieldIds = ids)}
+      onclear={() => (colFieldIds = [])}
+    />
   </section>
 {/if}

@@ -11,7 +11,8 @@ use axum::{
     Json,
 };
 use record_maker_engine::{
-    FieldKind, NewObject, ObjectGroup, ObjectKind, PartKind, RestoreObject, RestoreResult, Solution,
+    FieldKind, NewObject, ObjectGroup, ObjectKind, PartKind, RestoreObject, RestoreResult,
+    RouteClass, Solution,
 };
 
 use crate::style::{object_style, shape_style, text_style};
@@ -100,6 +101,26 @@ fn object_group_view(g: ObjectGroup) -> ObjectGroupView {
     ObjectGroupView {
         id: g.id,
         object_ids: g.object_ids,
+    }
+}
+
+/// Validate the portal route shapes the editor may persist (#179). Direct routes
+/// retain their existing behavior; the first multi-hop slice is the determined
+/// reverse/to-many join followed by a forward/to-one terminal. Value bindings
+/// (a trailing field) are never valid portal anchors.
+fn validate_portal_route(sol: &Solution, base_table: i64, binding: &str) -> AppResult<()> {
+    let route = sol
+        .resolve_path(base_table, binding)
+        .map_err(|e| AppError::bad_request(format!("bad portal route: {e}")))?;
+    if route.terminal_field.is_some() || route.hops.is_empty() {
+        return Err(AppError::bad_request("portal route must end at a related table"));
+    }
+    if route.hops.len() == 1 || route.class == RouteClass::JoinTableManyToMany {
+        Ok(())
+    } else {
+        Err(AppError::bad_request(
+            "portal route must be direct or a determined join-table route",
+        ))
     }
 }
 
@@ -527,7 +548,13 @@ pub(crate) async fn create_design_object(
         // same `binding` slot a field uses (#168). FK-first — the path is only
         // ever SELECTED from the layout's declared routes, never authored here.
         let binding = if kind == ObjectKind::Portal {
-            body.binding.clone()
+            let binding = body
+                .binding
+                .clone()
+                .filter(|b| !b.is_empty())
+                .ok_or_else(|| AppError::bad_request("portal needs a route"))?;
+            validate_portal_route(&sol, table.id, &binding)?;
+            Some(binding)
         } else {
             None
         };
@@ -919,9 +946,14 @@ pub(crate) async fn update_object_binding(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct BindingPathBody {
     binding: String,
     rec: Option<i64>,
+    /// Live portal-route picks request semantic validation. History replay leaves
+    /// this false so an unresolved legacy binding can still round-trip verbatim.
+    #[serde(default)]
+    validate_portal: bool,
 }
 
 /// Set an object's binding dot-path VERBATIM (history replay of a binding diff,
@@ -934,8 +966,15 @@ pub(crate) async fn update_object_binding_path(
     Json(body): Json<BindingPathBody>,
 ) -> AppResult<Json<ObjectView>> {
     let sol = st.sol.lock().unwrap();
-    if layout_table(&sol, layout_id).is_none() {
+    let Some((_layout, table)) = layout_table(&sol, layout_id) else {
         return Err(AppError::no_such_layout(layout_id));
+    };
+    let object = sol
+        .object_by_id(layout_id, object_id)
+        .unwrap()
+        .ok_or_else(AppError::not_found)?;
+    if object.kind.is_portal() && body.validate_portal {
+        validate_portal_route(&sol, table.id, &body.binding)?;
     }
     let updated = sol
         .set_object_binding(layout_id, object_id, &body.binding)

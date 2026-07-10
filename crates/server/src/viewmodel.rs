@@ -389,25 +389,25 @@ pub(crate) struct ObjectView {
     /// Portal (#168/#169): whether this portal resolved its bound anchor route
     /// against a live base record (Browse Form/List). The renderer keys off THIS,
     /// not the column count: `true` ⇒ render the repeating-row region (its authored
-    /// columns as a header + one row per related record — a clean empty region when
-    /// it has no columns or no rows yet); `false` ⇒ the unresolved route-frame
+    /// columns as one row per related record — a clean empty region when it has no
+    /// columns or no rows yet); `false` ⇒ the unresolved route-frame
     /// placeholder (blank/unresolvable binding, or the design canvas, which passes
     /// no base record). Skipped from JSON when `false` so non-portal objects and the
     /// design-model portal frame serialise byte-identically to before (#44 fixture
     /// stability).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub(crate) portal_resolved: bool,
-    /// Portal (#168/#169): the header row of a resolved portal — the display name
+    /// Portal (#168/#169): internal row metadata — the display name
     /// of each AUTHORED column (a child field object bound route-relative to the
-    /// terminal table), in visual column order. Empty for every other object, for a
-    /// portal on the design canvas, and for a resolved portal with no authored
-    /// columns yet. Skipped from JSON when empty so the flat design-model fixture
-    /// stays byte-identical (#44).
+    /// terminal table), in visual column order. Headings are separate authored text
+    /// objects. Empty for every other object, for a portal on the design canvas, and
+    /// for a resolved portal with no authored columns yet. Skipped from JSON when
+    /// empty so the flat design-model fixture stays byte-identical (#44).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) portal_columns: Vec<String>,
     /// Portal (#168): the repeating-row template height in px — the tallest authored
     /// column field object's `h`, i.e. the row slot the designer sized by dragging
-    /// the column height. The renderer sizes both the header and every value row to
+    /// the column height. The renderer sizes every value row to
     /// this, so the portal box (a fixed-height viewport) shows `floor(body height /
     /// row height)` rows and scrolls the rest — the visible-row count is geometry-
     /// driven (box height + row height), never a numeric setting. `0` for a non-portal
@@ -1338,12 +1338,14 @@ pub(crate) fn render_part_with_objects(
         part_style: part_style(part.props.as_deref()),
         objects: objects
             .iter()
-            // In a resolved (Browse) render, a portal's authored column children
-            // (#168/#169) are NOT top-level band objects — the portal renders them
-            // as its repeating-row template. Skip them here so they don't also paint
-            // standalone. On the design canvas (`portal` is `None`) they stay visible
-            // as ordinary objects the designer places — byte-identical to before.
-            .filter(|o| portal.is_none() || o.parent_object_id.is_none())
+            // In a resolved (Browse) render, portal-owned fields (#168/#169) are
+            // repeating-row templates, not standalone band objects. Other children
+            // remain normal authored objects: in particular, the text labels placed
+            // above portal columns are the headings and must retain their geometry.
+            // On the design canvas (`portal` is `None`) every child stays visible.
+            .filter(|o| {
+                portal.is_none() || o.parent_object_id.is_none() || !o.kind.is_field()
+            })
             .map(|o| prepared_object_view(&prepare_object(o.clone()), by_name, portal))
             .collect(),
     }
@@ -1403,10 +1405,14 @@ pub(crate) fn render_prepared_part(
         objects: prep
             .objects
             .iter()
-            // See [`render_part_with_objects`]: a portal's authored column children
-            // (#168/#169) render inside the portal in a resolved Browse render, not
-            // as standalone band objects; keep them on the design canvas (`None`).
-            .filter(|p| portal.is_none() || p.meta.parent_object_id.is_none())
+            // See [`render_part_with_objects`]: only portal-owned field templates
+            // disappear in Browse. Authored labels and other non-field children
+            // keep rendering at their stored positions.
+            .filter(|p| {
+                portal.is_none()
+                    || p.meta.parent_object_id.is_none()
+                    || !p.meta.kind.is_field()
+            })
             .map(|p| prepared_object_view(p, by_name, portal))
             .collect(),
     }

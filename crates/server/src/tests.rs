@@ -189,6 +189,210 @@ fn portal_object_renders_related_rows_in_form_view() {
     );
 }
 
+/// #179: the design model authors a determined two-hop route through a join
+/// table, and the resulting portal reads/edits/creates/unlinks terminal records.
+/// Every terminal mutation is also scoped back to the base record's resolved set.
+#[tokio::test]
+async fn multi_hop_portal_round_trips_many_to_many_and_scopes_mutations() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    let students = sol
+        .create_table("Students", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+        .unwrap();
+    let courses = sol
+        .create_table("Courses", &[NewField { name: "Title".into(), kind: FieldKind::Text }])
+        .unwrap();
+    let enrollments = sol
+        .create_table(
+            "Enrollments",
+            &[
+                NewField { name: "StudentId".into(), kind: FieldKind::Text },
+                NewField { name: "CourseId".into(), kind: FieldKind::Text },
+            ],
+        )
+        .unwrap();
+    let student_rel = sol
+        .create_relationship(&NewRelationship {
+            name: "student_enrollment".into(),
+            from_table: enrollments,
+            to_table: students,
+            from_field: field_named(&sol, enrollments, "StudentId"),
+            to_field: sol.all_fields(students).unwrap().into_iter().find(|f| f.is_system()).unwrap().id,
+        })
+        .unwrap()
+        .unwrap();
+    let course_fk = field_named(&sol, enrollments, "CourseId");
+    let course_pk = sol.all_fields(courses).unwrap().into_iter().find(|f| f.is_system()).unwrap().id;
+    let course_rel = sol
+        .create_relationship(&NewRelationship {
+            name: "enrollment_course".into(),
+            from_table: enrollments,
+            to_table: courses,
+            from_field: course_fk,
+            to_field: course_pk,
+        })
+        .unwrap()
+        .unwrap();
+    sol.set_relationship_referential(student_rel.id, true, true).unwrap();
+
+    let student_table = sol.table_by_id(students).unwrap().unwrap();
+    let student_name = sol.field_by_id(students, field_named(&sol, students, "Name")).unwrap().unwrap();
+    let ada = sol.insert_record(&student_table, &[(&student_name, "Ada".into())]).unwrap();
+    let grace = sol.insert_record(&student_table, &[(&student_name, "Grace".into())]).unwrap();
+    let route = sol.resolve_path(students, "student_enrollment.enrollment_course").unwrap();
+    let title_id = field_named(&sol, courses, "Title");
+    let title = sol.field_by_id(courses, title_id).unwrap().unwrap();
+    let math = sol.create_related_record(&route, ada, &[(&title, "Math".into())], None).unwrap();
+    let private = sol.create_related_record(&route, grace, &[(&title, "Private".into())], None).unwrap();
+
+    let form = sol.layouts_for_table(students).unwrap().into_iter().find(|l| l.view == "form").unwrap();
+    let body = body_part(&sol, form.id);
+    let state = state_for(sol);
+
+    // The design contract exposes the two hops for the cascading picker.
+    let (status, model_json) = get_body(state.clone(), &format!("/design/{}/model?rec=1", form.id)).await;
+    assert_eq!(status, StatusCode::OK);
+    let model: serde_json::Value = serde_json::from_str(&model_json).unwrap();
+    let authored = model["relatedRoutes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["path"] == "student_enrollment.enrollment_course")
+        .expect("determined two-hop route is authorable");
+    assert_eq!(authored["hops"].as_array().unwrap().len(), 2);
+    assert_eq!(authored["hops"][0]["cardinality"], "toMany");
+    assert_eq!(authored["hops"][1]["cardinality"], "toOne");
+
+    // Place the multi-hop portal and one terminal Course column through the same
+    // endpoints used by the route picker and drag-to-place UI.
+    let (status, created) = post_json_body(
+        state.clone(),
+        &format!("/design/{}/object", form.id),
+        &serde_json::json!({
+            "partId": body.id, "kind": "portal", "x": 10, "y": 10,
+            "w": 320, "h": 120, "binding": "student_enrollment.enrollment_course"
+        }).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let created: serde_json::Value = serde_json::from_str(&created).unwrap();
+    let portal_id = created[0]["id"].as_i64().unwrap();
+    let (status, _) = post_json_body(
+        state.clone(),
+        &format!("/design/{}/object/{portal_id}/binding-path", form.id),
+        &serde_json::json!({
+            "binding": "student_enrollment.StudentId",
+            "rec": 1,
+            "validatePortal": true
+        }).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a portal route cannot terminate in a field");
+    let (status, column) = post_json_body(
+        state.clone(),
+        &format!("/design/{}/object", form.id),
+        &serde_json::json!({
+            "partId": body.id, "kind": "field", "x": 20, "y": 20,
+            "w": 120, "h": 24, "fieldId": title_id, "parentObjectId": portal_id
+        }).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{column}");
+
+    let (status, html) = get_body(state.clone(), &format!("/browse/{}?view=form&rec=1", form.id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Math"), "Ada sees her terminal Course");
+    assert!(!html.contains("Private"), "another Student's Course does not leak into the portal");
+
+    // A forged terminal id from Grace's resolved set is rejected for Ada.
+    let foreign_action = format!("/browse/{}/{}/related/{}/{}", form.id, ada, portal_id, private);
+    let (status, _) = post_form_body(state.clone(), &foreign_action, &format!("f{title_id}=Leaked")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The legitimate row edits, create-new mints terminal + join, and delete
+    // unlinks only the join while preserving the terminal Course.
+    let action = format!("/browse/{}/{}/related/{}/{}", form.id, ada, portal_id, math);
+    let (status, _) = post_form_body(state.clone(), &action, &format!("f{title_id}=Algebra")).await;
+    assert_eq!(status, StatusCode::OK);
+    let create_url = format!("/browse/{}/{}/related/{}", form.id, ada, portal_id);
+    let (status, _) = post_form_body(state.clone(), &create_url, &format!("f{title_id}=Science")).await;
+    assert_eq!(status, StatusCode::OK);
+    let science = state
+        .sol
+        .lock()
+        .unwrap()
+        .read_related_records(&route, ada)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.cells[0] == "Science")
+        .unwrap()
+        .id;
+    let science_action = format!("/browse/{}/{}/related/{}/{}", form.id, ada, portal_id, science);
+    let (status, _) = post_form_body(state.clone(), &science_action, &format!("f{title_id}=Science")).await;
+    assert_eq!(status, StatusCode::OK, "the created terminal draft commits normally");
+
+    // Escape/revert of another newly-created terminal removes both the join and
+    // the draft terminal even when it has not been committed.
+    let (status, _) = post_form_body(state.clone(), &create_url, &format!("f{title_id}=Draft")).await;
+    assert_eq!(status, StatusCode::OK);
+    let draft = state
+        .sol
+        .lock()
+        .unwrap()
+        .read_related_records(&route, ada)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.cells[0] == "Draft")
+        .unwrap()
+        .id;
+    let revert = format!("/browse/{}/{}/related/{}/{}/revert", form.id, ada, portal_id, draft);
+    let (status, _) = post_form_body(state.clone(), &revert, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!state.is_draft((courses, draft)));
+    let delete_url = format!("{action}/delete");
+    let (status, _) = post_form_body(state.clone(), &delete_url, "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let sol = state.sol.lock().unwrap();
+    let rows = sol.read_related_records(&route, ada).unwrap();
+    assert_eq!(rows.len(), 1, "Ada keeps only the newly-created Course association");
+    assert_eq!(rows[0].cells[0], "Science");
+    let course_table = sol.table_by_id(courses).unwrap().unwrap();
+    assert!(sol.get_record(&course_table, &[], math).unwrap().is_some(), "unlink preserves terminal Course");
+    drop(sol);
+
+    // Renaming hop two rewrites both the portal and its route-prefixed column;
+    // the column's terminal field token is left untouched.
+    state.sol.lock().unwrap().update_relationship(
+        course_rel.id,
+        &NewRelationship {
+            name: "enrollment_subject".into(),
+            from_table: enrollments,
+            to_table: courses,
+            from_field: course_fk,
+            to_field: course_pk,
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let (status, model_json) = get_body(state, &format!("/design/{}/model?rec=1", form.id)).await;
+    assert_eq!(status, StatusCode::OK);
+    let model: serde_json::Value = serde_json::from_str(&model_json).unwrap();
+    let objects: Vec<&serde_json::Value> = model["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["objects"].as_array().unwrap())
+        .collect();
+    assert_eq!(
+        objects.iter().find(|o| o["id"] == portal_id).unwrap()["binding"],
+        "student_enrollment.enrollment_subject"
+    );
+    assert!(objects.iter().any(|o| {
+        o["parentObjectId"] == portal_id
+            && o["binding"] == "student_enrollment.enrollment_subject.Title"
+    }));
+}
+
 /// #168/#169 (Model B): placing a field INTO a portal via the create endpoint —
 /// `parentObjectId` set to the portal — creates the column as the portal's CHILD
 /// (self-FK) with a ROUTE-RELATIVE binding drawn from the portal's related table

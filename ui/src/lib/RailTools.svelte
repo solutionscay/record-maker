@@ -13,6 +13,7 @@
   import { llog, lerror } from './log';
   import Icon from './Icon.svelte';
   import FieldSelect from './FieldSelect.svelte';
+  import RoutePicker from './RoutePicker.svelte';
 
   let { doc, layoutId = '' }: { doc: EditorDoc; layoutId?: string } = $props();
 
@@ -115,7 +116,8 @@
   function onFieldChange(): void {
     if (doc.activeTool === 'field') doc.setTool('field', fieldIds, createLabel);
   }
-  function onRouteChange(): void {
+  function onRouteChange(path = routePath): void {
+    routePath = path;
     if (doc.activeTool === 'portal') doc.setTool('portal', null, true, routePath);
   }
   function onCreateLabelChange(): void {
@@ -209,16 +211,7 @@
       {#if doc.relatedRoutes.length === 0}
         <span class="le-hint">No relationships defined for this table.</span>
       {:else}
-        <select
-          class="le-select"
-          bind:value={routePath}
-          onchange={onRouteChange}
-          title="Relationship route the portal shows (FK-first — routes are declared, never created here)"
-        >
-          {#each doc.relatedRoutes as r (r.relationshipId)}
-            <option value={r.path}>{r.name} → {r.tableName}</option>
-          {/each}
-        </select>
+        <RoutePicker routes={doc.relatedRoutes} value={routePath} onchange={onRouteChange} />
       {/if}
     </div>
   {/if}

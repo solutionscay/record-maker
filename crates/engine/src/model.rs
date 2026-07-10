@@ -1242,12 +1242,11 @@ fn stamp_reference(
     Ok(())
 }
 
-/// Rewrite object bindings whose leading route segment names a renamed
-/// relationship. Portal bindings (`route`) and portal-column bindings
-/// (`route.field`, …) key their first dot-segment on a relationship name, so a
-/// rename must follow through. Scoped to portals and their column children, so a
-/// top-level `Table.field` binding is never touched even if a table shares the
-/// old name.
+/// Rewrite every relationship token in a portal binding after a rename. A portal
+/// binding consists entirely of relationship segments; a portal-column binding
+/// ends in one terminal field segment, which must not be rewritten even when a
+/// field happens to share the old relationship name. Scoped to portals and their
+/// children so a top-level `Table.field` binding is never touched.
 fn rewrite_route_bindings(
     tx: &rusqlite::Transaction<'_>,
     old_name: &str,
@@ -1256,19 +1255,33 @@ fn rewrite_route_bindings(
     let mut edits: Vec<(i64, String)> = Vec::new();
     {
         let mut stmt = tx.prepare(
-            "SELECT id, binding FROM meta_object \
+            "SELECT id, kind, binding FROM meta_object \
              WHERE binding IS NOT NULL AND binding <> '' \
                AND (kind = 'portal' OR parent_object_id IS NOT NULL)",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
         for row in rows {
-            let (id, binding) = row?;
+            let (id, kind, binding) = row?;
             let mut segs: Vec<&str> = binding.split('.').collect();
-            if segs
-                .first()
-                .is_some_and(|s| s.eq_ignore_ascii_case(old_name))
-            {
-                segs[0] = new_name;
+            let route_len = if kind == "portal" {
+                segs.len()
+            } else {
+                segs.len().saturating_sub(1)
+            };
+            let mut changed = false;
+            for seg in segs.iter_mut().take(route_len) {
+                if seg.eq_ignore_ascii_case(old_name) {
+                    *seg = new_name;
+                    changed = true;
+                }
+            }
+            if changed {
                 edits.push((id, segs.join(".")));
             }
         }

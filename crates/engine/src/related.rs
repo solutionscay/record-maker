@@ -485,6 +485,55 @@ impl Solution {
         }
     }
 
+    /// Discard a terminal record minted by `create_related_record_draft`, undoing
+    /// the determined association without consulting `allow_delete`. Revert is
+    /// the cancellation half of an allowed create, not a user-requested delete:
+    /// a direct forward route clears the base FK, and a join-table route removes
+    /// its join row before the never-committed terminal is deleted (#173/#179).
+    pub fn discard_related_draft(
+        &self,
+        route: &ResolvedRoute,
+        base_id: i64,
+        record_id: i64,
+    ) -> Result<()> {
+        self.in_transaction(|s| {
+            match route.class {
+                RouteClass::DirectFk => {
+                    let hop = &route.hops[0];
+                    if hop.direction == HopDirection::Forward {
+                        let rel = s.require_relationship(hop.relationship_id)?;
+                        let base_table = s.related_table(rel.from_table)?;
+                        let base_fk = s.related_field(rel.from_table, rel.from_field)?;
+                        s.update_record(&base_table, base_id, &[(&base_fk, String::new())])?;
+                    }
+                }
+                RouteClass::JoinTableManyToMany => {
+                    let anchor = s.require_relationship(route.hops[0].relationship_id)?;
+                    let terminal = s.require_relationship(route.hops[1].relationship_id)?;
+                    let base_key = s.key_value(anchor.to_table, anchor.to_field, base_id)?;
+                    let terminal_key =
+                        s.key_value(terminal.to_table, terminal.to_field, record_id)?;
+                    let join_table = s.related_table(anchor.from_table)?;
+                    let join_fk_base = s.related_field(anchor.from_table, anchor.from_field)?;
+                    let join_fk_term = s.related_field(terminal.from_table, terminal.from_field)?;
+                    let sql = format!(
+                        "DELETE FROM {} WHERE {}=?1 AND {}=?2",
+                        join_table.phys, join_fk_base.phys, join_fk_term.phys
+                    );
+                    s.data.execute(
+                        &sql,
+                        params_from_iter([Value::Text(base_key), Value::Text(terminal_key)]),
+                    )?;
+                }
+                RouteClass::BaseRecord | RouteClass::Undetermined => {
+                    bail!(RelatedCrudError::NotARelatedRoute)
+                }
+            }
+            let terminal_table = s.related_table(route.terminal_table)?;
+            s.delete_record(&terminal_table, record_id)
+        })
+    }
+
     // --- helpers -----------------------------------------------------------
 
     /// Insert into `table` with `values`, overriding/stamping `fk` = `key`,

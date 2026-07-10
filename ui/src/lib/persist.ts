@@ -250,6 +250,11 @@ export function setObjectBindingPath(
   id: number,
   binding: string,
   rec: number,
+  validatePortal = false,
 ): Promise<ObjectView> {
-  return postJson(`/design/${layoutId}/object/${id}/binding-path`, { binding, rec });
+  return postJson(`/design/${layoutId}/object/${id}/binding-path`, {
+    binding,
+    rec,
+    validatePortal,
+  });
 }

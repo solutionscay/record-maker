@@ -461,6 +461,9 @@ fn is_zero(n: &i64) -> bool {
 pub(crate) struct PortalRowView {
     pub(crate) id: i64,
     pub(crate) cells: Vec<String>,
+    /// Whether this route has a determined terminal mutation target. Deeper
+    /// undetermined legacy routes remain readable but render as plain values.
+    pub(crate) editable: bool,
     /// Portal inline edit (#170): the `/related/*` endpoints this row's editor
     /// posts to, precomputed server-side so the shared `.rec-edit` controller
     /// drives a child record with no client route-building. `open`/`revert`
@@ -519,11 +522,29 @@ pub(crate) struct RelatedRouteChoice {
     from_field: i64,
     to_table: i64,
     to_field: i64,
+    /// Every relationship traversal in this route, in order. Direct routes carry
+    /// one hop; the first multi-hop portal slice carries the determined
+    /// `to-many join -> to-one terminal` pair (#179).
+    hops: Vec<RelatedRouteHopChoice>,
     /// The terminal (related) table's user fields — the column picker's choices
     /// when authoring inside a portal bound to this route (#168/#169). Same
     /// `FieldChoice` shape the primary-table Field tool offers, so the rail can
     /// retarget its picker to the related table without a second fetch.
     fields: Vec<FieldChoice>,
+}
+
+/// One step of a portal-authoring route. The route picker uses these stable
+/// relationship ids for its cascading interaction, while `path` remains the
+/// persisted named-path contract consumed by the engine.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RelatedRouteHopChoice {
+    relationship_id: i64,
+    name: String,
+    direction: &'static str,
+    cardinality: &'static str,
+    table_id: i64,
+    table_name: String,
 }
 
 /// Project a table's fields into the Field-tool `FieldChoice` list (#48/#62) —
@@ -871,18 +892,20 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         "/browse/{}/{}/related/{}",
         ctx.layout_id, ctx.base_id, o.id
     );
+    let row_editable = route.class.create_determined();
     let rows = records
         .into_iter()
         .map(|r| PortalRowView {
-            open_url: format!("{base}/{}/open", r.id),
-            action_url: format!("{base}/{}", r.id),
-            revert_url: format!("{base}/{}/revert", r.id),
+            open_url: if row_editable { format!("{base}/{}/open", r.id) } else { String::new() },
+            action_url: if row_editable { format!("{base}/{}", r.id) } else { String::new() },
+            revert_url: if row_editable { format!("{base}/{}/revert", r.id) } else { String::new() },
             delete_url: if can_delete {
                 format!("{base}/{}/delete", r.id)
             } else {
                 String::new()
             },
             id: r.id,
+            editable: row_editable,
             // Terminal-row draft-ness (#173), keyed on the terminal table.
             draft: ctx.drafts.contains(&(route.terminal_table, r.id)),
             // Only the authored columns' values, in column order (parallel to
@@ -1102,49 +1125,93 @@ pub(crate) fn updated_object_view(
 }
 
 pub(crate) fn related_route_choices(sol: &Solution, table: &TableMeta) -> Vec<RelatedRouteChoice> {
-    sol.relationships()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|rel| {
-            if rel.from_table == table.id {
-                let target = sol.table_by_id(rel.to_table).ok().flatten()?;
-                let fields = field_choices(&sol.fields(target.id).unwrap_or_default());
-                Some(RelatedRouteChoice {
-                    relationship_id: rel.id,
-                    name: rel.name.clone(),
-                    direction: "forward",
-                    cardinality: "toOne",
-                    path: rel.name.clone(),
-                    table_id: target.id,
-                    table_name: target.name,
-                    from_table: rel.from_table,
-                    from_field: rel.from_field,
-                    to_table: rel.to_table,
-                    to_field: rel.to_field,
-                    fields,
-                })
-            } else if rel.to_table == table.id {
-                let target = sol.table_by_id(rel.from_table).ok().flatten()?;
-                let fields = field_choices(&sol.fields(target.id).unwrap_or_default());
-                Some(RelatedRouteChoice {
-                    relationship_id: rel.id,
-                    name: rel.name.clone(),
-                    direction: "reverse",
-                    cardinality: "toMany",
-                    path: rel.name.clone(),
-                    table_id: target.id,
-                    table_name: target.name,
-                    from_table: rel.from_table,
-                    from_field: rel.from_field,
-                    to_table: rel.to_table,
-                    to_field: rel.to_field,
-                    fields,
-                })
-            } else {
-                None
+    let relationships = sol.relationships().unwrap_or_default();
+    let mut routes = Vec::new();
+
+    for first in relationships.iter().filter(|rel| {
+        rel.from_table == table.id || rel.to_table == table.id
+    }) {
+        let (direction, cardinality, terminal_id) = if first.from_table == table.id {
+            ("forward", "toOne", first.to_table)
+        } else {
+            ("reverse", "toMany", first.from_table)
+        };
+        let Some(terminal) = sol.table_by_id(terminal_id).ok().flatten() else {
+            continue;
+        };
+        let first_hop = RelatedRouteHopChoice {
+            relationship_id: first.id,
+            name: first.name.clone(),
+            direction,
+            cardinality,
+            table_id: terminal.id,
+            table_name: terminal.name.clone(),
+        };
+        routes.push(RelatedRouteChoice {
+            relationship_id: first.id,
+            name: first.name.clone(),
+            direction,
+            cardinality,
+            path: first.name.clone(),
+            table_id: terminal.id,
+            table_name: terminal.name.clone(),
+            from_table: first.from_table,
+            from_field: first.from_field,
+            to_table: first.to_table,
+            to_field: first.to_field,
+            hops: vec![first_hop.clone()],
+            fields: field_choices(&sol.fields(terminal.id).unwrap_or_default()),
+        });
+
+        // Phase 3 (#179): after a reverse/to-many anchor, offer a forward/to-one
+        // relationship from the join table. This is exactly RouteClass::
+        // JoinTableManyToMany, whose create/unlink semantics already exist in the
+        // related-record engine. Other multi-hop shapes remain out of authoring.
+        if cardinality != "toMany" {
+            continue;
+        }
+        for second in relationships
+            .iter()
+            .filter(|rel| rel.from_table == terminal.id && rel.id != first.id)
+        {
+            let Some(second_terminal) = sol.table_by_id(second.to_table).ok().flatten() else {
+                continue;
+            };
+            let path = format!("{}.{}", first.name, second.name);
+            let Ok(resolved) = sol.resolve_path(table.id, &path) else {
+                continue;
+            };
+            if resolved.class != record_maker_engine::RouteClass::JoinTableManyToMany {
+                continue;
             }
-        })
-        .collect()
+            let second_hop = RelatedRouteHopChoice {
+                relationship_id: second.id,
+                name: second.name.clone(),
+                direction: "forward",
+                cardinality: "toOne",
+                table_id: second_terminal.id,
+                table_name: second_terminal.name.clone(),
+            };
+            routes.push(RelatedRouteChoice {
+                relationship_id: first.id,
+                name: format!("{} → {}", first.name, second.name),
+                direction: "reverse",
+                cardinality: "toMany",
+                path,
+                table_id: second_terminal.id,
+                table_name: second_terminal.name.clone(),
+                from_table: first.from_table,
+                from_field: first.from_field,
+                to_table: first.to_table,
+                to_field: first.to_field,
+                hops: vec![first_hop.clone(), second_hop],
+                fields: field_choices(&sol.fields(second_terminal.id).unwrap_or_default()),
+            });
+        }
+    }
+
+    routes.sort_by(|a, b| a.path.cmp(&b.path));
+    routes
 }
 
 /// All of a layout's parts with their objects, fetched once (position order,

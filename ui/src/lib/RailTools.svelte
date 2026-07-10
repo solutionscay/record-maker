@@ -205,7 +205,7 @@
   {/if}
   {#if doc.activeTool === 'portal'}
     <div class="le-control le-control-stack">
-      <span>Related list</span>
+      <span>Related table</span>
       {#if doc.relatedRoutes.length === 0}
         <span class="le-hint">No relationships defined for this table.</span>
       {:else}

@@ -8,7 +8,7 @@ import type { ObjectView } from '../model';
 import { GRID, clampOrigin, snapToGrid } from '../canvas-edit';
 import { defaultBox, defaultProps, partAtY } from '../create';
 import { createObject } from '../persist';
-import { FIELD_DRAG_MIME } from '../dnd';
+import { FIELD_DRAG_MIME, PORTAL_COLUMN_DRAG_MIME, type PortalColumnDrag } from '../dnd';
 import { llog, lerror } from '../log';
 import { lineAngle } from '../object-props';
 import type { CanvasContext } from './context';
@@ -306,9 +306,13 @@ export class PlacementController {
   }
 
   onDragOver = (e: DragEvent): void => {
-    if (!e.dataTransfer?.types.includes(FIELD_DRAG_MIME)) return;
+    // Both a base-field drag (rail "Field to place") and a portal-column drag
+    // (portal inspector Columns picker, #168) paint the same drop preview; they
+    // diverge only at drop, keyed on which MIME the payload carried.
+    const types = e.dataTransfer?.types;
+    if (!types || (!types.includes(FIELD_DRAG_MIME) && !types.includes(PORTAL_COLUMN_DRAG_MIME))) return;
     e.preventDefault(); // required for `drop` to fire on this target at all
-    e.dataTransfer.dropEffect = 'copy';
+    e.dataTransfer!.dropEffect = 'copy';
     this.#paintDropPreview(this.#dropTargetFor(e.clientX, e.clientY));
   };
 
@@ -322,6 +326,16 @@ export class PlacementController {
 
   onDrop = (e: DragEvent): void => {
     this.#paintDropPreview(null);
+    // A portal-column drag (#168) takes priority: the same picker gesture, but the
+    // dragged related fields become COLUMNS of the payload's portal (parent-aware
+    // create), not top-level base-field objects.
+    const portalRaw = e.dataTransfer?.getData(PORTAL_COLUMN_DRAG_MIME);
+    if (portalRaw) {
+      e.preventDefault();
+      const payload = this.#parsePortalColumnDrag(portalRaw);
+      if (payload) void this.#placePortalColumnsAt(payload, e.clientX, e.clientY);
+      return;
+    }
     const raw = e.dataTransfer?.getData(FIELD_DRAG_MIME);
     if (!raw) return; // some other kind of drop (e.g. dragging in browser text) — ignore
     e.preventDefault();
@@ -339,6 +353,20 @@ export class PlacementController {
     }
     void this.#placeFieldsAt(target, parsed);
   };
+
+  #parsePortalColumnDrag(raw: string): PortalColumnDrag | null {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const { portalId, route, fieldIds } = parsed as Record<string, unknown>;
+    if (typeof portalId !== 'number' || typeof route !== 'string') return null;
+    if (!Array.isArray(fieldIds) || fieldIds.length === 0 || !fieldIds.every((v) => typeof v === 'number')) return null;
+    return { portalId, route, fieldIds: fieldIds as number[] };
+  }
 
   #paintDropPreview(target: { partTop: number; box: { x: number; y: number; w: number; h: number } } | null): void {
     if (!target) {
@@ -365,6 +393,68 @@ export class PlacementController {
       this.#commitPlacedViews(target.partId, views, views.map((v) => v.id), 'drop');
     } catch (e) {
       lerror('place', 'drop create failed', e);
+      this.#ctx.reportError(e);
+    } finally {
+      this.#ctx.placing = false;
+      if (this.#ctx.doc.activeTool !== 'pointer') this.#ctx.doc.setTool('pointer');
+    }
+  }
+
+  /** Create the dragged related fields as COLUMNS of the payload's portal (#168) —
+   * the drop-side of the portal inspector's Columns picker. Same parent-aware
+   * create the click-append used (parentObjectId = portal, so the server builds
+   * the route-relative `<route>.<field>` binding and spawns each column's top
+   * header label), but positioned from the DROP point: the drop x maps to the
+   * column's x — and since columns render left→right by x, that x is the column
+   * ORDER. Multiple fields dropped at once step to the right so they land as
+   * successive columns. Columns share the portal's header row (y = portal.y),
+   * matching the click-append geometry. The portal stays selected afterwards so
+   * its Columns list/card stays open for the next add. */
+  async #placePortalColumnsAt(payload: PortalColumnDrag, clientX: number, clientY: number): Promise<void> {
+    if (this.#ctx.placing) return;
+    const doc = this.#ctx.doc;
+    const portal = doc.getObject(payload.portalId);
+    if (!portal || portal.kind !== 'portal') {
+      llog('place', 'portal-column drop: portal missing or not a portal — ignored', { portalId: payload.portalId });
+      return;
+    }
+    const point = this.#ctx.canvasPoint(clientX, clientY);
+    const size = defaultBox('field');
+    const baseX = point ? clampOrigin(snapToGrid(point.x)) : portal.x;
+    const y = portal.y;
+    this.#ctx.placing = true;
+    try {
+      const views = (
+        await Promise.all(
+          payload.fieldIds.map((fieldId, i) =>
+            createObject(this.#ctx.layoutId, {
+              partId: portal.partId,
+              kind: 'field',
+              x: baseX + i * size.w,
+              y,
+              w: size.w,
+              h: size.h,
+              fieldId,
+              createLabel: true,
+              parentObjectId: portal.id,
+              rec: doc.rec,
+            }),
+          ),
+        )
+      ).flat();
+      llog('create', 'server created portal column(s) via drop', {
+        portal: portal.id,
+        objects: views.map((v) => ({ id: v.id, kind: v.kind, x: v.x, y: v.y })),
+      });
+      for (const v of views) doc.addObject(v, portal.partId);
+      doc.mark();
+      doc.setTool('pointer');
+      // Keep the PORTAL selected (not the new columns) so its inspector Columns
+      // card stays open for the next drag — the inspector-authoring counterpart of
+      // how base-field placement re-selects what it just placed.
+      doc.selectOnly([portal.id]);
+    } catch (e) {
+      lerror('place', 'portal-column drop create failed', e);
       this.#ctx.reportError(e);
     } finally {
       this.#ctx.placing = false;

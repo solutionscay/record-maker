@@ -418,6 +418,59 @@ export class SchemaStore {
     if (id > 0) await this.guard(() => api.setRelationshipReferential(id, allowCreate, allowDelete));
   }
 
+  /** Rename a relationship from the graph connector drawer. The name is the route
+   * token portals bind to, so it must stay globally unique; the server cascades
+   * the rename to the source field's `reference` name AND to every portal binding
+   * transactionally (`update_relationship`). Applied immediately to draft +
+   * baseline (like the referential flags), and mirrored onto the source field's
+   * reference here so the client stays in step without a full reload. Reverts the
+   * optimistic patch if the server rejects it (e.g. a lost uniqueness race). */
+  async renameRelationship(id: number, rawName: string): Promise<boolean> {
+    const name = rawName.trim();
+    const rel = this.relationships.find((r) => r.id === id);
+    if (!rel) return false;
+    if (name === rel.name) return true;
+    if (!name) {
+      this.fail('Relationships need a name.');
+      return false;
+    }
+    if (this.relationships.some((r) => r.id !== id && normName(r.name) === normName(name))) {
+      this.fail(`A relationship named "${name}" already exists.`);
+      return false;
+    }
+    const setName = (n: string): void => {
+      const relApply = (r: RelationshipView): RelationshipView => (r.id === id ? { ...r, name: n } : r);
+      const fieldApply = (f: FieldView): FieldView =>
+        f.id === rel.fromField && f.options.reference
+          ? { ...f, options: { ...f.options, reference: { ...f.options.reference, name: n } } }
+          : f;
+      const mapApply = (map: FieldMap): FieldMap =>
+        map[rel.fromTable] ? { ...map, [rel.fromTable]: map[rel.fromTable].map(fieldApply) } : map;
+      this.relationships = this.relationships.map(relApply);
+      this.baseRelationships = this.baseRelationships.map(relApply);
+      this.fieldsByTable = mapApply(this.fieldsByTable);
+      this.baseFieldsByTable = mapApply(this.baseFieldsByTable);
+    };
+    setName(name);
+    this.error = null;
+    if (id > 0) {
+      const ok = await this.guard(() =>
+        api.updateRelationship(id, {
+          name,
+          fromTable: rel.fromTable,
+          toTable: rel.toTable,
+          fromField: rel.fromField,
+          toField: rel.toField,
+        }),
+      );
+      if (ok === null) {
+        setName(rel.name); // guard already recorded the error; undo the optimistic patch
+        return false;
+      }
+    }
+    return true;
+  }
+
   tableById(id: number): TableView | null {
     return this.tables.find((t) => t.id === id) ?? null;
   }

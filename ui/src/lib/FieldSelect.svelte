@@ -10,7 +10,7 @@
   // the `.ctl-select`/`.le-select` rules use), so it drops into either panel.
   import type { FieldChoice } from './model';
   import Icon from './Icon.svelte';
-  import { FIELD_DRAG_MIME } from './dnd';
+  import { FIELD_DRAG_MIME, PORTAL_COLUMN_DRAG_MIME } from './dnd';
   import { kindIcon } from '../shared/field-kinds';
 
   let {
@@ -25,6 +25,7 @@
     placeholder = 'Select field…',
     title = 'Field',
     dragToPlace = false,
+    portalDrag = null,
   }: {
     fields: readonly FieldChoice[];
     /** Currently-bound field id, or null when unset (e.g. an unresolved binding). */
@@ -49,6 +50,12 @@
      * would be a confusing affordance there, so only the placement picker
      * (RailTools' "Field to place") opts in. */
     dragToPlace?: boolean;
+    /** When set, a `dragToPlace` drag emits a PORTAL-COLUMN payload (the portal
+     * id + declared route alongside the field ids) instead of a plain base-field
+     * drag, so the canvas drop handler creates the dragged related fields as
+     * COLUMNS of this portal (#168). Off (null) = the ordinary base-field drag
+     * the rail's "Field to place" uses. Requires `dragToPlace`. */
+    portalDrag?: { portalId: number; route: string } | null;
   } = $props();
 
   // Each FieldKind::as_str value → the sprite symbol drawn beside the name
@@ -154,7 +161,16 @@
       onselectMany?.(dragging);
     }
     e.dataTransfer.effectAllowed = 'copy';
-    e.dataTransfer.setData(FIELD_DRAG_MIME, JSON.stringify(dragging));
+    // A portal-column picker tags the SAME gesture with a distinct payload so the
+    // drop lands as columns of that portal, not top-level base fields (#168).
+    if (portalDrag) {
+      e.dataTransfer.setData(
+        PORTAL_COLUMN_DRAG_MIME,
+        JSON.stringify({ portalId: portalDrag.portalId, route: portalDrag.route, fieldIds: dragging }),
+      );
+    } else {
+      e.dataTransfer.setData(FIELD_DRAG_MIME, JSON.stringify(dragging));
+    }
   }
 
   // Keep the highlight within bounds as the filter shrinks the list.

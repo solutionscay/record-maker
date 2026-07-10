@@ -6,9 +6,7 @@
   import type { EditorDoc, ObjectDoc } from '../doc.svelte';
   import type { ObjectView } from '../model';
   import FieldSelect from '../FieldSelect.svelte';
-  import { defaultBox } from '../create';
   import {
-    createObject,
     deleteObjects,
     setObjectBinding as persistBinding,
     setObjectBindingPath as persistBindingPath,
@@ -110,8 +108,25 @@
   // left rail. When a portal is selected, resolve its bound route (so the picker
   // offers the related table's fields) and enumerate its authored column children
   // (the field objects whose `parentObjectId` is this portal), so the user can
-  // append and remove columns here. FK-first: a column binds a declared route field.
+  // add and remove columns here. FK-first: a column binds a declared route field.
+  //
+  // Adding uses the SAME gesture as the rail's "Field to place": a multi-select
+  // list you select then DRAG onto the portal (dragToPlace + a portal-column drag
+  // payload). The canvas drop handler (placement.ts) does the parent-aware create;
+  // this component just holds the picker's selection. No click-to-append path.
   let busyCols = $state(false);
+  /** Fields selected in the Columns picker, staged for the drag onto the portal. */
+  let colFieldIds = $state<number[]>([]);
+  // Clear the staged column selection when the selected portal changes, so ids
+  // picked for one portal don't linger into another portal's (different) route.
+  let lastPortalId = -1;
+  $effect(() => {
+    const id = selected.kind === 'portal' ? selected.id : -1;
+    if (id !== lastPortalId) {
+      lastPortalId = id;
+      colFieldIds = [];
+    }
+  });
 
   /** The declared route the selected portal is bound to (its related-table fields
    * feed the column picker), or null when the selection isn't a bound portal. */
@@ -149,41 +164,6 @@
     const seg = (o.binding.split('.').pop() ?? '').toLowerCase();
     const f = portalRoute?.fields.find((c) => c.name.toLowerCase() === seg);
     return f?.name ?? o.label ?? seg;
-  }
-
-  /** Append a column to the selected portal: POST the create-object route with
-   * `parentObjectId` = the portal id and the chosen related field, so the server
-   * builds the route-relative binding (`<route>.<field>`) and creates the column
-   * child (plus its caption label). New columns land ROW-RELATIVE — the next slot
-   * to the right of the last column — reusing the Field tool's default box. */
-  async function addColumn(fieldId: number): Promise<void> {
-    if (selected.kind !== 'portal' || busyCols) return;
-    const size = defaultBox('field');
-    const last = portalColumns.at(-1);
-    const x = last ? last.x + last.w : selected.x;
-    const y = last ? last.y : selected.y;
-    busyCols = true;
-    llog('persist', 'inspector: add portal column', { portal: selected.id, fieldId });
-    try {
-      const views = await createObject(layoutId, {
-        partId: selected.partId,
-        kind: 'field',
-        x,
-        y,
-        w: size.w,
-        h: size.h,
-        fieldId,
-        createLabel: true,
-        parentObjectId: selected.id,
-        rec: doc.rec,
-      });
-      for (const v of views) doc.addObject(v, selected.partId);
-      doc.mark();
-    } catch (e) {
-      reportPersistError(doc, 'add portal column', e);
-    } finally {
-      busyCols = false;
-    }
   }
 
   /** Remove a column from the selected portal — deleting the field child AND the
@@ -227,7 +207,7 @@
 
 <section class="insp-sec">
   <span class="side-label"
-    >{selected.kind === 'text' ? 'Text' : selected.kind === 'portal' ? 'Related list' : 'Binding'}</span
+    >{selected.kind === 'text' ? 'Text' : selected.kind === 'portal' ? 'Related table' : 'Binding'}</span
   >
   {#if selected.kind === 'field'}
     {#if columnPortal}
@@ -290,13 +270,20 @@
     {:else}
       <FieldSelect
         fields={portalRoute.fields}
-        value={null}
-        placeholder="Add column…"
-        title="Add a column from {portalRoute.tableName}"
-        onselect={(id) => addColumn(id)}
+        value={colFieldIds[0] ?? null}
+        values={colFieldIds}
+        multi
+        dragToPlace
+        portalDrag={{ portalId: selected.id, route: portalRoute.path }}
+        placeholder="Fields to add…"
+        title="Select {portalRoute.tableName} fields, then drag onto the portal to add columns; Shift-click range, Ctrl/Cmd-click individual"
+        onselect={(id) => (colFieldIds = [id])}
+        onselectMany={(ids) => (colFieldIds = ids)}
+        onclear={() => (colFieldIds = [])}
       />
+      <span class="le-hint">Drag the selected field{colFieldIds.length === 1 ? '' : 's'} onto the portal to add {colFieldIds.length === 1 ? 'a column' : 'columns'}.</span>
       {#if portalColumns.length === 0}
-        <span class="le-hint">No columns yet — pick a field above to add one.</span>
+        <span class="le-hint">No columns yet — select field(s) above and drag onto the portal.</span>
       {:else}
         <ul class="col-list">
           {#each portalColumns as col (col.id)}

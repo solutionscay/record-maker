@@ -318,6 +318,116 @@ async fn field_placed_into_portal_becomes_a_child_column() {
     assert!(portal.get("parentObjectId").is_none(), "portal is top-level");
 }
 
+/// Renaming a relationship (graph connector drawer) cascades to every binding that
+/// keys on its name — the portal's route and its columns' route-relative bindings —
+/// while a top-level `Table.field` binding and the source field's `reference` name
+/// stay correct.
+#[tokio::test]
+async fn renaming_a_relationship_cascades_to_portal_bindings() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    let customers = sol
+        .create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+        .unwrap();
+    let invoices = sol
+        .create_table(
+            "Invoices",
+            &[
+                NewField { name: "Total".into(), kind: FieldKind::Number },
+                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+            ],
+        )
+        .unwrap();
+    let cust_pk = sol
+        .all_fields(customers)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name.eq_ignore_ascii_case("id"))
+        .unwrap()
+        .id;
+    let cust_name = sol.fields(customers).unwrap()[0].id;
+    let fk = sol.all_fields(invoices).unwrap().into_iter().find(|f| f.name == "CustomerId").unwrap().id;
+    let total_id = sol.fields(invoices).unwrap()[0].id;
+    let rel_id = sol
+        .create_relationship(&NewRelationship {
+            name: "customer".into(),
+            from_table: invoices,
+            to_table: customers,
+            from_field: fk,
+            to_field: cust_pk,
+        })
+        .unwrap()
+        .unwrap()
+        .id;
+
+    let form = sol.layouts_for_table(customers).unwrap().into_iter().find(|l| l.view == "form").unwrap();
+    let body = body_part(&sol, form.id);
+    let portal_id = sol
+        .create_object(
+            form.id,
+            &record_maker_engine::NewObject {
+                part_id: body.id,
+                kind: ObjectKind::Portal,
+                x: 10,
+                y: 10,
+                w: 300,
+                h: 120,
+                binding: Some("customer".into()),
+                content: None,
+                props: None,
+                parent_object_id: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+    let state = state_for(sol);
+    // A portal column (route-relative `customer.Total`) and a top-level base field
+    // (`Customers.Name`, which must NOT be rewritten).
+    let (status, _r) = post_json_body(
+        state.clone(),
+        &format!("/design/{}/object", form.id),
+        &serde_json::json!({"partId":body.id,"kind":"field","x":20,"y":20,"w":100,"h":24,"fieldId":total_id,"parentObjectId":portal_id}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _r) = post_json_body(
+        state.clone(),
+        &format!("/design/{}/object", form.id),
+        &serde_json::json!({"partId":body.id,"kind":"field","x":20,"y":60,"w":100,"h":24,"fieldId":cust_name}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Rename customer -> buyer through the relationship-update endpoint.
+    let (status, resp) = post_json_body(
+        state.clone(),
+        &format!("/schema/relationships/{rel_id}"),
+        &serde_json::json!({"name":"buyer","fromTable":invoices,"toTable":customers,"fromField":fk,"toField":cust_pk}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+
+    let (status, model_json) = get_body(state.clone(), &format!("/design/{}/model?rec=1", form.id)).await;
+    assert_eq!(status, StatusCode::OK);
+    let model: serde_json::Value = serde_json::from_str(&model_json).unwrap();
+    let objs: Vec<&serde_json::Value> =
+        model["parts"].as_array().unwrap().iter().flat_map(|p| p["objects"].as_array().unwrap()).collect();
+    let portal = objs.iter().find(|o| o["id"] == portal_id).unwrap();
+    assert_eq!(portal["binding"], "buyer", "portal route rewritten");
+    let column = objs.iter().find(|o| o["parentObjectId"] == portal_id && o["kind"] == "field").unwrap();
+    assert_eq!(column["binding"], "buyer.Total", "portal column route rewritten");
+    assert!(
+        objs.iter().any(|o| o["binding"] == "Customers.Name"),
+        "top-level Table.field binding untouched by the rename"
+    );
+
+    // The source field's reference name is kept in step with the relationship.
+    let (_s, fields_json) = get_body(state, &format!("/schema/tables/{invoices}/fields")).await;
+    let fields: serde_json::Value = serde_json::from_str(&fields_json).unwrap();
+    let fk_field = fields.as_array().unwrap().iter().find(|f| f["id"] == fk).unwrap();
+    assert_eq!(fk_field["options"]["reference"]["name"], "buyer");
+}
+
 /// #170: a portal's related rows are editable in Browse. Each row renders as its
 /// own `.rec-edit` scope whose cells are `f<terminal_field_id>` inputs wired to
 /// the `/related/*` open/commit/revert endpoints, and POSTing a commit writes the

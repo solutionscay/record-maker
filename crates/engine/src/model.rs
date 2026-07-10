@@ -1070,6 +1070,12 @@ impl Solution {
             stamp_reference(&tx, old_source, None)?;
         }
         stamp_reference(&tx, &source, Some(&saved))?;
+        // A relationship name is the route token a portal/related-list binds, so a
+        // rename has to follow through to those bindings or the portal stops
+        // resolving. Structural-only edits (same name) skip this.
+        if !old.name.eq_ignore_ascii_case(&rel.name) {
+            rewrite_route_bindings(&tx, &old.name, &rel.name)?;
+        }
         tx.commit()?;
         self.relationship_by_id(id)
     }
@@ -1233,6 +1239,46 @@ fn stamp_reference(
         "UPDATE meta_field SET options=?1 WHERE id=?2",
         params![serde_json::to_string(&options)?, field.id],
     )?;
+    Ok(())
+}
+
+/// Rewrite object bindings whose leading route segment names a renamed
+/// relationship. Portal bindings (`route`) and portal-column bindings
+/// (`route.field`, …) key their first dot-segment on a relationship name, so a
+/// rename must follow through. Scoped to portals and their column children, so a
+/// top-level `Table.field` binding is never touched even if a table shares the
+/// old name.
+fn rewrite_route_bindings(
+    tx: &rusqlite::Transaction<'_>,
+    old_name: &str,
+    new_name: &str,
+) -> Result<()> {
+    let mut edits: Vec<(i64, String)> = Vec::new();
+    {
+        let mut stmt = tx.prepare(
+            "SELECT id, binding FROM meta_object \
+             WHERE binding IS NOT NULL AND binding <> '' \
+               AND (kind = 'portal' OR parent_object_id IS NOT NULL)",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (id, binding) = row?;
+            let mut segs: Vec<&str> = binding.split('.').collect();
+            if segs
+                .first()
+                .is_some_and(|s| s.eq_ignore_ascii_case(old_name))
+            {
+                segs[0] = new_name;
+                edits.push((id, segs.join(".")));
+            }
+        }
+    }
+    for (id, binding) in edits {
+        tx.execute(
+            "UPDATE meta_object SET binding = ?1 WHERE id = ?2",
+            params![binding, id],
+        )?;
+    }
     Ok(())
 }
 

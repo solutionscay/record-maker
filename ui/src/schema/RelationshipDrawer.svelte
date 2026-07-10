@@ -36,6 +36,12 @@
   function toggleDelete(next: boolean) {
     if (relationship) void store.setRelationshipReferential(relationship.id, relationship.allowCreate, next);
   }
+  function commitName(next: string) {
+    if (!relationship) return;
+    const name = next.trim();
+    if (!name || name === relationship.name) return;
+    void store.renameRelationship(relationship.id, name);
+  }
 </script>
 
 <SchemaDrawer title="Relationship" {onclose}>
@@ -46,7 +52,22 @@
 
   {#if relationship}
     <div class="rd-context">
-      <span class="rd-name">{relationship.name}</span>
+      <input
+        class="rd-name-input"
+        value={relationship.name}
+        aria-label="Relationship name"
+        title="Rename this relationship — updates every portal bound to it"
+        spellcheck="false"
+        autocomplete="off"
+        onchange={(e) => commitName(e.currentTarget.value)}
+        onkeydown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur();
+          if (e.key === 'Escape') {
+            e.currentTarget.value = relationship?.name ?? '';
+            e.currentTarget.blur();
+          }
+        }}
+      />
       <div class="rd-path">
         <span class="rd-endpoint">{fromTable?.name ?? 'Missing table'}<span class="rd-field">.{fromField?.name ?? '?'}</span></span>
         <span class="rd-arrow" aria-hidden="true">&rarr;</span>
@@ -90,7 +111,7 @@
       </label>
     </section>
 
-    <p class="sc-hint rd-note">Permission changes are saved immediately. The relationship's structure is defined by the field reference in the Fields tab.</p>
+    <p class="sc-hint rd-note">Renaming and permission changes are saved immediately, and update every portal bound to this relationship. Its fields are defined by the field reference in the Fields tab.</p>
   {:else}
     <p class="sc-hint">This relationship no longer exists.</p>
   {/if}
@@ -107,10 +128,27 @@
     background: var(--rm-control-bg);
     box-shadow: var(--sc-shadow);
   }
-  .rd-name {
-    font-size: 13px;
+  .rd-name-input {
+    font: inherit;
+    font-size: 14px;
     font-weight: 700;
     color: var(--rm-text);
+    width: 100%;
+    box-sizing: border-box;
+    padding: 4px 6px;
+    margin: -4px -6px 0;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: transparent;
+    transition: border-color 0.12s ease, background 0.12s ease;
+  }
+  .rd-name-input:hover {
+    border-color: var(--rm-border);
+  }
+  .rd-name-input:focus {
+    outline: none;
+    border-color: var(--rm-accent);
+    background: var(--rm-control-bg);
   }
   .rd-path {
     display: flex;

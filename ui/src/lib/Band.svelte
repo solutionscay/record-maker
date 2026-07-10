@@ -41,10 +41,11 @@
       {:else if o.kind === 'portal'}
         <!-- Portal (#168/#169): mirrors the askama `_band.html` branch. The design
              canvas passes no base record, so a portal here is never resolved and
-             renders the route frame; a resolved Browse portal renders its AUTHORED
-             child columns + one row per related record, each stamped with its
-             terminal id (#170/#172). `portalResolved` (not the column count) picks
-             the branch, so a resolved portal with zero columns still renders cleanly. -->
+             renders the route frame; a resolved Browse portal renders one row per
+             related record, each stamped with its terminal id (#170/#172). Column
+             headings remain ordinary authored text objects. `portalResolved` (not
+             the column count) picks the branch, so a resolved portal with zero
+             columns still renders cleanly. -->
         <div
           class="fm-portal"
           style={(o.portalRowHeight ?? 0) > 0 ? `--fm-portal-row-h: ${o.portalRowHeight}px` : null}
@@ -53,7 +54,6 @@
           {#if !o.portalResolved}
             <span class="fm-portal-tag">{o.binding}</span>
           {:else}
-            <div class="fm-portal-head">{#each o.portalColumns as c}<span class="fm-portal-cell">{c}</span>{/each}</div>
             {#each o.portalRows ?? [] as r (r.id)}
               <div class="fm-portal-row" data-related-id={r.id}>{#each r.cells as c}<span class="fm-portal-cell">{c}</span>{/each}</div>
             {/each}

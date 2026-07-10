@@ -62,11 +62,10 @@ fn field_obj(field_id: i64, value: &str, read_only: bool) -> ObjectView {
 }
 
 /// #168/#169: a portal placed on a Form layout resolves its bound anchor route and
-/// renders one row per related record, with its AUTHORED child columns as the
-/// header and each row stamped with its terminal id. The column children render
-/// INSIDE the portal, not as standalone band objects. An empty set still renders
-/// its columns (a clean header over an empty body), while an unresolved binding
-/// renders neither (the frame placeholder).
+/// renders one row per related record, with each row stamped with its terminal id.
+/// Authored child fields remain internal row templates, while their ordinary text
+/// labels render at authored positions above the portal. An unresolved binding
+/// renders the frame placeholder.
 #[test]
 fn portal_object_renders_related_rows_in_form_view() {
     let mut sol = Solution::open_in_memory().unwrap();
@@ -182,11 +181,39 @@ fn portal_object_renders_related_rows_in_form_view() {
     let totals: Vec<&str> = portal.portal_rows.iter().map(|r| r.cells[0].as_str()).collect();
     assert!(totals.contains(&"42") && totals.contains(&"17"));
     assert!(portal.portal_rows.iter().all(|r| r.id > 0));
-    // The authored column children render inside the portal, never as standalone
-    // top-level band objects (they're filtered from the band in a resolved render).
+    // Portal-owned fields are internal row templates, but their ordinary text
+    // labels remain authored band objects and become the visible headings.
+    let child_objects: Vec<_> = record
+        .parts
+        .iter()
+        .flat_map(|p| &p.objects)
+        .filter(|o| o.parent_object_id == Some(portal_id))
+        .collect();
     assert!(
-        record.parts.iter().flat_map(|p| &p.objects).all(|o| o.parent_object_id.is_none()),
-        "portal column children don't paint as standalone band objects"
+        child_objects.iter().all(|o| !o.field),
+        "portal field templates don't paint as standalone band objects"
+    );
+    assert_eq!(
+        child_objects.iter().map(|o| o.content.as_str()).collect::<Vec<_>>(),
+        vec!["Total", "CustomerId"],
+        "authored portal labels remain visible in Browse"
+    );
+
+    let html = FormTemplate {
+        chrome: form_chrome(),
+        table: "Customers".into(),
+        record: Some(record),
+    }
+    .render()
+    .unwrap();
+    assert!(
+        !html.contains("fm-portal-head"),
+        "Browse must not synthesize a portal header row"
+    );
+    assert!(
+        html.contains(r#"class="fm-text">Total</span>"#)
+            && html.contains(r#"class="fm-text">CustomerId</span>"#),
+        "authored label objects supply the portal headings"
     );
 }
 

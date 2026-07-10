@@ -45,8 +45,9 @@
        each related record is one scrolling row of just those columns
        (`data-related-id` addresses it for #170/#172). `portal_resolved` (not the
        column count) picks the branch: unresolved (design canvas / blank binding)
-       shows the route frame; a resolved portal renders the header + rows, rendering
-       cleanly with zero columns or zero rows (a header over a clean empty body).
+       shows the route frame; a resolved portal renders its rows, rendering cleanly
+       with zero columns or zero rows. Column headings are ordinary authored text
+       objects positioned above the portal, not a synthetic portal-owned row.
        In an editable view each related row is its own `.rec-edit` scope (#170):
        focusing a cell opens+locks that CHILD record, blur/Enter commits it via
        `update_related_record`, Escape reverts — the same open/commit/lock loop as
@@ -61,7 +62,6 @@
       {% if !o.portal_resolved %}
       <span class="fm-portal-tag">{{ o.binding }}</span>
       {% else %}
-      <div class="fm-portal-head">{% for c in o.portal_columns %}<span class="fm-portal-cell">{{ c }}</span>{% endfor %}</div>
       {% for r in o.portal_rows %}
       {% if editable && r.editable %}
       {# Delete/unlink affordance (#172): a per-row button removes the NEAREST

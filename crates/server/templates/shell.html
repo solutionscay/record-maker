@@ -230,19 +230,18 @@
     .fm-portal-tag { display: inline-block; margin: .2rem; padding: .05rem .35rem;
                      font-size: .68rem; color: #5b6675; background: #eef2f7;
                      border-radius: 3px; white-space: nowrap; }
-    /* Resolved portal rows (#169): a header of terminal-field names over one row
-       per related record; cells lay out inline and share a light row rule. The
+    /* Resolved portal rows (#169): one row per related record; cells lay out
+       inline and share a light row rule. Column headings are normal layout text
+       objects, so they keep the exact geometry authored in Layout mode. The
        row-template height (#168) rides the `--fm-portal-row-h` custom property set
-       on `.fm-portal` (the tallest authored column's height): the header and every
-       value row size to it, so the fixed-height portal box — a clipping scroll
+       on `.fm-portal` (the tallest authored column's height): every value row sizes
+       to it, so the fixed-height portal box — a clipping scroll
        viewport — shows `floor(body height / row height)` rows and scrolls the rest.
        Absent (no authored columns) it falls back to content height. Rows never
        shrink, so the count stays geometry-driven as the box height changes. */
-    .fm-portal-head, .fm-portal-row { display: flex; align-items: center; gap: .5rem;
+    .fm-portal-row { display: flex; align-items: center; gap: .5rem;
                      box-sizing: border-box; height: var(--fm-portal-row-h, auto);
                      padding: .12rem .35rem; font-size: .72rem; white-space: nowrap; }
-    .fm-portal-head { font-weight: 600; color: #5b6675; background: #eef2f7;
-                     position: sticky; top: 0; z-index: 1; }
     .fm-portal-row { border-top: 1px solid #eef1f5; color: #2b3440; }
     /* Create-new blank row (#171): a faint tinted trailing row that mints a
        related record on commit; rendered only when the relationship permits it. */

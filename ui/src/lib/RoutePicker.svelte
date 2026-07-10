@@ -193,8 +193,8 @@
   .rp-current-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--rm-text-dim); }
   .rp-placeholder .rp-current-table { color: var(--rm-text-dim); font-weight: 400; }
   .rp-caret { flex: 0 0 auto; color: #8a8a8e; }
-  .rp-pop { position: absolute; top: calc(100% + 5px); right: 0; z-index: 50; width: max(100%, 320px); max-width: min(420px, calc(100vw - 24px)); padding: 6px; border: .5px solid var(--rm-border); border-radius: 10px; background: var(--rm-panel-bg, var(--rm-control-bg)); box-shadow: 0 10px 30px rgba(0,0,0,.2); }
-  .rp-input { width: 100%; margin-bottom: 6px; padding: 7px 9px; border: .5px solid var(--rm-border); border-radius: 6px; background: var(--rm-control-bg); color: var(--rm-text); font: inherit; font-size: 13px; }
+  .rp-pop { position: absolute; top: calc(100% + 5px); left: 0; z-index: 50; box-sizing: border-box; width: 100%; max-width: 100%; padding: 6px; border: .5px solid var(--rm-border); border-radius: 10px; background: var(--rm-panel-bg, var(--rm-control-bg)); box-shadow: 0 10px 30px rgba(0,0,0,.2); }
+  .rp-input { box-sizing: border-box; width: 100%; margin-bottom: 6px; padding: 7px 9px; border: .5px solid var(--rm-border); border-radius: 6px; background: var(--rm-control-bg); color: var(--rm-text); font: inherit; font-size: 13px; }
   .rp-input:focus { outline: none; border-color: var(--rm-accent); box-shadow: 0 0 0 2px rgba(10,132,255,.22); }
   .rp-list { list-style: none; max-height: 280px; overflow-y: auto; margin: 0; padding: 0; }
   .rp-option { display: flex; flex-direction: column; gap: 4px; padding: 8px 9px; border-radius: 6px; color: var(--rm-text); cursor: pointer; }
@@ -203,7 +203,8 @@
   .rp-route-main { display: flex; align-items: baseline; gap: 8px; }
   .rp-table { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
   .rp-depth { margin-left: auto; flex: 0 0 auto; font-size: 10.5px; opacity: .68; }
-  .rp-path { display: flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; white-space: nowrap; font-size: 10.5px; color: var(--rm-text-dim); }
+  .rp-path { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 4px; min-width: 0; font-size: 10.5px; line-height: 1.35; color: var(--rm-text-dim); }
+  .rp-path > span:not(.rp-hop-card):not(.rp-arrow) { min-width: 0; overflow-wrap: anywhere; }
   .rp-active .rp-path { color: inherit; opacity: .78; }
   .rp-hop-card { display: inline-flex; justify-content: center; min-width: 16px; padding: 0 3px; border: 1px solid currentColor; border-radius: 999px; font-size: 9px; line-height: 14px; opacity: .72; }
   .rp-arrow { opacity: .55; }

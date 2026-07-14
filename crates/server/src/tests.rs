@@ -2992,6 +2992,86 @@ async fn design_duplicate_field_by_binding_without_field_id() {
     );
 }
 
+/// #85/#48 paste/duplicate of a PORTAL must carry its relationship route. A
+/// portal's `binding` slot holds the route path, and the canvas clone flow sends
+/// it (like the portal tool does) even though a portal is `bindable:false`.
+/// Dropping it makes create reject the clone with "portal needs a route" — the
+/// bug a user hit copy/pasting a portal. This locks the server contract the
+/// client fix (clipboard-controller carrying the binding for `kind === 'portal'`)
+/// depends on.
+#[tokio::test]
+async fn design_portal_paste_carries_route_binding() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    let customers = sol
+        .create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+        .unwrap();
+    let invoices = sol
+        .create_table(
+            "Invoices",
+            &[
+                NewField { name: "Total".into(), kind: FieldKind::Number },
+                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+            ],
+        )
+        .unwrap();
+    let cust_pk = sol
+        .all_fields(customers)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name.eq_ignore_ascii_case("id"))
+        .map(|f| f.id)
+        .unwrap();
+    let fk = sol
+        .all_fields(invoices)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name == "CustomerId")
+        .unwrap()
+        .id;
+    sol.create_relationship(&NewRelationship {
+        name: "customer".into(),
+        from_table: invoices,
+        to_table: customers,
+        from_field: fk,
+        to_field: cust_pk,
+    })
+    .unwrap()
+    .unwrap();
+
+    let form = sol
+        .layouts_for_table(customers)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.view == "form")
+        .unwrap();
+    let layout_id = form.id;
+    let part_id = body_part(&sol, layout_id).id;
+    let state = state_for(sol);
+
+    // Exactly what the canvas POSTs when pasting/duplicating a portal: kind=portal,
+    // no createLabel, the route riding the `binding` slot.
+    let body = format!(
+        r#"{{"partId":{part_id},"kind":"portal","x":40,"y":40,"w":300,"h":120,"binding":"customer"}}"#
+    );
+    let (status, resp) =
+        post_json_body(state.clone(), &format!("/design/{layout_id}/object"), &body).await;
+    assert_eq!(status, StatusCode::OK, "portal paste with route\n{resp}");
+    assert!(resp.contains(r#""kind":"portal""#), "portal created\n{resp}");
+    assert!(resp.contains(r#""binding":"customer""#), "route preserved on the clone\n{resp}");
+
+    // The regression itself: dropping the binding (the pre-fix client behavior)
+    // is rejected — proving the route is load-bearing, not optional.
+    let no_route =
+        format!(r#"{{"partId":{part_id},"kind":"portal","x":60,"y":60,"w":300,"h":120}}"#);
+    let (status, resp) =
+        post_json_body(state.clone(), &format!("/design/{layout_id}/object"), &no_route).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "portal without a route is rejected\n{resp}"
+    );
+}
+
 #[tokio::test]
 async fn design_selected_object_inspector_updates_field_text_and_read_only() {
     let mut sol = Solution::open_in_memory().unwrap();

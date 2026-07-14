@@ -436,6 +436,13 @@ pub(crate) struct ObjectView {
     pub(crate) portal_column_lefts: Vec<i64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) portal_column_widths: Vec<i64>,
+    /// Portal (#169): each authored column's box+text inline style, parallel to
+    /// [`Self::portal_columns`], so a Browse value cell renders the same field-box
+    /// appearance (fill/border/radius + colour/font/align) the designer authored in
+    /// Layout. Empty for non-portals and unstyled columns; skipped from JSON when
+    /// empty so the flat design-model fixture stays byte-identical.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) portal_column_styles: Vec<String>,
     /// Portal (#169): one entry per related record in the resolved set, after the
     /// display-only filter (#112) and the declared sort. Each carries the terminal
     /// record id (stamped `data-related-id`) and its value for each AUTHORED column,
@@ -851,6 +858,12 @@ struct PortalResolved {
     /// equal flex widths. One geometry source for both, exactly as Layout renders it.
     column_lefts: Vec<i64>,
     column_widths: Vec<i64>,
+    /// #169: each authored column's box+text inline style (`object_style` fill/
+    /// border/radius + `text_style` colour/font/align), parallel to `columns`. A
+    /// Browse value cell renders the SAME field-box appearance the designer authored
+    /// in Layout — the default `.fm-field` border/fill comes from CSS, these carry
+    /// the per-object overrides on top. Empty string for an unstyled column.
+    column_styles: Vec<String>,
     /// #168: the repeating-row template height — the tallest authored column field
     /// object's `h`. Sizes the header + each value row so the fixed-height portal
     /// box shows a geometry-driven number of rows and scrolls the rest. `0` when the
@@ -908,6 +921,7 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
     let mut column_editable: Vec<bool> = Vec::new();
     let mut column_lefts: Vec<i64> = Vec::new();
     let mut column_widths: Vec<i64> = Vec::new();
+    let mut column_styles: Vec<String> = Vec::new();
     // The row-template height is the tallest authored column's `h` — the row slot
     // the designer sized. It drives both the header and each value row so the
     // fixed-height portal box shows `floor(body / row)` rows and scrolls the rest.
@@ -959,6 +973,14 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         // doc on `PortalResolved::column_lefts`).
         column_lefts.push(child.x - o.x);
         column_widths.push(child.w);
+        // The authored field-box + text appearance, so the Browse cell mirrors the
+        // Layout field (fill/border/radius + colour/font/align) on top of the default
+        // `.fm-field` look supplied by CSS.
+        column_styles.push(format!(
+            "{}{}",
+            object_style(child.kind, child.props.as_deref()),
+            text_style(child.kind, child.props.as_deref()),
+        ));
         row_height = row_height.max(child.h);
     }
     // The anchoring relationship (the route's first hop) carries the referential
@@ -1031,6 +1053,7 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         column_editable,
         column_lefts,
         column_widths,
+        column_styles,
         row_height,
         rows,
         can_create,
@@ -1128,6 +1151,7 @@ fn prepared_object_view(
         column_editable: portal_column_editable,
         column_lefts: portal_column_lefts,
         column_widths: portal_column_widths,
+        column_styles: portal_column_styles,
         row_height: portal_row_height,
         rows: portal_rows,
         can_create: portal_can_create,
@@ -1180,6 +1204,7 @@ fn prepared_object_view(
         portal_column_editable,
         portal_column_lefts,
         portal_column_widths,
+        portal_column_styles,
         portal_rows,
         portal_can_create,
         portal_create_url,

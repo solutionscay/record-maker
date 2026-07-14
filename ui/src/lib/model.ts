@@ -90,6 +90,11 @@ export interface ObjectView {
    * canvas (which never resolves a portal). */
   portalColumnLefts?: number[];
   portalColumnWidths?: number[];
+  /** Portal (#169): each authored column's box+text inline style (fill/border/radius
+   * + colour/font/align), parallel to `portalColumns`, so a Browse value cell renders
+   * the same field-box appearance the designer authored in Layout. Omitted for
+   * non-portals and unstyled columns. */
+  portalColumnStyles?: string[];
   /** Portal (#169): one entry per related record (after the #112 filter + declared
    * sort), each carrying the terminal record id and its cell values in column
    * order. Omitted when empty. */

@@ -83,6 +83,13 @@ export interface ObjectView {
   /** Parallel editability flags: intermediate route fields and system/read-only
    * terminal fields render as values instead of row editor inputs. */
   portalColumnEditable?: boolean[];
+  /** Portal (#169): each authored column's portal-relative left offset and width in
+   * px, parallel to `portalColumns`. Browse places each value cell at this authored
+   * geometry — the same x/w its heading label (a separate authored text object) sits
+   * at — so column and heading align 1:1. Omitted for non-portals and the design
+   * canvas (which never resolves a portal). */
+  portalColumnLefts?: number[];
+  portalColumnWidths?: number[];
   /** Portal (#169): one entry per related record (after the #112 filter + declared
    * sort), each carrying the terminal record id and its cell values in column
    * order. Omitted when empty. */

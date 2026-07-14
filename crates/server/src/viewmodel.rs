@@ -426,6 +426,16 @@ pub(crate) struct ObjectView {
     /// intermediate route tables and system/read-only fields render as values.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) portal_column_editable: Vec<bool>,
+    /// Portal (#169): each authored column's portal-relative left offset and width in
+    /// px, parallel to [`Self::portal_columns`]. Browse positions each value cell at
+    /// this authored geometry — the same x/w its heading label (a separate authored
+    /// text object) sits at — so column and heading align 1:1, one geometry source
+    /// for both. Empty for every non-portal object and an unresolved portal frame;
+    /// skipped from JSON then so the flat design-model fixture stays byte-identical.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) portal_column_lefts: Vec<i64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) portal_column_widths: Vec<i64>,
     /// Portal (#169): one entry per related record in the resolved set, after the
     /// display-only filter (#112) and the declared sort. Each carries the terminal
     /// record id (stamped `data-related-id`) and its value for each AUTHORED column,
@@ -833,6 +843,14 @@ struct PortalResolved {
     columns: Vec<String>,
     field_ids: Vec<i64>,
     column_editable: Vec<bool>,
+    /// #169: each authored column's left offset and width, in px, RELATIVE to the
+    /// portal object's own origin (`child.x - portal.x` / `child.w`) — parallel to
+    /// `columns`. The Browse body positions each value cell at this exact geometry so
+    /// a column and its heading label (a separate authored text object placed at the
+    /// same authored x/w) line up 1:1, instead of the cells being redistributed to
+    /// equal flex widths. One geometry source for both, exactly as Layout renders it.
+    column_lefts: Vec<i64>,
+    column_widths: Vec<i64>,
     /// #168: the repeating-row template height — the tallest authored column field
     /// object's `h`. Sizes the header + each value row so the fixed-height portal
     /// box shows a geometry-driven number of rows and scrolls the rest. `0` when the
@@ -888,6 +906,8 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
     let mut field_ids: Vec<i64> = Vec::new();
     let mut column_depths: Vec<usize> = Vec::new();
     let mut column_editable: Vec<bool> = Vec::new();
+    let mut column_lefts: Vec<i64> = Vec::new();
+    let mut column_widths: Vec<i64> = Vec::new();
     // The row-template height is the tallest authored column's `h` — the row slot
     // the designer sized. It drives both the header and each value row so the
     // fixed-height portal box shows `floor(body / row)` rows and scrolls the rest.
@@ -934,6 +954,11 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         column_editable.push(
             depth == route.hops.len() && !field.is_system() && !child.read_only,
         );
+        // Authored column geometry, portal-relative — the same x/w the heading label
+        // was placed at, so the Browse cell and its label align 1:1 (see the field
+        // doc on `PortalResolved::column_lefts`).
+        column_lefts.push(child.x - o.x);
+        column_widths.push(child.w);
         row_height = row_height.max(child.h);
     }
     // The anchoring relationship (the route's first hop) carries the referential
@@ -1004,6 +1029,8 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         columns,
         field_ids,
         column_editable,
+        column_lefts,
+        column_widths,
         row_height,
         rows,
         can_create,
@@ -1099,6 +1126,8 @@ fn prepared_object_view(
         columns: portal_columns,
         field_ids: portal_field_ids,
         column_editable: portal_column_editable,
+        column_lefts: portal_column_lefts,
+        column_widths: portal_column_widths,
         row_height: portal_row_height,
         rows: portal_rows,
         can_create: portal_can_create,
@@ -1149,6 +1178,8 @@ fn prepared_object_view(
         portal_row_height,
         portal_field_ids,
         portal_column_editable,
+        portal_column_lefts,
+        portal_column_widths,
         portal_rows,
         portal_can_create,
         portal_create_url,

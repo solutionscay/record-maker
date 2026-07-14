@@ -225,34 +225,54 @@
        When unresolved (design canvas / blank binding) the frame shows the bound
        route tag so the designer can place, size, and re-anchor it. In Browse the
        route resolves and the container scrolls its related rows (#169). */
-    .fm-portal { width: 100%; height: 100%; box-sizing: border-box; overflow: auto;
-                 background: #fbfcfe; border: 1px dashed #b9c2cc; border-radius: 2px; }
+    /* The frame is an INSET box-shadow, not a border, so it adds no layout offset:
+       the portal's content box starts exactly at the object's origin. Column cells
+       are then positioned at their authored portal-relative x/w (below), landing
+       pixel-exact under their heading labels (authored text objects at the same
+       x/w) — one geometry source for heading and cell, matching Layout. A border
+       would inset the content 1px and shift the whole body off the headings. */
+    .fm-portal { width: 100%; height: 100%; box-sizing: border-box;
+                 overflow-x: hidden; overflow-y: auto;
+                 background: #fbfcfe; box-shadow: inset 0 0 0 1px #b9c2cc; border-radius: 2px; }
     .fm-portal-tag { display: inline-block; margin: .2rem; padding: .05rem .35rem;
                      font-size: .68rem; color: #5b6675; background: #eef2f7;
                      border-radius: 3px; white-space: nowrap; }
-    /* Resolved portal rows (#169): one row per related record; cells lay out
-       inline and share a light row rule. Column headings are normal layout text
-       objects, so they keep the exact geometry authored in Layout mode. The
-       row-template height (#168) rides the `--fm-portal-row-h` custom property set
-       on `.fm-portal` (the tallest authored column's height): every value row sizes
-       to it, so the fixed-height portal box — a clipping scroll
-       viewport — shows `floor(body height / row height)` rows and scrolls the rest.
-       Absent (no authored columns) it falls back to content height. Rows never
-       shrink, so the count stays geometry-driven as the box height changes. */
-    .fm-portal-row { display: flex; align-items: center; gap: .5rem;
-                     box-sizing: border-box; height: var(--fm-portal-row-h, auto);
-                     padding: .12rem .35rem; font-size: .72rem; white-space: nowrap; }
+    /* Resolved portal rows (#169): one row per related record. A row is a bare
+       positioning context; each value cell is absolutely placed at its column's
+       authored portal-relative x/w (inline `left`/`width`, from
+       `portal_column_lefts`/`portal_column_widths`) so it sits directly under its
+       heading — headings are normal layout text objects placed at the same authored
+       x/w, so heading and cell share one geometry source, exactly as Layout renders
+       them. No flex/gap/padding here: those redistributed cells to equal widths and
+       drifted them off the fixed headings. The row-template height (#168) rides the
+       `--fm-portal-row-h` custom property set on `.fm-portal` (the tallest authored
+       column's height): every value row sizes to it, so the fixed-height portal
+       box — a clipping scroll viewport — shows `floor(body height / row height)`
+       rows and scrolls the rest. Absent (no authored columns) it falls back to
+       content height. Rows never shrink, so the count stays geometry-driven as the
+       box height changes. */
+    .fm-portal-row { position: relative; box-sizing: border-box;
+                     height: var(--fm-portal-row-h, auto);
+                     font-size: .72rem; white-space: nowrap; }
     .fm-portal-row { border-top: 1px solid #eef1f5; color: #2b3440; }
     /* Create-new blank row (#171): a faint tinted trailing row that mints a
        related record on commit; rendered only when the relationship permits it. */
     .fm-portal-add { background: #f4f8fc; }
     .fm-portal-add .fm-finput::placeholder { color: #9aa6b2; }
-    .fm-portal-cell { flex: 1 1 0; min-width: 0; overflow: hidden;
-                     text-overflow: ellipsis; }
-    /* Per-row delete/unlink affordance (#172): a compact trailing button shown
-       only when the relationship permits delete; reddens on hover. It is a fixed
-       trailing control, not a flexing cell, so it never steals column width. */
-    .fm-portal-del { flex: 0 0 auto; align-self: center; margin-left: .15rem;
+    /* A value cell placed at its column's authored geometry (inline `left`/`width`).
+       Absolute, so it never flexes off its heading; text clips with an ellipsis and
+       is centred vertically via the row-template line-height. `.fm-finput` (editable
+       cell) reuses the same left/width and supplies its own padding. */
+    .fm-portal-cell { position: absolute; top: 0; bottom: 0; box-sizing: border-box;
+                     padding: 0 .45rem; overflow: hidden; white-space: nowrap;
+                     text-overflow: ellipsis; min-width: 0;
+                     line-height: var(--fm-portal-row-h, 1.6rem); }
+    /* Per-row delete/unlink affordance (#172): a compact button shown only when the
+       relationship permits delete; reddens on hover. Pinned to the row's right edge
+       (the cells are absolutely placed at authored geometry, so it floats over the
+       trailing gutter rather than consuming column width). */
+    .fm-portal-del { position: absolute; right: .15rem; top: 50%;
+                     transform: translateY(-50%);
                      width: 1.05rem; height: 1.05rem; padding: 0; line-height: 1;
                      border: 0; border-radius: 3px; background: transparent;
                      color: #9aa6b2; font-size: .95rem; cursor: pointer; }

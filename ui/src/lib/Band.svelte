@@ -55,7 +55,7 @@
             <span class="fm-portal-tag">{o.binding}</span>
           {:else}
             {#each o.portalRows ?? [] as r (r.id)}
-              <div class="fm-portal-row" data-related-id={r.id}>{#each r.cells as c}<span class="fm-portal-cell">{c}</span>{/each}</div>
+              <div class="fm-portal-row" data-related-id={r.id}>{#each r.cells as c, i}<span class="fm-portal-cell" style={`left:${o.portalColumnLefts?.[i] ?? 0}px;width:${o.portalColumnWidths?.[i] ?? 0}px`}>{c}</span>{/each}</div>
             {/each}
           {/if}
         </div>

@@ -55,6 +55,8 @@ fn field_obj(field_id: i64, value: &str, read_only: bool) -> ObjectView {
         portal_row_height: 0,
         portal_field_ids: Vec::new(),
         portal_column_editable: Vec::new(),
+        portal_column_lefts: Vec::new(),
+        portal_column_widths: Vec::new(),
         portal_rows: Vec::new(),
         portal_can_create: false,
         portal_create_url: String::new(),
@@ -362,7 +364,9 @@ async fn multi_hop_portal_round_trips_many_to_many_and_scopes_mutations() {
 
     let (status, html) = get_body(state.clone(), &format!("/browse/{}?view=form&rec=1", form.id)).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(html.contains(r#"<span class="fm-portal-cell">Lead</span>"#), "join field renders read-only");
+    // The cell is placed at its column's authored portal-relative geometry
+    // (x 20 − portal x 10 = left 10; width 120), matching its heading label 1:1.
+    assert!(html.contains(r#"<span class="fm-portal-cell" style="left:10px;width:120px">Lead</span>"#), "join field renders read-only at authored geometry");
     assert!(html.contains(&format!(r#"name="f{title_id}""#)), "terminal field stays editable");
     assert!(html.contains("Math"), "Ada sees her terminal Course");
     assert!(!html.contains("Private"), "another Student's Course does not leak into the portal");

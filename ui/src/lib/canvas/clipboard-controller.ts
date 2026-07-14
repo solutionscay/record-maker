@@ -174,8 +174,14 @@ export class ClipboardController {
         fieldId: caps.bindable ? c.fieldId : null,
         // The binding is what actually recreates the value object: send it so a
         // field whose fieldId is null (unresolved binding / empty table) still
-        // clones instead of 400ing, and so the copy keeps its exact binding.
-        binding: caps.bindable ? c.binding : null,
+        // clones instead of 400ing, and so the copy keeps its exact binding. A
+        // portal also lives in the `binding` slot — it holds the relationship
+        // ROUTE — but is `bindable:false` (the field-binding inspector must not
+        // target it), so carry its binding explicitly or create rejects the clone
+        // with "portal needs a route". Matches how the portal TOOL sends its route
+        // on placement (placement.ts). `fieldId`/`createLabel` stay gated on
+        // `bindable`: a portal has no field and no caption to spawn.
+        binding: caps.bindable || c.kind === 'portal' ? c.binding : null,
         createLabel: caps.bindable ? false : undefined, // NEVER auto-spawn a caption
         content: caps.contentSlot ? c.content : null,
         props: c.props ? parseProps(c.props) : null, // string → object for the wire

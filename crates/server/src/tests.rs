@@ -164,7 +164,10 @@ fn portal_object_renders_related_rows_in_form_view() {
                 h: 24,
                 binding: Some("customer".into()),
                 content: None,
-                props: Some(r#"{"rowCount":3}"#.into()),
+                props: Some(
+                    r##"{"rowCount":3,"fill":"#abc123","stroke":"#123abc","strokeWidth":2}"##
+                        .into(),
+                ),
                 parent_object_id: None,
             },
         )
@@ -278,8 +281,16 @@ fn portal_object_renders_related_rows_in_form_view() {
     );
     assert!(
         html.contains(r#"class="fm-obj fm-portal-obj"#)
-            && html.contains(r#"style="--fm-portal-row-h: 24px;--fm-portal-h: 72px"#),
+            && html.contains(
+                r#"style="--fm-portal-row-h: 24px;--fm-portal-h: 72px;background:#abc123;box-shadow:0 0 0 2px #123abc;"#
+            ),
         "portal selects one 24px row while its Browse viewport spans three rows\n{html}"
+    );
+    assert!(
+        html.contains(
+            r#"style="left:10px; top:10px; width:300px; height:24px; z-index:0;"#
+        ),
+        "fill and border must not paint on the one-row selection wrapper\n{html}"
     );
     assert!(
         html.contains(r#"class="fm-text">Total</span>"#)

@@ -22,6 +22,48 @@ pub struct Record {
 }
 
 impl Solution {
+    /// Record-session INSERT commit (#182): validate and write inside one short
+    /// SQLite transaction. Process termination can expose either the complete
+    /// row or no row, never a partially committed working copy.
+    pub fn commit_insert_record(
+        &self,
+        table: &TableMeta,
+        values: &[(&FieldMeta, String)],
+    ) -> Result<i64> {
+        self.data.execute_batch("BEGIN IMMEDIATE")?;
+        match self.insert_record(table, values) {
+            Ok(id) => {
+                self.data.execute_batch("COMMIT")?;
+                Ok(id)
+            }
+            Err(error) => {
+                let _ = self.data.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Record-session UPDATE commit (#182): full validation and the canonical
+    /// write share one short transaction.
+    pub fn commit_update_record(
+        &self,
+        table: &TableMeta,
+        id: i64,
+        values: &[(&FieldMeta, String)],
+    ) -> Result<()> {
+        self.data.execute_batch("BEGIN IMMEDIATE")?;
+        match self.update_record(table, id, values) {
+            Ok(()) => {
+                self.data.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.data.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     /// List all rows of `table`, with cells aligned to `fields`.
     pub fn list_records(&self, table: &TableMeta, fields: &[FieldMeta]) -> Result<Vec<Record>> {
         let mut select = String::from("id");
@@ -555,6 +597,56 @@ mod tests {
         // deletion shrinks the found set; order is preserved
         s.delete_record(&table, b).unwrap();
         assert_eq!(s.record_ids(&table).unwrap(), vec![a, c]);
+    }
+
+    #[test]
+    fn record_session_commits_are_atomic_on_validation_failure() {
+        let mut solution = Solution::open_in_memory().unwrap();
+        let table_id = solution
+            .create_table(
+                "Invoices",
+                &[
+                    NewField { name: "Number".into(), kind: FieldKind::Text },
+                    NewField { name: "Note".into(), kind: FieldKind::Text },
+                ],
+            )
+            .unwrap();
+        let table = solution.table_by_id(table_id).unwrap().unwrap();
+        let fields = solution.fields(table_id).unwrap();
+        solution
+            .update_field_options(
+                table_id,
+                fields[0].id,
+                r#"{"validation":{"required":true}}"#,
+            )
+            .unwrap();
+        let fields = solution.fields(table_id).unwrap();
+
+        assert!(solution
+            .commit_insert_record(
+                &table,
+                &[(&fields[0], "".into()), (&fields[1], "pending".into())],
+            )
+            .is_err());
+        assert!(solution.record_ids(&table).unwrap().is_empty());
+
+        let id = solution
+            .commit_insert_record(
+                &table,
+                &[(&fields[0], "INV-1".into()), (&fields[1], "old".into())],
+            )
+            .unwrap();
+        assert!(solution
+            .commit_update_record(
+                &table,
+                id,
+                &[(&fields[0], "".into()), (&fields[1], "new".into())],
+            )
+            .is_err());
+        assert_eq!(
+            solution.get_record(&table, &fields, id).unwrap().unwrap(),
+            vec!["INV-1", "old"]
+        );
     }
 
     #[test]

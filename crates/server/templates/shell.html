@@ -333,6 +333,9 @@
     .dialog-ok:hover { background: #1a5fd0; }
     .dialog.danger .dialog-ok { background: #b00020; border-color: #b00020; }
     .dialog.danger .dialog-ok:hover { background: #970019; }
+    .rec-edit.validation-invalid { outline: 2px solid #b00020; outline-offset: 2px; }
+    .rec-edit.validation-invalid input:focus,
+    .fm-portal-add.validation-invalid input:focus { box-shadow: 0 0 0 2px rgba(176,0,32,.28); }
     .rm-context-menu { position: fixed; z-index: 10000; min-width: 190px; padding: 5px;
       border: .5px solid var(--rm-border-strong); border-radius: 8px; background: rgba(255,255,255,.98);
       color: var(--rm-text); box-shadow: 0 10px 32px rgba(0,0,0,.18), 0 2px 8px rgba(0,0,0,.1);
@@ -372,7 +375,7 @@
         {% if chrome.mode == "browse" %}
         {% match chrome.nav %}
         {% when Some with (nav) %}
-          <form id="rm-new-record" class="inline" method="post" action="/browse/{{ nav.layout_id }}">
+          <form id="rm-new-record" class="inline rm-new-record" method="post" action="/browse/{{ nav.layout_id }}">
             <input type="hidden" name="view" value="{{ nav.view }}">
             <button type="submit" class="act" title="Add a new record (Ctrl/⌘ N)"><svg class="icon"><use href="#icon-plus"></use></svg>New</button>
           </form>
@@ -420,7 +423,7 @@
 
       <div class="rail-card">
         <span class="side-label">Layout</span>
-        <select class="layout-select" onchange="if(this.value)location.href='/browse/'+this.value">
+        <select class="layout-select" data-layout-select>
           {% for l in chrome.layouts %}
           <option value="{{ l.id }}" {% if l.selected %}selected{% endif %}>{{ l.name }}</option>
           {% else %}
@@ -458,7 +461,7 @@
           <input type="hidden" name="view" value="{{ nav.view }}">
           <span class="side-label">Record</span>
           <input class="rec-num" type="number" name="rec" min="1" max="{{ nav.total }}"
-                 value="{{ nav.current }}" onchange="this.form.submit()"
+                 value="{{ nav.current }}"
                  aria-label="Current record — type a number or use the arrows to jump">
         </form>
         {% endif %}
@@ -640,10 +643,10 @@
       });
       addItem(menu, 'Find', '', true, false, function () {});
       addItem(menu, 'Go to Layout Mode', 'Ctrl+L', LID === null, false, function () {
-        window.location.href = '/design/' + LID;
+        window.rmNavigate('/design/' + LID);
       });
       addItem(menu, 'Reload', '', false, false, function () {
-        window.location.reload();
+        window.rmNavigate(window.location.href);
       });
       document.body.appendChild(menu);
       var width = 210, height = 38 + 5 * 31;
@@ -686,161 +689,357 @@
   })();
   </script>
 
-  {# Shared inline-edit controller (#40). Any `.rec-edit` element (a record's
-     editor) opens on focus, commits on leaving it or pressing Enter, and reverts
-     on Escape. Works the same in Form, List, and Table views. Commits use
-     sendBeacon so they survive the navigation that often triggers them. #}
+  {# RecordEditCoordinator (#182): every exit intent is held until all open
+     record scopes commit or explicitly revert. Canonical correctness never
+     depends on an unload beacon. #}
   <script>
   (function () {
-    function beacon(url, body) { try { return navigator.sendBeacon(url, body); } catch (e) { return false; } }
-    function recordBody(el) {
+    var OWNER_KEY = 'record-maker-edit-owner';
+    var owner = sessionStorage.getItem(OWNER_KEY);
+    if (!owner) {
+      owner = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() :
+        'owner-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+      sessionStorage.setItem(OWNER_KEY, owner);
+    }
+    var allowExit = false;
+    var gatePromise = null;
+    var pendingIntent = null;
+    var historySentinelInstalled = false;
+    var historyRestore = null;
+    var scopeEls = Array.prototype.slice.call(document.querySelectorAll('.rec-edit, .fm-portal-add'));
+    var scopes = scopeEls.map(function (el) {
+      return {
+        el: el,
+        state: el.dataset.edit ? 'open' : 'closed',
+        token: el.dataset.edit || '',
+        owner: el.dataset.owner || owner,
+        pending: el.dataset.pending != null || el.classList.contains('fm-portal-add'),
+        promise: null,
+        lastResponse: null
+      };
+    });
+
+    function scopeForTarget(target) {
+      var el = target && target.closest && target.closest('.rec-edit, .fm-portal-add');
+      return scopes.find(function (scope) { return scope.el === el; });
+    }
+    function ownControls(scope) {
+      return Array.prototype.filter.call(
+        scope.el.querySelectorAll('input[name], select[name], textarea[name]'),
+        function (control) { return scopeForTarget(control) === scope; }
+      );
+    }
+    function recordBody(scope) {
       var p = new URLSearchParams();
-      el.querySelectorAll('input[name], select[name], textarea[name]').forEach(function (i) {
-        // Value formatting (#77/#78): a formatted field's input DISPLAYS the
-        // formatted string but must COMMIT its raw value, tracked in data-raw
-        // (kept in sync as the user types). Non-formatted controls have no
-        // data-raw and commit their value verbatim, exactly as before.
-        p.append(i.name, i.dataset.raw != null ? i.dataset.raw : i.value);
+      var seen = Object.create(null);
+      ownControls(scope).forEach(function (control) {
+        if (seen[control.name]) return;
+        seen[control.name] = true;
+        p.set(control.name, control.dataset.raw != null ? control.dataset.raw : control.value);
       });
-      if (el.dataset.view) p.append('view', el.dataset.view);
-      if (el.dataset.rec) p.append('rec', el.dataset.rec);
+      if (scope.el.dataset.view) p.set('view', scope.el.dataset.view);
+      if (scope.el.dataset.rec) p.set('rec', scope.el.dataset.rec);
+      p.set('_owner', scope.owner);
+      if (scope.token) p.set('_edit', scope.token);
       return p;
     }
-    // For formatted-field inputs, show the RAW value while editing and restore the
-    // formatted display on a clean blur; keep data-raw current as the user types.
-    document.querySelectorAll('.rec-edit input[data-raw]').forEach(function (i) {
-      i.addEventListener('focus', function () { i.value = i.dataset.raw; });
-      i.addEventListener('input', function () { i.dataset.raw = i.value; i.dataset.dirty = '1'; });
-      i.addEventListener('blur', function () {
-        if (i.dataset.dirty !== '1' && i.dataset.fmt != null) i.value = i.dataset.fmt;
-      });
-    });
-    // The `f<id>` inputs owned by THIS record scope — not those of a nested child
-    // `.rec-edit` (a portal row, #170) and not the trailing create-new row. Used
-    // for a draft's per-field saves so a portal cell's blur never fires the base
-    // record's draft save. (recordBody stays as-is: extra terminal params are
-    // ignored server-side, matching today's commit.)
-    function ownInputs(el) {
-      return Array.prototype.filter.call(el.querySelectorAll('input[name]'), function (i) {
-        return i.closest('.rec-edit') === el && !i.closest('.fm-portal-add');
+
+    function post(url, body) {
+      return fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString()
       });
     }
-    document.querySelectorAll('.rec-edit').forEach(function (el) {
-      var open = false;
-      // A never-committed DRAFT (#173, `data-draft`): required + uniqueness were
-      // deferred at mint, so per-field saves stay lenient and the record-EXIT
-      // commit is the BLOCKING promotion gate whose response we must read.
-      var draft = el.dataset.draft != null;
-      function openRec() { if (open) return; open = true; beacon(el.dataset.open); }
-      function commit() {
-        if (!open) return;
-        open = false;
-        if (!draft) { beacon(el.dataset.action, recordBody(el)); return; }
-        // Draft record-EXIT: the full gate fires here. `keepalive` survives the
-        // navigation that often triggers the exit (like sendBeacon) but lets us
-        // read the result. On success the draft is promoted server-side and we
-        // proceed; on rejection the record stays a draft + open, so we surface
-        // the reason and keep the scope open for another edit/exit.
-        fetch(el.dataset.action, {
-          method: 'POST', keepalive: true,
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: recordBody(el).toString()
-        }).then(function (res) {
-          if (res.ok) { draft = false; return; }
-          open = true; // still a draft server-side — keep this scope open
-          return res.text().then(function (t) { window.alert(t || 'Could not save record'); });
-        }).catch(function () {});
+    function installHistorySentinel() {
+      if (historySentinelInstalled || !window.history || !history.pushState) return;
+      var state = Object.assign({}, history.state || {}, { rmEditSentinel: true });
+      history.pushState(state, '', window.location.href);
+      historySentinelInstalled = true;
+    }
+    function responseJson(response) {
+      return response.json().catch(function () {
+        return { kind: 'request_failed', message: 'The server returned an unreadable response.' };
+      });
+    }
+    function openScope(scope) {
+      if (scope.state !== 'closed') return scope.promise || Promise.resolve(scope.state !== 'closed');
+      scope.state = 'opening';
+      var body = new URLSearchParams();
+      body.set('_owner', scope.owner);
+      scope.promise = post(scope.el.dataset.open, body).then(function (response) {
+        return responseJson(response).then(function (payload) {
+          if (!response.ok) throw payload;
+          scope.token = payload.editToken;
+          scope.el.dataset.edit = scope.token;
+          scope.state = 'open';
+          scope.promise = null;
+          installHistorySentinel();
+          return true;
+        });
+      }).catch(function (error) {
+        scope.state = 'closed';
+        scope.promise = null;
+        window.alert(error.message || 'Could not open this record for editing.');
+        return false;
+      });
+      return scope.promise;
+    }
+    function focusValidation(scope, issue) {
+      scope.el.classList.add('validation-invalid');
+      if (!issue || issue.fieldId == null) return;
+      var input = ownControls(scope).find(function (control) {
+        return control.name === 'f' + issue.fieldId && !control.readOnly && !control.disabled;
+      });
+      if (input) {
+        setTimeout(function () { input.focus(); if (input.select) input.select(); }, 0);
       }
-      function revert() { if (!open) return; open = false; beacon(el.dataset.revert); location.reload(); }
-      // A `readonly` input (a read-only field rendered focusable/selectable for
-      // copying, e.g. a placed primary key #156) never changes, so its focus
-      // must not open/lock the record and its blur must not commit one.
-      function isReadonlyTarget(e) { return !!(e.target && e.target.readOnly); }
-      el.addEventListener('focusin', function (e) { if (!isReadonlyTarget(e)) openRec(); });
-      el.addEventListener('focusout', function (e) {
-        if (!isReadonlyTarget(e) && !el.contains(e.relatedTarget)) commit();
+    }
+    function revertScope(scope) {
+      if (!scope.token) return Promise.resolve({ resolved: true });
+      var body = new URLSearchParams();
+      body.set('_owner', scope.owner);
+      body.set('_edit', scope.token);
+      return post(scope.el.dataset.revert, body).then(function (response) {
+        return responseJson(response).then(function (payload) {
+          if (!response.ok) throw payload;
+          scope.state = 'closed';
+          scope.token = '';
+          scope.el.removeAttribute('data-edit');
+          scope.el.classList.remove('validation-invalid');
+          if (scope.pending) ownControls(scope).forEach(function (control) { control.value = ''; });
+          return { resolved: true, redirect: payload.redirect || null, reverted: true };
+        });
+      }).catch(function (error) {
+        scope.state = 'invalid';
+        window.alert(error.message || 'Could not revert this record.');
+        return { resolved: false };
       });
-      el.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter') { e.preventDefault(); commit(); if (document.activeElement) document.activeElement.blur(); }
-        else if (e.key === 'Escape') { e.preventDefault(); revert(); }
+    }
+    function resolveFailure(scope, payload) {
+      var validation = payload && payload.kind === 'validation';
+      var issue = validation && payload.errors && payload.errors[0];
+      var message = validation ? (issue && issue.message || 'This record is invalid.') :
+        (payload && payload.message || 'The record could not be committed.');
+      if (validation && issue && issue.fieldId != null &&
+          !ownControls(scope).some(function (control) { return control.name === 'f' + issue.fieldId && !control.readOnly; })) {
+        message += '\n\nThe failing field is not editable on this layout.';
+      }
+      scope.state = 'invalid';
+      focusValidation(scope, issue);
+      return window.appConfirm({
+        title: validation ? 'Record validation' : 'Could not commit record',
+        message: message,
+        confirmLabel: 'Revert record',
+        cancelLabel: 'Return to record',
+        danger: true
+      }).then(function (revert) {
+        if (!revert) { focusValidation(scope, issue); return { resolved: false }; }
+        return revertScope(scope);
       });
-      // While this record is a draft, a field's focus-out persists partial
-      // progress under the lenient DRAFT gate (no required/unique) so tabbing
-      // between fields is free and nothing is lost if the eventual record-exit
-      // races a hard navigation. Field-to-field within the record does NOT run
-      // the full gate — only the record-exit commit above does. Existing
-      // (non-draft) records get NO such listener (today's behavior unchanged).
-      if (draft) {
-        ownInputs(el).forEach(function (i) {
-          i.addEventListener('blur', function () { beacon(el.dataset.action + '/draft', recordBody(el)); });
+    }
+    function commitScope(scope) {
+      if (scope.state === 'closed') return Promise.resolve({ resolved: true });
+      if (scope.state === 'opening') {
+        return scope.promise.then(function (opened) {
+          return opened ? commitScope(scope) : { resolved: false };
         });
       }
-      // A portal row (#170) is a `.rec-edit` scope nested inside the base record's
-      // own `.rec-edit`. Stop its focus events from bubbling so editing a related
-      // row opens/commits ONLY that child record, never the enclosing base record.
-      if (el.dataset.related != null) {
-        el.addEventListener('focusin', function (e) { e.stopPropagation(); });
-        el.addEventListener('focusout', function (e) { e.stopPropagation(); });
-      }
-    });
-    // A freshly-minted draft (New / portal create-new both reload the page onto
-    // the new record, #173) lands here as a `data-draft` record; focus its first
-    // editable field so the user can start typing immediately — the "create the
-    // draft and focus it" half of New. Prefer the current row when several drafts
-    // coexist. Focusing opens+locks the record via the focusin handler above.
-    (function () {
-      var d = document.querySelector('.rec-edit.current[data-draft]') || document.querySelector('.rec-edit[data-draft]');
-      if (!d) return;
-      var first = ownInputs(d).find(function (i) { return !i.readOnly && !i.disabled; });
-      if (first) first.focus();
-    })();
-    // Portal create-new (#171): the trailing blank `.fm-portal-add` row mints a
-    // related record. Unlike an edit row it takes no lock (insert is atomic) and
-    // commits via fetch (not sendBeacon) so the page can reload to surface the new
-    // row + a fresh blank. Commit fires on leaving the row or pressing Enter, and
-    // ONLY when some cell was filled — an untouched row is abandoned (a no-op).
-    // Escape clears the row. It sits inside the base record's form, so — like an
-    // edit row — its focus events don't bubble to the enclosing base editor.
-    document.querySelectorAll('.fm-portal-add').forEach(function (el) {
-      var busy = false;
-      function body() {
-        var p = new URLSearchParams(), any = false;
-        el.querySelectorAll('input[name]').forEach(function (i) {
-          if (i.value !== '') any = true;
-          p.append(i.name, i.value);
+      if (scope.state === 'committing') return scope.promise;
+      scope.state = 'committing';
+      scope.el.classList.remove('validation-invalid');
+      scope.promise = post(scope.el.dataset.action, recordBody(scope)).then(function (response) {
+        return responseJson(response).then(function (payload) {
+          if (!response.ok) return resolveFailure(scope, payload);
+          scope.state = 'closed';
+          scope.token = '';
+          scope.el.removeAttribute('data-edit');
+          scope.lastResponse = payload;
+          return { resolved: true, redirect: payload.redirect || null };
         });
-        return any ? p : null;
-      }
-      function submit() {
-        if (busy) return;
-        var b = body();
-        if (!b) return; // untouched blank row → nothing to create
-        busy = true;
-        fetch(el.dataset.create, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: b.toString()
-        }).then(function (res) {
-          if (res.ok) { location.reload(); return; }
-          // Keep the user's input on screen (no reload) and surface the reason;
-          // mirrors how a base create's rejection reports its message.
-          return res.text().then(function (t) { busy = false; window.alert(t || 'Could not create record'); });
-        }).catch(function () { busy = false; });
-      }
-      el.addEventListener('focusout', function (e) { if (!el.contains(e.relatedTarget)) submit(); });
-      el.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          if (document.activeElement) document.activeElement.blur();
-        } else if (e.key === 'Escape') {
-          e.preventDefault();
-          el.querySelectorAll('input[name]').forEach(function (i) { i.value = ''; });
-          if (document.activeElement) document.activeElement.blur();
+      }).catch(function (error) {
+        return resolveFailure(scope, error);
+      }).then(function (result) {
+        scope.promise = null;
+        return result;
+      });
+      return scope.promise;
+    }
+    function depth(el) {
+      var n = 0; while (el) { n += 1; el = el.parentElement; } return n;
+    }
+    function openScopes() {
+      return scopes.filter(function (scope) { return scope.state !== 'closed'; })
+        .sort(function (a, b) { return depth(b.el) - depth(a.el); });
+    }
+    function guard(intent) {
+      if (intent) pendingIntent = intent;
+      if (gatePromise) return gatePromise;
+      var queue = openScopes();
+      var redirect = null;
+      gatePromise = queue.reduce(function (promise, scope) {
+        return promise.then(function (ok) {
+          if (!ok) return false;
+          return commitScope(scope).then(function (result) {
+            if (result.redirect) redirect = result.redirect;
+            return result.resolved;
+          });
+        });
+      }, Promise.resolve(true)).then(function (ok) {
+        if (!ok) { pendingIntent = null; return false; }
+        var replay = pendingIntent;
+        pendingIntent = null;
+        if (replay) replay();
+        else if (redirect) { allowExit = true; window.location.assign(redirect); }
+        return true;
+      }).finally(function () {
+        gatePromise = null;
+      });
+      return gatePromise;
+    }
+    function beginNew(form) {
+      var body = new URLSearchParams(new FormData(form));
+      body.set('_owner', owner);
+      return post(form.action.replace(/\/$/, '') + '/new/open', body).then(function (response) {
+        return responseJson(response).then(function (payload) {
+          if (!response.ok) throw payload;
+          allowExit = true;
+          window.location.assign(payload.redirect);
+        });
+      }).catch(function (error) { window.alert(error.message || 'Could not start a new record.'); });
+    }
+
+    scopes.forEach(function (scope) {
+      ownControls(scope).forEach(function (control) {
+        if (control.dataset.raw != null) {
+          control.addEventListener('focus', function () { control.value = control.dataset.raw; });
+        }
+        control.addEventListener('input', function () {
+          if (control.dataset.raw != null) control.dataset.raw = control.value;
+          ownControls(scope).forEach(function (peer) {
+            if (peer !== control && peer.name === control.name) peer.value = control.value;
+          });
+        });
+      });
+      scope.el.addEventListener('focusin', function (event) {
+        if (event.target && (event.target.readOnly || event.target.disabled)) return;
+        openScope(scope);
+        if (scope.el.dataset.related != null) event.stopPropagation();
+      });
+      scope.el.addEventListener('focusout', function (event) {
+        if (scope.el.dataset.related != null) event.stopPropagation();
+        if (scope.el.contains(event.relatedTarget)) return;
+        setTimeout(function () {
+          if (!scope.el.contains(document.activeElement)) guard(null);
+        }, 0);
+      });
+      scope.el.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          guard(null);
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          revertScope(scope).then(function (result) {
+            if (result.resolved) { allowExit = true; window.location.reload(); }
+          });
         }
       });
-      el.addEventListener('focusin', function (e) { e.stopPropagation(); });
-      el.addEventListener('focusout', function (e) { e.stopPropagation(); });
     });
+
+    document.addEventListener('click', function (event) {
+      var anchor = event.target.closest && event.target.closest('a[href]');
+      if (!anchor || allowExit || !openScopes().length) return;
+      if (anchor.target && anchor.target !== '_self') return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      guard(function () { allowExit = true; window.location.assign(anchor.href); });
+    }, true);
+    document.addEventListener('submit', function (event) {
+      var form = event.target;
+      if (!form || form.nodeName !== 'FORM') return;
+      // The shared method="dialog" form resolves the gate itself. Intercepting
+      // its Return/Revert buttons would recursively enqueue the dialog submit
+      // behind the commit promise that is waiting for that very choice.
+      if (form.closest && form.closest('#app-dialog')) return;
+      if (allowExit) { allowExit = false; return; }
+      if (form.classList.contains('rm-new-record')) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        guard(function () { beginNew(form); });
+        return;
+      }
+      if (!openScopes().length) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      guard(function () { allowExit = true; form.requestSubmit ? form.requestSubmit() : form.submit(); });
+    }, true);
+    document.querySelectorAll('[data-layout-select]').forEach(function (select) {
+      var prior = select.value;
+      select.addEventListener('change', function () {
+        var next = select.value;
+        select.value = prior;
+        if (!next) return;
+        guard(function () { allowExit = true; window.location.assign('/browse/' + next); });
+      });
+    });
+    document.addEventListener('keydown', function (event) {
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'r' && openScopes().length) {
+        event.preventDefault();
+        guard(function () { allowExit = true; window.location.reload(); });
+      }
+    }, true);
+    // Add a same-document sentinel when editing begins. Back first lands on the
+    // duplicate current entry, where popstate is controllable; restore the
+    // sentinel, run the normal gate, then traverse past both entries only after
+    // commit/revert succeeds. This yields the custom validation warning instead
+    // of depending on an asynchronous unload request.
+    window.addEventListener('popstate', function () {
+      if (historyRestore) {
+        var restored = historyRestore;
+        historyRestore = null;
+        restored();
+        return;
+      }
+      if (allowExit || !historySentinelInstalled || !openScopes().length) return;
+      var restoration = new Promise(function (resolve) {
+        var done = false;
+        function finish() {
+          if (!done) {
+            done = true;
+            if (historyRestore === finish) historyRestore = null;
+            resolve();
+          }
+        }
+        historyRestore = finish;
+        window.setTimeout(finish, 100);
+      });
+      history.forward();
+      restoration.then(function () {
+        guard(function () { allowExit = true; history.go(-2); });
+      });
+    });
+    window.addEventListener('beforeunload', function (event) {
+      if (allowExit || !openScopes().length) return;
+      event.preventDefault();
+      event.returnValue = '';
+    });
+    window.rmNavigate = function (url) {
+      return guard(function () { allowExit = true; window.location.assign(url); });
+    };
+    window.rmGuard = guard;
+    window.rmRequestClose = function () {
+      return guard(function () {
+        fetch('/app/close-authorized', { method: 'POST' }).catch(function () {});
+      });
+    };
+    window.rmHasOpenRecords = function () { return openScopes().length > 0; };
+
+    if (openScopes().length) installHistorySentinel();
+    var pending = scopes.find(function (scope) { return scope.el.dataset.pending != null; });
+    if (pending) {
+      var first = ownControls(pending).find(function (control) { return !control.readOnly && !control.disabled; });
+      if (first) first.focus();
+    }
     // Portal row delete/unlink (#172): a per-row button removes the NEAREST related
     // record — a to-many child is deleted, a forward to-one / M:N link is unlinked
     // (the terminal survives; never cascades). Rendered only when the relationship's
@@ -855,17 +1054,19 @@
         e.stopPropagation();
         var url = el.dataset.delete;
         if (!url) return;
-        window.appConfirm({
-          title: 'Delete related record',
-          message: 'Remove this related record? This cannot be undone.',
-          confirmLabel: 'Delete',
-          danger: true
-        }).then(function (ok) {
-          if (!ok) return;
-          fetch(url, { method: 'POST' }).then(function (res) {
-            if (res.ok) { location.reload(); return; }
-            return res.text().then(function (t) { window.alert(t || 'Could not delete record'); });
-          }).catch(function () {});
+        window.rmGuard(function () {
+          window.appConfirm({
+            title: 'Delete related record',
+            message: 'Remove this related record? This cannot be undone.',
+            confirmLabel: 'Delete',
+            danger: true
+          }).then(function (ok) {
+            if (!ok) return;
+            fetch(url, { method: 'POST' }).then(function (res) {
+              if (res.ok) { location.reload(); return; }
+              return res.text().then(function (t) { window.alert(t || 'Could not delete record'); });
+            }).catch(function () {});
+          });
         });
       });
     });
@@ -879,7 +1080,7 @@
         var already = row.classList.contains('current');
         if (already && e.target.closest('input, select, textarea')) return;
         var layout = row.dataset.layout, rec = row.dataset.rec;
-        if (layout && rec) location.href = '/browse/' + layout + '?view=list&rec=' + rec;
+        if (layout && rec) window.rmNavigate('/browse/' + layout + '?view=list&rec=' + rec);
       });
     });
   })();
@@ -909,11 +1110,11 @@
         }).then(function (ok) {
           if (ok) {
             window.schemaAllowNavigation = true;
-            window.location.href = url;
+            window.rmNavigate ? window.rmNavigate(url) : window.location.assign(url);
           }
         });
       } else {
-        window.location.href = url;
+        window.rmNavigate ? window.rmNavigate(url) : window.location.assign(url);
       }
     }
 
@@ -923,7 +1124,7 @@
       // below because this binding intentionally uses Shift.
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'd') {
         e.preventDefault();
-        if (MODE !== 'schema') window.location.href = '/schema';
+        if (MODE !== 'schema') (window.rmNavigate ? window.rmNavigate('/schema') : window.location.assign('/schema'));
         return;
       }
       // Ctrl/⌘ Shift L — open the Layout Manager (#149). Same stopgap as the

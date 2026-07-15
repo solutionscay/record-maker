@@ -16,7 +16,7 @@
         <tr class="rec-edit" data-action="/browse/{{ layout_id }}/{{ r.id }}"
             data-open="/browse/{{ layout_id }}/{{ r.id }}/open"
             data-revert="/browse/{{ layout_id }}/{{ r.id }}/revert"
-            {% if r.draft %}data-draft="1" {% endif %}data-view="table" data-rec="{{ loop.index }}">
+            {% if r.pending %}data-pending="1" {% endif %}{% if !r.edit_token.is_empty() %}data-edit="{{ r.edit_token }}" {% endif %}data-view="table" data-rec="{{ loop.index }}">
           {% for c in r.cells %}
           {% if c.read_only %}
           <td><input class="cell-input" value="{{ c.display }}" readonly{% if c.style != "" %} style="{{ c.style }}"{% endif %} autocomplete="off"></td>

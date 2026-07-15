@@ -1,459 +1,901 @@
-//! Record action handlers (#40): create/save/open/revert/delete over the
-//! Browse form contract (`f<field_id>` inputs, `view`/`rec` round-trip).
+//! Record edit-session actions (#182): owned open, atomic whole-record commit,
+//! and revert over canonical rows or in-memory pending inserts.
 
 use std::collections::HashMap;
 
 use axum::{
     extract::{Form, Path, State},
     http::StatusCode,
-    response::{IntoResponse, Redirect},
+    response::{IntoResponse, Redirect, Response},
+    Json,
 };
+use record_maker_engine::{FieldMeta, RelatedCrudError, ResolvedRoute, Solution, ValidationError};
+use serde::Serialize;
 
-use record_maker_engine::{RelatedCrudError, ResolvedRoute, Solution};
-
-use crate::validate::{collect_values, validation_message};
+use crate::edit_sessions::{EditScope, EditSession, SessionError};
+use crate::validate::collect_values;
 use crate::viewmodel::{clamp_rec, layout_table, view_param};
 use crate::AppState;
 
-/// Resolve a portal object's bound anchor route for edit actions (#170). Looks the
-/// portal object up on `layout_id`, reads its route path off the `binding` slot
-/// (the same slot a field binding rides), and resolves it against the layout's
-/// base table into a [`ResolvedRoute`] whose `terminal_table` is the child table a
-/// related edit writes to. `None` for an unknown layout/object or a blank /
-/// unresolvable binding — the caller maps that to a 4xx.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenResponse {
+    ok: bool,
+    edit_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    synthetic_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    redirect: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    record_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    redirect: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SimpleError {
+    kind: &'static str,
+    message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidationRecord {
+    table_id: i64,
+    record_id: Option<i64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidationIssue {
+    field_id: i64,
+    code: &'static str,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct ValidationResponse {
+    kind: &'static str,
+    record: ValidationRecord,
+    errors: Vec<ValidationIssue>,
+}
+
+fn json_error(status: StatusCode, kind: &'static str, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(SimpleError {
+            kind,
+            message: message.into(),
+        }),
+    )
+        .into_response()
+}
+
+fn session_error(error: SessionError) -> Response {
+    let (status, kind) = match error {
+        SessionError::Locked => (StatusCode::LOCKED, "lock_conflict"),
+        SessionError::Unknown => (StatusCode::GONE, "stale_session"),
+        SessionError::WrongOwner => (StatusCode::FORBIDDEN, "wrong_owner"),
+        SessionError::WrongScope => (StatusCode::CONFLICT, "wrong_scope"),
+    };
+    json_error(status, kind, error.to_string())
+}
+
+fn edit_event(event: &str, token: &str) {
+    eprintln!("[record-edit] event={event} token={token}");
+}
+
+fn write_error(
+    error: anyhow::Error,
+    table_id: i64,
+    record_id: Option<i64>,
+    edit_token: &str,
+) -> Response {
+    if let Some(validation) = error.downcast_ref::<ValidationError>() {
+        if let Some(field_id) = validation.field_id() {
+            edit_event("validation_rejected", edit_token);
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ValidationResponse {
+                    kind: "validation",
+                    record: ValidationRecord {
+                        table_id,
+                        record_id,
+                    },
+                    errors: vec![ValidationIssue {
+                        field_id,
+                        code: validation.code(),
+                        message: validation.to_string(),
+                    }],
+                }),
+            )
+                .into_response();
+        }
+    }
+    edit_event("commit_failed", edit_token);
+    json_error(StatusCode::CONFLICT, "commit_failed", error.to_string())
+}
+
+fn owner(form: &HashMap<String, String>) -> Result<String, Response> {
+    form.get("_owner")
+        .or_else(|| form.get("owner"))
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .ok_or_else(|| {
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "missing_owner",
+                "missing edit owner",
+            )
+        })
+}
+
+fn token(form: &HashMap<String, String>) -> Result<String, Response> {
+    form.get("_edit")
+        .or_else(|| form.get("edit"))
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .ok_or_else(|| {
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "missing_session",
+                "missing edit session",
+            )
+        })
+}
+
+fn values_map(fields: &[FieldMeta], cells: Vec<String>) -> HashMap<i64, String> {
+    fields
+        .iter()
+        .zip(cells)
+        .map(|(field, value)| (field.id, value))
+        .collect()
+}
+
+fn blank_values(fields: &[FieldMeta]) -> HashMap<i64, String> {
+    fields
+        .iter()
+        .map(|field| (field.id, String::new()))
+        .collect()
+}
+
+fn submitted(fields: &[FieldMeta], form: &HashMap<String, String>) -> Vec<(i64, String)> {
+    collect_values(fields, form)
+        .into_iter()
+        .map(|(field, value)| (field.id, value))
+        .collect()
+}
+
+fn working_values<'a>(
+    fields: &'a [FieldMeta],
+    session: &EditSession,
+) -> Vec<(&'a FieldMeta, String)> {
+    fields
+        .iter()
+        .filter_map(|field| {
+            session
+                .working
+                .get(&field.id)
+                .map(|value| (field, value.clone()))
+        })
+        .collect()
+}
+
 fn portal_route(sol: &Solution, layout_id: i64, object_id: i64) -> Option<ResolvedRoute> {
-    let (_lay, table) = layout_table(sol, layout_id)?;
-    let obj = sol.object_by_id(layout_id, object_id).ok().flatten()?;
-    if !obj.kind.is_portal() {
+    let (_layout, table) = layout_table(sol, layout_id)?;
+    let object = sol.object_by_id(layout_id, object_id).ok().flatten()?;
+    if !object.kind.is_portal() {
         return None;
     }
-    let binding = obj.binding.filter(|b| !b.is_empty())?;
+    let binding = object.binding.filter(|binding| !binding.is_empty())?;
     sol.resolve_path(table.id, &binding).ok()
 }
 
-/// Defense-in-depth for every terminal-row mutation: the URL's record id must be
-/// in this portal route's resolved set for this base record. Without this check a
-/// crafted related URL could address an unrelated row on the same terminal table.
 fn portal_route_contains(
     sol: &Solution,
     route: &ResolvedRoute,
     base_id: i64,
-    rec_id: i64,
+    record_id: i64,
 ) -> bool {
     sol.route_record_set(route, base_id)
-        .is_ok_and(|ids| ids.contains(&rec_id))
+        .is_ok_and(|ids| ids.contains(&record_id))
 }
 
 fn portal_route_is_editable(route: &ResolvedRoute) -> bool {
     route.class.create_determined()
 }
 
-/// Create a record from the new-record form (inputs named `f<field_id>`).
+/// Progressive-enhancement fallback for New. The coordinator uses
+/// [`begin_new_record`] so it can read JSON without leaving the current page.
 pub(crate) async fn create_record(
-    State(st): State<AppState>,
+    State(state): State<AppState>,
     Path(layout_id): Path<i64>,
     Form(form): Form<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let mut target = format!("/browse/{layout_id}");
-    {
-        let sol = st.sol.lock().unwrap();
-        if let Some((lay, table)) = layout_table(&sol, layout_id) {
-            let fields = sol.fields(table.id).unwrap();
-            let values = collect_values(&fields, &form);
-            // New mints a blank record as a DRAFT (#173): required + uniqueness
-            // are deferred to the record-EXIT commit, so a table with a required
-            // field can still mint a blank New record. Type/range/value-list on
-            // any present value are still enforced here and surface as the same
-            // 400 + message as always.
-            let inserted = sol.insert_record_draft(&table, &values);
-            if let Some(msg) = validation_message(&inserted) {
-                return (StatusCode::BAD_REQUEST, msg).into_response();
-            }
-            let new_id = inserted.unwrap();
-            // Register the draft so the eventual commit (or Escape) can find it.
-            st.drafts.lock().unwrap().insert((table.id, new_id));
-            // Land on the new record: it sorts last by id (record_ids is ORDER BY id).
-            let total = sol.record_ids(&table).unwrap().len();
-            let view = view_param(&form, &lay.view);
-            target = format!("/browse/{layout_id}?view={view}&rec={total}");
-        }
-    }
-    Redirect::to(&target).into_response()
-}
-
-/// Commit a record on record-EXIT: write the buffered field values under the
-/// FULL validation gate, release the edit lock, and stay on the record. This is
-/// the promotion point for a draft (#173): the required + uniqueness gates that
-/// New deferred fire here. On a validation failure the write returns 400 and the
-/// record stays a draft (and locked) — the client keeps the record open and
-/// surfaces the message. On success the record is promoted (removed from the
-/// draft set); for an existing (non-draft) record the remove is a harmless no-op,
-/// so its behavior is unchanged. The form carries `view`/`rec` so the redirect
-/// lands back on the same record in the same view (the "commit on exit" half of
-/// #40).
-pub(crate) async fn save_record(
-    State(st): State<AppState>,
-    Path((layout_id, id)): Path<(i64, i64)>,
-    Form(form): Form<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let mut target = format!("/browse/{layout_id}");
-    {
-        let sol = st.sol.lock().unwrap();
-        if let Some((lay, table)) = layout_table(&sol, layout_id) {
-            let fields = sol.fields(table.id).unwrap();
-            let values = collect_values(&fields, &form);
-            // FULL gate: a rejected write surfaces here as the same 400 + message
-            // as always AND leaves the draft registered/open (early return).
-            let saved = sol.update_record(&table, id, &values);
-            if let Some(msg) = validation_message(&saved) {
-                return (StatusCode::BAD_REQUEST, msg).into_response();
-            }
-            saved.unwrap();
-            st.locks.lock().unwrap().remove(&(table.id, id));
-            // Promote: a committed draft is now an ordinary record. No-op for a
-            // record that was never a draft.
-            st.drafts.lock().unwrap().remove(&(table.id, id));
-            let view = view_param(&form, &lay.view);
-            let rec = clamp_rec(&form, sol.record_ids(&table).unwrap().len() as i64);
-            target = format!("/browse/{layout_id}?view={view}&rec={rec}");
-        }
-    }
-    Redirect::to(&target).into_response()
-}
-
-/// Persist partial progress on a DRAFT record (#173) without committing it: run
-/// the DRAFT gate (type/range/value-list on present values, but required +
-/// uniqueness deferred) so the user can tab between fields — including leaving a
-/// required field blank or transiently duplicating a unique value — before the
-/// record-EXIT commit ([`save_record`]) runs the full gate. Does NOT touch the
-/// lock or draft registries: the record stays open and a draft. A surviving rule
-/// (a bad present value) still returns 400 + message; otherwise 200. Wired to the
-/// per-field focus-out on a draft's inputs; existing records never post here.
-pub(crate) async fn draft_save_record(
-    State(st): State<AppState>,
-    Path((layout_id, id)): Path<(i64, i64)>,
-    Form(form): Form<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let sol = st.sol.lock().unwrap();
-    let Some((_lay, table)) = layout_table(&sol, layout_id) else {
-        return (StatusCode::NOT_FOUND, "no such layout".to_string()).into_response();
+) -> Response {
+    let owner = form
+        .get("_owner")
+        .cloned()
+        .unwrap_or_else(|| format!("fallback-{layout_id}"));
+    let sol = state.sol.lock().unwrap();
+    let Some((_layout, table)) = layout_table(&sol, layout_id) else {
+        return json_error(StatusCode::NOT_FOUND, "not_found", "no such layout");
     };
-    let fields = sol.fields(table.id).unwrap();
-    let values = collect_values(&fields, &form);
-    let saved = sol.update_record_draft(&table, id, &values);
-    if let Some(msg) = validation_message(&saved) {
-        return (StatusCode::BAD_REQUEST, msg).into_response();
-    }
-    saved.unwrap();
-    (StatusCode::OK, "saved".to_string()).into_response()
-}
-
-/// Open a record for editing: acquire its in-process lock. 200 once held (the
-/// single session may re-open its own lock); 409 if held elsewhere (multi-user,
-/// not reachable yet); 404 for an unknown layout. The "open on focus" half of #40.
-pub(crate) async fn open_record(
-    State(st): State<AppState>,
-    Path((layout_id, id)): Path<(i64, i64)>,
-) -> impl IntoResponse {
-    let table_id = {
-        let sol = st.sol.lock().unwrap();
-        match layout_table(&sol, layout_id) {
-            Some((_lay, table)) => table.id,
-            None => return (StatusCode::NOT_FOUND, "no such layout"),
-        }
-    };
-    st.locks.lock().unwrap().insert((table_id, id));
-    (StatusCode::OK, "open")
-}
-
-/// Revert (the "Escape" path of #40). For an existing record this releases the
-/// edit lock without writing; the client discards its buffer and reloads to the
-/// committed values. For a never-committed DRAFT (#173) there is nothing to
-/// revert TO — the record only ever existed as this draft — so Escape DELETES it,
-/// then clears its draft + lock registrations. The client reloads onto a clamped
-/// neighbor.
-pub(crate) async fn revert_record(
-    State(st): State<AppState>,
-    Path((layout_id, id)): Path<(i64, i64)>,
-) -> impl IntoResponse {
-    let sol = st.sol.lock().unwrap();
-    if let Some((_lay, table)) = layout_table(&sol, layout_id) {
-        if st.is_draft((table.id, id)) {
-            // A fresh draft has no prior committed state: discard the row itself.
-            sol.delete_record(&table, id).unwrap();
-            st.drafts.lock().unwrap().remove(&(table.id, id));
-        }
-        st.locks.lock().unwrap().remove(&(table.id, id));
-    }
-    (StatusCode::OK, "reverted")
-}
-
-/// Delete a record, then back to the same view near where you were. The form
-/// carries the current `view` and `rec` so the redirect can preserve both.
-pub(crate) async fn delete_record(
-    State(st): State<AppState>,
-    Path((layout_id, id)): Path<(i64, i64)>,
-    Form(form): Form<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let mut target = format!("/browse/{layout_id}");
-    {
-        let sol = st.sol.lock().unwrap();
-        if let Some((lay, table)) = layout_table(&sol, layout_id) {
-            sol.delete_record(&table, id).unwrap();
-            let total = sol.record_ids(&table).unwrap().len() as i64;
-            let view = view_param(&form, &lay.view);
-            target = if total > 0 {
-                // Stay put if possible; clamp into the now-shorter found set.
-                let rec = clamp_rec(&form, total);
-                format!("/browse/{layout_id}?view={view}&rec={rec}")
-            } else {
-                format!("/browse/{layout_id}?view={view}")
-            };
-        }
-    }
-    Redirect::to(&target)
-}
-
-// ---------------------------------------------------------------------------
-// Portal related-record inline edit (#170).
-//
-// A portal row is a `.rec-edit` scope whose open/commit/revert re-use the base
-// record lifecycle above, re-pointed at a CHILD (terminal) record through the
-// engine's related layer (`update_related_record`). The route is derived from the
-// portal object's bound anchor; the lock registry is the same `(table_id, id)`
-// HashSet, now keyed on the terminal table + terminal row. `base_id` rides the URL
-// for symmetry with create/delete (#171/#172) but an update needs only the route
-// and the terminal row id. Commits arrive via `sendBeacon` (no response is read),
-// so — like the base save — validation failures return the same 400 + message and
-// otherwise the write is unwrapped.
-// ---------------------------------------------------------------------------
-
-/// Open a related (child) record for editing: acquire the terminal row's lock.
-/// 200 once held; 404 for an unknown layout/portal or unresolvable route.
-pub(crate) async fn open_related_record(
-    State(st): State<AppState>,
-    Path((layout_id, base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
-) -> impl IntoResponse {
-    let terminal_table = {
-        let sol = st.sol.lock().unwrap();
-        match portal_route(&sol, layout_id, object_id) {
-            Some(route) if !portal_route_is_editable(&route) => {
-                return (StatusCode::CONFLICT, "portal route is read-only")
-            }
-            Some(route) if portal_route_contains(&sol, &route, base_id, rec_id) => {
-                route.terminal_table
-            }
-            Some(_) => return (StatusCode::NOT_FOUND, "record is not in portal route"),
-            None => return (StatusCode::NOT_FOUND, "no such portal route"),
-        }
-    };
-    st.locks.lock().unwrap().insert((terminal_table, rec_id));
-    (StatusCode::OK, "open")
-}
-
-/// Commit a related (child) record: write the buffered terminal-field values via
-/// `update_related_record`, then release the lock. Mirrors [`save_record`], scoped
-/// to the child row. Inputs are the same `f<field_id>` contract, here over the
-/// TERMINAL table's fields.
-pub(crate) async fn save_related_record(
-    State(st): State<AppState>,
-    Path((layout_id, base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
-    Form(form): Form<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let sol = st.sol.lock().unwrap();
-    let Some(route) = portal_route(&sol, layout_id, object_id) else {
-        return (StatusCode::NOT_FOUND, "no such portal route".to_string()).into_response();
-    };
-    if !portal_route_is_editable(&route) {
-        return (StatusCode::CONFLICT, "portal route is read-only".to_string()).into_response();
-    }
-    if !portal_route_contains(&sol, &route, base_id, rec_id) {
-        return (StatusCode::NOT_FOUND, "record is not in portal route".to_string())
-            .into_response();
-    }
-    let fields = match sol.fields(route.terminal_table) {
+    let fields = match sol.all_fields(table.id) {
         Ok(fields) => fields,
-        Err(_) => return (StatusCode::NOT_FOUND, "no such related table").into_response(),
+        Err(error) => return json_error(StatusCode::CONFLICT, "open_failed", error.to_string()),
     };
-    let values = collect_values(&fields, &form);
-    // Record-EXIT commit for the child scope: FULL gate. A 400 keeps the terminal
-    // draft registered/open; success releases the lock and promotes.
-    let saved = sol.update_related_record(&route, rec_id, &values);
-    if let Some(msg) = validation_message(&saved) {
-        return (StatusCode::BAD_REQUEST, msg).into_response();
-    }
-    saved.unwrap();
-    st.locks.lock().unwrap().remove(&(route.terminal_table, rec_id));
-    st.drafts.lock().unwrap().remove(&(route.terminal_table, rec_id));
-    (StatusCode::OK, "saved").into_response()
+    let session = state.edits.lock().unwrap().begin_pending_base(
+        owner,
+        layout_id,
+        table.id,
+        blank_values(&fields),
+    );
+    Redirect::to(&format!("/browse/{layout_id}?edit={}", session.token)).into_response()
 }
 
-/// Persist partial progress on a related (child) DRAFT (#173) without committing
-/// it: the DRAFT gate over the terminal table's fields, leaving the terminal
-/// row's lock + draft registration intact. Mirrors [`draft_save_record`] for a
-/// portal row.
-pub(crate) async fn draft_save_related_record(
-    State(st): State<AppState>,
-    Path((layout_id, base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
+/// Start a synthetic new-record working copy without inserting a user row.
+pub(crate) async fn begin_new_record(
+    State(state): State<AppState>,
+    Path(layout_id): Path<i64>,
     Form(form): Form<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let sol = st.sol.lock().unwrap();
+) -> Response {
+    let owner = match owner(&form) {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
+    let sol = state.sol.lock().unwrap();
+    let Some((_layout, table)) = layout_table(&sol, layout_id) else {
+        return json_error(StatusCode::NOT_FOUND, "not_found", "no such layout");
+    };
+    let fields = match sol.all_fields(table.id) {
+        Ok(fields) => fields,
+        Err(error) => return json_error(StatusCode::CONFLICT, "open_failed", error.to_string()),
+    };
+    let session = state.edits.lock().unwrap().begin_pending_base(
+        owner,
+        layout_id,
+        table.id,
+        blank_values(&fields),
+    );
+    let EditScope::PendingBase { synthetic_id, .. } = session.scope else {
+        unreachable!()
+    };
+    Json(OpenResponse {
+        ok: true,
+        edit_token: session.token.clone(),
+        synthetic_id: Some(synthetic_id),
+        redirect: Some(format!("/browse/{layout_id}?edit={}", session.token)),
+    })
+    .into_response()
+}
+
+/// Acquire an owned lock and snapshot every field on an existing base record.
+pub(crate) async fn open_record(
+    State(state): State<AppState>,
+    Path((layout_id, record_id)): Path<(i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let owner = match owner(&form) {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
+    let sol = state.sol.lock().unwrap();
+    let Some((_layout, table)) = layout_table(&sol, layout_id) else {
+        return json_error(StatusCode::NOT_FOUND, "not_found", "no such layout");
+    };
+    let fields = match sol.all_fields(table.id) {
+        Ok(fields) => fields,
+        Err(error) => return json_error(StatusCode::CONFLICT, "open_failed", error.to_string()),
+    };
+    let cells = match sol.get_record(&table, &fields, record_id) {
+        Ok(Some(cells)) => cells,
+        Ok(None) => return json_error(StatusCode::NOT_FOUND, "not_found", "no such record"),
+        Err(error) => return json_error(StatusCode::CONFLICT, "open_failed", error.to_string()),
+    };
+    let scope = EditScope::Base {
+        layout_id,
+        table_id: table.id,
+        record_id,
+    };
+    let session =
+        match state
+            .edits
+            .lock()
+            .unwrap()
+            .begin_existing(owner, scope, values_map(&fields, cells))
+        {
+            Ok(session) => session,
+            Err(error) => return session_error(error),
+        };
+    Json(OpenResponse {
+        ok: true,
+        edit_token: session.token,
+        synthetic_id: None,
+        redirect: None,
+    })
+    .into_response()
+}
+
+/// Commit an existing or synthetic base record. Validation rejection retains
+/// the session and its lock; only a successful transaction releases it.
+pub(crate) async fn save_record(
+    State(state): State<AppState>,
+    Path((layout_id, record_id)): Path<(i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let owner = match owner(&form) {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
+    let edit_token = match token(&form) {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
+    let sol = state.sol.lock().unwrap();
+    let Some((_layout, table)) = layout_table(&sol, layout_id) else {
+        return json_error(StatusCode::NOT_FOUND, "not_found", "no such layout");
+    };
+    let fields = match sol.all_fields(table.id) {
+        Ok(fields) => fields,
+        Err(error) => return json_error(StatusCode::CONFLICT, "commit_failed", error.to_string()),
+    };
+
+    let pending_scope = EditScope::PendingBase {
+        layout_id,
+        table_id: table.id,
+        synthetic_id: record_id,
+    };
+    let existing_scope = EditScope::Base {
+        layout_id,
+        table_id: table.id,
+        record_id,
+    };
+    let scope = if record_id < 0 {
+        pending_scope
+    } else {
+        existing_scope
+    };
+    let session = match state.edits.lock().unwrap().overlay(
+        &edit_token,
+        &owner,
+        &scope,
+        submitted(&fields, &form),
+    ) {
+        Ok(session) => session,
+        Err(error) => return session_error(error),
+    };
+    let values = working_values(&fields, &session);
+    edit_event("commit_attempt", &edit_token);
+
+    let committed_id = if record_id < 0 {
+        match sol.commit_insert_record(&table, &values) {
+            Ok(id) => id,
+            Err(error) => return write_error(error, table.id, None, &edit_token),
+        }
+    } else {
+        let current = match sol.get_record(&table, &fields, record_id) {
+            Ok(Some(cells)) => values_map(&fields, cells),
+            Ok(None) => {
+                return json_error(StatusCode::GONE, "stale_record", "record no longer exists")
+            }
+            Err(error) => {
+                return json_error(StatusCode::CONFLICT, "commit_failed", error.to_string())
+            }
+        };
+        if current != session.original {
+            return json_error(
+                StatusCode::CONFLICT,
+                "stale_record",
+                "record changed after this edit session opened",
+            );
+        }
+        if let Err(error) = sol.commit_update_record(&table, record_id, &values) {
+            return write_error(error, table.id, Some(record_id), &edit_token);
+        }
+        record_id
+    };
+
+    if let Err(error) = state
+        .edits
+        .lock()
+        .unwrap()
+        .release(&edit_token, &owner, &scope)
+    {
+        return session_error(error);
+    }
+    edit_event("commit_succeeded", &edit_token);
+    let total = sol.record_ids(&table).map(|ids| ids.len()).unwrap_or(1);
+    Json(CommitResponse {
+        ok: true,
+        record_id: Some(committed_id),
+        redirect: (record_id < 0).then(|| format!("/browse/{layout_id}?rec={total}")),
+    })
+    .into_response()
+}
+
+pub(crate) async fn revert_record(
+    State(state): State<AppState>,
+    Path((layout_id, record_id)): Path<(i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let owner = match owner(&form) {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
+    let edit_token = match token(&form) {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
+    let sol = state.sol.lock().unwrap();
+    let Some((_layout, table)) = layout_table(&sol, layout_id) else {
+        return json_error(StatusCode::NOT_FOUND, "not_found", "no such layout");
+    };
+    let scope = if record_id < 0 {
+        EditScope::PendingBase {
+            layout_id,
+            table_id: table.id,
+            synthetic_id: record_id,
+        }
+    } else {
+        EditScope::Base {
+            layout_id,
+            table_id: table.id,
+            record_id,
+        }
+    };
+    if let Err(error) = state
+        .edits
+        .lock()
+        .unwrap()
+        .release(&edit_token, &owner, &scope)
+    {
+        return session_error(error);
+    }
+    edit_event("revert", &edit_token);
+    Json(CommitResponse {
+        ok: true,
+        record_id: None,
+        redirect: Some(format!("/browse/{layout_id}")),
+    })
+    .into_response()
+}
+
+pub(crate) async fn delete_record(
+    State(state): State<AppState>,
+    Path((layout_id, record_id)): Path<(i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let sol = state.sol.lock().unwrap();
+    let Some((layout, table)) = layout_table(&sol, layout_id) else {
+        return Redirect::to(&format!("/browse/{layout_id}")).into_response();
+    };
+    if state.lock_held((table.id, record_id)) {
+        return json_error(
+            StatusCode::LOCKED,
+            "record_open",
+            "commit or revert the record before deleting it",
+        );
+    }
+    if let Err(error) = sol.delete_record(&table, record_id) {
+        return json_error(StatusCode::CONFLICT, "delete_failed", error.to_string());
+    }
+    let total = sol
+        .record_ids(&table)
+        .map(|ids| ids.len() as i64)
+        .unwrap_or(0);
+    let view = view_param(&form, &layout.view);
+    let target = if total > 0 {
+        let rec = clamp_rec(&form, total);
+        format!("/browse/{layout_id}?view={view}&rec={rec}")
+    } else {
+        format!("/browse/{layout_id}?view={view}")
+    };
+    Redirect::to(&target).into_response()
+}
+
+pub(crate) async fn open_related_record(
+    State(state): State<AppState>,
+    Path((layout_id, base_id, object_id, record_id)): Path<(i64, i64, i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let owner = match owner(&form) {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
+    let sol = state.sol.lock().unwrap();
     let Some(route) = portal_route(&sol, layout_id, object_id) else {
-        return (StatusCode::NOT_FOUND, "no such portal route".to_string()).into_response();
+        return json_error(StatusCode::NOT_FOUND, "not_found", "no such portal route");
     };
     if !portal_route_is_editable(&route) {
-        return (StatusCode::CONFLICT, "portal route is read-only".to_string()).into_response();
+        return json_error(
+            StatusCode::CONFLICT,
+            "read_only",
+            "portal route is read-only",
+        );
     }
-    if !portal_route_contains(&sol, &route, base_id, rec_id) {
-        return (StatusCode::NOT_FOUND, "record is not in portal route".to_string())
-            .into_response();
+    if !portal_route_contains(&sol, &route, base_id, record_id) {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "record is not in portal route",
+        );
     }
     let table = match sol.table_by_id(route.terminal_table) {
         Ok(Some(table)) => table,
-        _ => return (StatusCode::NOT_FOUND, "no such related table".to_string()).into_response(),
+        _ => return json_error(StatusCode::NOT_FOUND, "not_found", "no such related table"),
     };
-    let fields = sol.fields(route.terminal_table).unwrap_or_default();
-    let values = collect_values(&fields, &form);
-    let saved = sol.update_record_draft(&table, rec_id, &values);
-    if let Some(msg) = validation_message(&saved) {
-        return (StatusCode::BAD_REQUEST, msg).into_response();
-    }
-    saved.unwrap();
-    (StatusCode::OK, "saved".to_string()).into_response()
+    let fields = match sol.all_fields(table.id) {
+        Ok(fields) => fields,
+        Err(error) => return json_error(StatusCode::CONFLICT, "open_failed", error.to_string()),
+    };
+    let cells = match sol.get_record(&table, &fields, record_id) {
+        Ok(Some(cells)) => cells,
+        _ => return json_error(StatusCode::NOT_FOUND, "not_found", "no such related record"),
+    };
+    let scope = EditScope::Related {
+        layout_id,
+        base_id,
+        object_id,
+        table_id: route.terminal_table,
+        record_id,
+    };
+    let session =
+        match state
+            .edits
+            .lock()
+            .unwrap()
+            .begin_existing(owner, scope, values_map(&fields, cells))
+        {
+            Ok(session) => session,
+            Err(error) => return session_error(error),
+        };
+    Json(OpenResponse {
+        ok: true,
+        edit_token: session.token,
+        synthetic_id: None,
+        redirect: None,
+    })
+    .into_response()
 }
 
-/// Revert a related (child) record (the Escape path). For an existing terminal
-/// row this releases its lock without writing. For a never-committed terminal
-/// DRAFT (#173) — the row the portal's blank create-row just minted — Escape
-/// DELETES the terminal record and clears its draft + lock registrations, the
-/// child-scope mirror of [`revert_record`]. (The common portal case is a direct
-/// to-many child, whose terminal row IS the record to discard.)
+pub(crate) async fn save_related_record(
+    State(state): State<AppState>,
+    Path((layout_id, base_id, object_id, record_id)): Path<(i64, i64, i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let owner = match owner(&form) {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
+    let edit_token = match token(&form) {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
+    let sol = state.sol.lock().unwrap();
+    let Some(route) = portal_route(&sol, layout_id, object_id) else {
+        return json_error(StatusCode::NOT_FOUND, "not_found", "no such portal route");
+    };
+    if !portal_route_is_editable(&route) || !portal_route_contains(&sol, &route, base_id, record_id)
+    {
+        return json_error(
+            StatusCode::CONFLICT,
+            "invalid_scope",
+            "related record is not editable here",
+        );
+    }
+    let table = match sol.table_by_id(route.terminal_table) {
+        Ok(Some(table)) => table,
+        _ => return json_error(StatusCode::NOT_FOUND, "not_found", "no such related table"),
+    };
+    let fields = match sol.all_fields(table.id) {
+        Ok(fields) => fields,
+        Err(error) => return json_error(StatusCode::CONFLICT, "commit_failed", error.to_string()),
+    };
+    let scope = EditScope::Related {
+        layout_id,
+        base_id,
+        object_id,
+        table_id: route.terminal_table,
+        record_id,
+    };
+    let session = match state.edits.lock().unwrap().overlay(
+        &edit_token,
+        &owner,
+        &scope,
+        submitted(&fields, &form),
+    ) {
+        Ok(session) => session,
+        Err(error) => return session_error(error),
+    };
+    let current = match sol.get_record(&table, &fields, record_id) {
+        Ok(Some(cells)) => values_map(&fields, cells),
+        _ => {
+            return json_error(
+                StatusCode::GONE,
+                "stale_record",
+                "related record no longer exists",
+            )
+        }
+    };
+    if current != session.original {
+        return json_error(
+            StatusCode::CONFLICT,
+            "stale_record",
+            "related record changed after open",
+        );
+    }
+    let values = working_values(&fields, &session);
+    edit_event("commit_attempt", &edit_token);
+    if let Err(error) = sol.commit_related_record_update(&route, record_id, &values) {
+        return write_error(error, route.terminal_table, Some(record_id), &edit_token);
+    }
+    if let Err(error) = state
+        .edits
+        .lock()
+        .unwrap()
+        .release(&edit_token, &owner, &scope)
+    {
+        return session_error(error);
+    }
+    edit_event("commit_succeeded", &edit_token);
+    Json(CommitResponse {
+        ok: true,
+        record_id: Some(record_id),
+        redirect: None,
+    })
+    .into_response()
+}
+
 pub(crate) async fn revert_related_record(
-    State(st): State<AppState>,
-    Path((layout_id, base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
-) -> impl IntoResponse {
-    let sol = st.sol.lock().unwrap();
-    if let Some(route) = portal_route(&sol, layout_id, object_id) {
-        if !portal_route_is_editable(&route) {
-            return (StatusCode::CONFLICT, "portal route is read-only");
-        }
-        if !portal_route_contains(&sol, &route, base_id, rec_id) {
-            return (StatusCode::NOT_FOUND, "record is not in portal route");
-        }
-        let key = (route.terminal_table, rec_id);
-        if st.is_draft(key) {
-            // Revert cancels the allowed create regardless of allow_delete. For
-            // M:N this removes the join row before deleting the uncommitted
-            // terminal, avoiding a dangling association (#179).
-            sol.discard_related_draft(&route, base_id, rec_id).unwrap();
-            st.drafts.lock().unwrap().remove(&key);
-        }
-        st.locks.lock().unwrap().remove(&key);
+    State(state): State<AppState>,
+    Path((layout_id, base_id, object_id, record_id)): Path<(i64, i64, i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let owner = match owner(&form) {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
+    let edit_token = match token(&form) {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
+    let sol = state.sol.lock().unwrap();
+    let Some(route) = portal_route(&sol, layout_id, object_id) else {
+        return json_error(StatusCode::NOT_FOUND, "not_found", "no such portal route");
+    };
+    let scope = EditScope::Related {
+        layout_id,
+        base_id,
+        object_id,
+        table_id: route.terminal_table,
+        record_id,
+    };
+    if let Err(error) = state
+        .edits
+        .lock()
+        .unwrap()
+        .release(&edit_token, &owner, &scope)
+    {
+        return session_error(error);
     }
-    (StatusCode::OK, "reverted")
+    edit_event("revert", &edit_token);
+    Json(CommitResponse {
+        ok: true,
+        record_id: None,
+        redirect: None,
+    })
+    .into_response()
 }
 
-/// Create a related (child) record from a portal's trailing blank row (#171):
-/// mint the terminal record (and, for a join-table M:N, its join row) through the
-/// engine's `create_related_record`, associating it to base record `base_id` via
-/// the portal object's anchor route. CREATE-NEW ONLY — `associate_existing` is
-/// `None`; associate-existing is deferred (needs the #100 value-list picker).
-///
-/// The gate is the relationship's, not the portal's: the route must be
-/// create-determined (#11) and the anchoring relationship's `allow_create` (#110)
-/// on. The render suppresses the blank row otherwise (#171 gate in `resolve_portal`);
-/// this handler enforces it again (defense-in-depth), mapping a refusal to a
-/// precise 4xx. Inputs are the same `f<field_id>` contract over the TERMINAL
-/// table's fields; the anchor FK is stamped by the engine, so a stray FK input is
-/// harmless. The client reloads on success to surface the new row + a fresh blank.
-pub(crate) async fn create_related_record(
-    State(st): State<AppState>,
+/// Open the trailing portal row as an in-memory related insert working copy.
+pub(crate) async fn open_new_related_record(
+    State(state): State<AppState>,
     Path((layout_id, base_id, object_id)): Path<(i64, i64, i64)>,
     Form(form): Form<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let sol = st.sol.lock().unwrap();
+) -> Response {
+    let owner = match owner(&form) {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
+    let sol = state.sol.lock().unwrap();
     let Some(route) = portal_route(&sol, layout_id, object_id) else {
-        return (StatusCode::NOT_FOUND, "no such portal route".to_string()).into_response();
+        return json_error(StatusCode::NOT_FOUND, "not_found", "no such portal route");
     };
-    let fields = match sol.fields(route.terminal_table) {
-        Ok(fields) => fields,
-        Err(_) => {
-            return (StatusCode::NOT_FOUND, "no such related table".to_string()).into_response()
-        }
-    };
-    let values = collect_values(&fields, &form);
-    // Mint the related record as a DRAFT (#173), the portal-row parallel of the
-    // base New: required + uniqueness on the terminal are deferred to the child
-    // scope's record-EXIT commit. Type/range/value-list on present values still
-    // apply and surface as the same 400 + message as a base create.
-    let created = sol.create_related_record_draft(&route, base_id, &values, None);
-    if let Some(msg) = validation_message(&created) {
-        return (StatusCode::BAD_REQUEST, msg).into_response();
+    if !route.class.create_determined() {
+        return json_error(
+            StatusCode::CONFLICT,
+            "create_undetermined",
+            "portal route cannot create a determined record",
+        );
     }
-    match created {
-        Ok(terminal_id) => {
-            // Register the terminal draft so its own commit/Escape can find it.
-            st.drafts
-                .lock()
-                .unwrap()
-                .insert((route.terminal_table, terminal_id));
-            (StatusCode::OK, "created".to_string()).into_response()
+    let create_allowed = route
+        .hops
+        .first()
+        .and_then(|hop| sol.relationship_by_id(hop.relationship_id).ok().flatten())
+        .is_some_and(|relationship| relationship.allow_create);
+    if !create_allowed {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "create_not_allowed",
+            "related create is not allowed",
+        );
+    }
+    let fields = match sol.all_fields(route.terminal_table) {
+        Ok(fields) => fields,
+        Err(error) => return json_error(StatusCode::CONFLICT, "open_failed", error.to_string()),
+    };
+    let session = state.edits.lock().unwrap().begin_pending_related(
+        owner,
+        layout_id,
+        base_id,
+        object_id,
+        route.terminal_table,
+        blank_values(&fields),
+    );
+    Json(OpenResponse {
+        ok: true,
+        edit_token: session.token,
+        synthetic_id: None,
+        redirect: None,
+    })
+    .into_response()
+}
+
+/// Commit the trailing portal row. No terminal/join/FK row exists before this
+/// request; the engine creates the complete related operation atomically.
+pub(crate) async fn create_related_record(
+    State(state): State<AppState>,
+    Path((layout_id, base_id, object_id)): Path<(i64, i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let owner = match owner(&form) {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
+    let edit_token = match token(&form) {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
+    let sol = state.sol.lock().unwrap();
+    let Some(route) = portal_route(&sol, layout_id, object_id) else {
+        return json_error(StatusCode::NOT_FOUND, "not_found", "no such portal route");
+    };
+    let fields = match sol.all_fields(route.terminal_table) {
+        Ok(fields) => fields,
+        Err(error) => return json_error(StatusCode::CONFLICT, "commit_failed", error.to_string()),
+    };
+    let scope = EditScope::PendingRelated {
+        layout_id,
+        base_id,
+        object_id,
+        table_id: route.terminal_table,
+    };
+    let session = match state.edits.lock().unwrap().overlay(
+        &edit_token,
+        &owner,
+        &scope,
+        submitted(&fields, &form),
+    ) {
+        Ok(session) => session,
+        Err(error) => return session_error(error),
+    };
+    let values = working_values(&fields, &session);
+    edit_event("commit_attempt", &edit_token);
+    let terminal_id = match sol.create_related_record(&route, base_id, &values, None) {
+        Ok(id) => id,
+        Err(error) if error.downcast_ref::<ValidationError>().is_some() => {
+            return write_error(error, route.terminal_table, None, &edit_token)
         }
-        // A refusal here means the affordance rendered despite the gate (or a
-        // crafted request): map each RelatedCrudError to a precise status.
-        Err(e) => {
-            let status = match e.downcast_ref::<RelatedCrudError>() {
+        Err(error) => {
+            edit_event("commit_failed", &edit_token);
+            let status = match error.downcast_ref::<RelatedCrudError>() {
                 Some(RelatedCrudError::CreateNotAllowed) => StatusCode::FORBIDDEN,
                 Some(RelatedCrudError::CreateUndetermined)
                 | Some(RelatedCrudError::NotARelatedRoute) => StatusCode::CONFLICT,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
-            (status, e.to_string()).into_response()
+            return json_error(status, "related_create_failed", error.to_string());
         }
+    };
+    if let Err(error) = state
+        .edits
+        .lock()
+        .unwrap()
+        .release(&edit_token, &owner, &scope)
+    {
+        return session_error(error);
     }
+    edit_event("commit_succeeded", &edit_token);
+    Json(CommitResponse {
+        ok: true,
+        record_id: Some(terminal_id),
+        redirect: None,
+    })
+    .into_response()
 }
 
-/// Delete (or unlink) a related record from a portal row (#172): the engine's
-/// `delete_related_record` removes the NEAREST record for the portal's anchor
-/// route — a direct to-many child is deleted, a forward to-one clears the base FK
-/// (unlink; the parent survives), a join-table M:N removes only the join row (the
-/// terminal survives). Never cascades.
-///
-/// The gate is the relationship's, not the portal's: the anchoring relationship's
-/// `allow_delete` (#110) must be on. The render suppresses the per-row affordance
-/// otherwise (the row's `delete_url` is empty in `resolve_portal`); this handler
-/// enforces the same gate again (defense-in-depth), mapping a refusal to a precise
-/// 4xx. On success the terminal row's edit lock (if any) is released and the
-/// client reloads to surface the shortened set.
-pub(crate) async fn delete_related_record(
-    State(st): State<AppState>,
-    Path((layout_id, base_id, object_id, rec_id)): Path<(i64, i64, i64, i64)>,
-) -> impl IntoResponse {
-    let sol = st.sol.lock().unwrap();
-    let Some(route) = portal_route(&sol, layout_id, object_id) else {
-        return (StatusCode::NOT_FOUND, "no such portal route".to_string()).into_response();
+pub(crate) async fn revert_new_related_record(
+    State(state): State<AppState>,
+    Path((layout_id, base_id, object_id)): Path<(i64, i64, i64)>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let owner = match owner(&form) {
+        Ok(owner) => owner,
+        Err(response) => return response,
     };
-    if !portal_route_contains(&sol, &route, base_id, rec_id) {
-        return (StatusCode::NOT_FOUND, "record is not in portal route".to_string())
-            .into_response();
+    let edit_token = match token(&form) {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
+    let sol = state.sol.lock().unwrap();
+    let Some(route) = portal_route(&sol, layout_id, object_id) else {
+        return json_error(StatusCode::NOT_FOUND, "not_found", "no such portal route");
+    };
+    let scope = EditScope::PendingRelated {
+        layout_id,
+        base_id,
+        object_id,
+        table_id: route.terminal_table,
+    };
+    if let Err(error) = state
+        .edits
+        .lock()
+        .unwrap()
+        .release(&edit_token, &owner, &scope)
+    {
+        return session_error(error);
     }
-    match sol.delete_related_record(&route, base_id, rec_id) {
-        Ok(()) => {
-            st.locks
-                .lock()
-                .unwrap()
-                .remove(&(route.terminal_table, rec_id));
-            (StatusCode::OK, "deleted".to_string()).into_response()
-        }
-        // A refusal here means the affordance rendered despite the gate (or a
-        // crafted request): map each RelatedCrudError to a precise status.
-        Err(e) => {
-            let status = match e.downcast_ref::<RelatedCrudError>() {
+    edit_event("revert", &edit_token);
+    Json(CommitResponse {
+        ok: true,
+        record_id: None,
+        redirect: None,
+    })
+    .into_response()
+}
+
+pub(crate) async fn delete_related_record(
+    State(state): State<AppState>,
+    Path((layout_id, base_id, object_id, record_id)): Path<(i64, i64, i64, i64)>,
+) -> Response {
+    let sol = state.sol.lock().unwrap();
+    let Some(route) = portal_route(&sol, layout_id, object_id) else {
+        return json_error(StatusCode::NOT_FOUND, "not_found", "no such portal route");
+    };
+    if state.lock_held((route.terminal_table, record_id)) {
+        return json_error(
+            StatusCode::LOCKED,
+            "record_open",
+            "commit or revert the related record first",
+        );
+    }
+    if !portal_route_contains(&sol, &route, base_id, record_id) {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "record is not in portal route",
+        );
+    }
+    match sol.delete_related_record(&route, base_id, record_id) {
+        Ok(()) => Json(CommitResponse {
+            ok: true,
+            record_id: None,
+            redirect: None,
+        })
+        .into_response(),
+        Err(error) => {
+            let status = match error.downcast_ref::<RelatedCrudError>() {
                 Some(RelatedCrudError::DeleteNotAllowed) => StatusCode::FORBIDDEN,
                 Some(RelatedCrudError::NotARelatedRoute) => StatusCode::CONFLICT,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
-            (status, e.to_string()).into_response()
+            json_error(status, "related_delete_failed", error.to_string())
         }
     }
 }

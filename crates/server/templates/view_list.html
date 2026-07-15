@@ -8,7 +8,7 @@
 <div class="empty">
   <p class="empty-title">No records in {{ table }} yet</p>
   <p class="empty-sub">Create your first record to get started.</p>
-  <form class="inline" method="post" action="/browse/{{ nav.layout_id }}">
+  <form class="inline rm-new-record" method="post" action="/browse/{{ nav.layout_id }}">
     <input type="hidden" name="view" value="{{ nav.view }}">
     <button type="submit" class="empty-btn"><svg class="icon"><use href="#icon-plus"></use></svg>New record</button>
   </form>
@@ -29,7 +29,7 @@
         data-open="/browse/{{ nav.layout_id }}/{{ row.id }}/open"
         data-revert="/browse/{{ nav.layout_id }}/{{ row.id }}/revert"
         data-layout="{{ nav.layout_id }}"
-        {% if row.draft %}data-draft="1" {% endif %}data-view="list" data-rec="{{ loop.index }}">
+        {% if row.pending %}data-pending="1" {% endif %}{% if !row.edit_token.is_empty() %}data-edit="{{ row.edit_token }}" {% endif %}data-view="list" data-rec="{{ loop.index }}">
     {% for p in row.parts %}{% call band::band(p, true) %}{% endfor %}
   </form>
   {% endfor %}

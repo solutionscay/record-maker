@@ -9,9 +9,9 @@
 //! [`AppState`], call [`app`] for the router, and [`serve`] to bind an
 //! ephemeral loopback port and learn the assigned address.
 
-use std::collections::HashSet;
 use std::future::IntoFuture;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -23,6 +23,7 @@ use axum::{
 };
 use record_maker_engine::Solution;
 
+mod edit_sessions;
 mod format;
 mod routes;
 mod style;
@@ -30,6 +31,8 @@ mod style;
 mod tests;
 mod validate;
 mod viewmodel;
+
+use edit_sessions::EditSessionRegistry;
 
 use routes::browse::{browse, design, index, layouts_page, schema_page};
 use routes::design::{
@@ -41,13 +44,12 @@ use routes::design::{
     update_part_kind, update_part_props,
 };
 use routes::layouts::{
-    create_layout, delete_layout, list_layouts, rename_layout, reorder_layouts,
-    set_layout_enabled,
+    create_layout, delete_layout, list_layouts, rename_layout, reorder_layouts, set_layout_enabled,
 };
 use routes::records::{
-    create_record, create_related_record, delete_record, delete_related_record,
-    draft_save_record, draft_save_related_record, open_record, open_related_record, revert_record,
-    revert_related_record, save_record, save_related_record,
+    begin_new_record, create_record, create_related_record, delete_record, delete_related_record,
+    open_new_related_record, open_record, open_related_record, revert_new_related_record,
+    revert_record, revert_related_record, save_record, save_related_record,
 };
 use routes::schema::{
     create_schema_field, create_schema_relationship, create_schema_table, create_value_list,
@@ -65,18 +67,12 @@ pub const DEFAULT_UI_DIR: &str = "ui/dist";
 #[derive(Clone)]
 pub struct AppState {
     pub sol: Arc<Mutex<Solution>>,
-    /// Records currently "open" for editing, keyed `(table_id, record_id)`.
-    /// In-process is enough today (single-user desktop); the open→commit→release
-    /// lifecycle is the point, and the registry is where multi-user lock
-    /// enforcement will later hook in (#40).
-    pub locks: Arc<Mutex<HashSet<(i64, i64)>>>,
-    /// Never-committed DRAFT records (#173), keyed `(table_id, record_id)`
-    /// parallel to [`AppState::locks`]. A New record is minted as a draft (its
-    /// required + unique gates deferred) and lives here until the record-EXIT
-    /// commit promotes it (removes it) or an Escape/revert deletes it. In-process
-    /// is enough today (single-user desktop); this is where the mint→commit
-    /// lifecycle diverges from a plain edit.
-    pub drafts: Arc<Mutex<HashSet<(i64, i64)>>>,
+    /// Owned edit locks plus complete working copies (#182). Pending inserts live
+    /// only here and therefore disappear safely on crash or forced exit.
+    pub(crate) edits: Arc<Mutex<EditSessionRegistry>>,
+    /// Native-shell close handshake. The webview sets this only after every open
+    /// record has committed or explicitly reverted (#182).
+    close_authorized: Arc<AtomicBool>,
     /// Base directory the `/ui/*` handler serves the built editor bundle from.
     /// Configurable so the desktop shell (#16) can point it at its bundled
     /// resource dir; defaults to [`DEFAULT_UI_DIR`] for CLI/dev use.
@@ -89,8 +85,8 @@ impl AppState {
     pub fn new(sol: Solution) -> Self {
         AppState {
             sol: Arc::new(Mutex::new(sol)),
-            locks: Arc::new(Mutex::new(HashSet::new())),
-            drafts: Arc::new(Mutex::new(HashSet::new())),
+            edits: Arc::new(Mutex::new(EditSessionRegistry::default())),
+            close_authorized: Arc::new(AtomicBool::new(false)),
             ui_base_dir: DEFAULT_UI_DIR.to_string(),
         }
     }
@@ -101,14 +97,20 @@ impl AppState {
         self
     }
 
-    fn lock_held(&self, key: (i64, i64)) -> bool {
-        self.locks.lock().unwrap().contains(&key)
+    /// Shared one-shot close authorization observed by the desktop shell.
+    pub fn close_signal(&self) -> Arc<AtomicBool> {
+        self.close_authorized.clone()
     }
 
-    /// Whether `(table_id, record_id)` is a never-committed draft (#173).
-    pub fn is_draft(&self, key: (i64, i64)) -> bool {
-        self.drafts.lock().unwrap().contains(&key)
+    fn lock_held(&self, key: (i64, i64)) -> bool {
+        self.edits.lock().unwrap().locked(key)
     }
+}
+
+async fn authorize_close(State(state): State<AppState>) -> impl IntoResponse {
+    eprintln!("[record-edit] event=native_close_authorized");
+    state.close_authorized.store(true, Ordering::Release);
+    StatusCode::NO_CONTENT
 }
 
 fn not_found(what: &str, id: i64) -> axum::response::Response {
@@ -223,13 +225,10 @@ async fn ui_asset(State(st): State<AppState>, Path(path): Path<String>) -> impl 
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/app/close-authorized", post(authorize_close))
         .route("/browse/:layout", get(browse).post(create_record))
         .route("/browse/:layout/:id", post(save_record))
-        // Draft per-field partial save (#173): while a record is a draft, a
-        // field focus-out persists progress WITHOUT the required/unique gate and
-        // without touching the lock/draft registries. The record-EXIT commit is
-        // still the plain `save_record` route above (full gate + promote).
-        .route("/browse/:layout/:id/draft", post(draft_save_record))
+        .route("/browse/:layout/new/open", post(begin_new_record))
         .route("/browse/:layout/:id/open", post(open_record))
         .route("/browse/:layout/:id/revert", post(revert_record))
         .route("/browse/:layout/:id/delete", post(delete_record))
@@ -247,11 +246,13 @@ pub fn app(state: AppState) -> Router {
             "/browse/:layout/:base/related/:obj/:rec",
             post(save_related_record),
         )
-        // Draft per-field partial save for a related (child) draft (#173),
-        // mirroring the base `/draft` route.
         .route(
-            "/browse/:layout/:base/related/:obj/:rec/draft",
-            post(draft_save_related_record),
+            "/browse/:layout/:base/related/:obj/new/open",
+            post(open_new_related_record),
+        )
+        .route(
+            "/browse/:layout/:base/related/:obj/new/revert",
+            post(revert_new_related_record),
         )
         .route(
             "/browse/:layout/:base/related/:obj/:rec/open",

@@ -12,7 +12,7 @@ path = "src/main.rs"
 # Desktop shell runtime. No IPC commands today: the WebView talks to the
 # embedded axum server directly over http://127.0.0.1:<ephemeral-port>.
 tauri = { version = "2", features = [] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 # The shared app: router, handlers, state, `serve`/`seed`. Path dep on the
 # server *library* (crate `record_maker_server`).
 record-maker-server = { path = "../crates/server" }

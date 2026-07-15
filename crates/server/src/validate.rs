@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use record_maker_engine::{FieldMeta, ValidationError};
+use record_maker_engine::FieldMeta;
 
 /// Pull `f<field_id>` form values into engine `(field, value)` pairs.
 pub(crate) fn collect_values<'a>(
@@ -17,15 +17,4 @@ pub(crate) fn collect_values<'a>(
         .iter()
         .filter_map(|f| form.get(&format!("f{}", f.id)).map(|v| (f, v.clone())))
         .collect()
-}
-
-/// The user-facing message when a record write was rejected by validation, or
-/// `None` for success and for non-validation failures (which the handlers keep
-/// surfacing the way they always have).
-pub(crate) fn validation_message<T>(result: &anyhow::Result<T>) -> Option<String> {
-    result
-        .as_ref()
-        .err()?
-        .downcast_ref::<ValidationError>()
-        .map(ToString::to_string)
 }

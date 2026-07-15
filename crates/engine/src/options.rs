@@ -142,15 +142,15 @@ fn string_rule(rule: &Value, key: &str) -> Option<String> {
 /// user-facing message (rendered by the UI) — its wording is a contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
-    Required { field: String },
-    NotUnique { field: String },
-    NotANumber { field: String },
-    InvalidMinimum { field: String },
-    InvalidMaximum { field: String },
-    BelowMinimum { field: String, min: String },
-    AboveMaximum { field: String, max: String },
-    UnknownValueList { field: String },
-    NotInValueList { field: String },
+    Required { field_id: i64, field: String },
+    NotUnique { field_id: i64, field: String },
+    NotANumber { field_id: i64, field: String },
+    InvalidMinimum { field_id: i64, field: String },
+    InvalidMaximum { field_id: i64, field: String },
+    BelowMinimum { field_id: i64, field: String, min: String },
+    AboveMaximum { field_id: i64, field: String, max: String },
+    UnknownValueList { field_id: i64, field: String },
+    NotInValueList { field_id: i64, field: String },
     /// A storage-layer failure surfaced while checking a rule (kept as a
     /// validation outcome so consumers report it the same way they always have).
     Storage { message: String },
@@ -159,28 +159,63 @@ pub enum ValidationError {
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Required { field } => write!(f, "Field \"{field}\" is required."),
-            Self::NotUnique { field } => write!(f, "Field \"{field}\" must be unique."),
-            Self::NotANumber { field } => write!(f, "Field \"{field}\" must be a number."),
-            Self::InvalidMinimum { field } => {
+            Self::Required { field, .. } => write!(f, "Field \"{field}\" is required."),
+            Self::NotUnique { field, .. } => write!(f, "Field \"{field}\" must be unique."),
+            Self::NotANumber { field, .. } => write!(f, "Field \"{field}\" must be a number."),
+            Self::InvalidMinimum { field, .. } => {
                 write!(f, "Field \"{field}\" has an invalid minimum.")
             }
-            Self::InvalidMaximum { field } => {
+            Self::InvalidMaximum { field, .. } => {
                 write!(f, "Field \"{field}\" has an invalid maximum.")
             }
-            Self::BelowMinimum { field, min } => {
+            Self::BelowMinimum { field, min, .. } => {
                 write!(f, "Field \"{field}\" must be at least {min}.")
             }
-            Self::AboveMaximum { field, max } => {
+            Self::AboveMaximum { field, max, .. } => {
                 write!(f, "Field \"{field}\" must be at most {max}.")
             }
-            Self::UnknownValueList { field } => {
+            Self::UnknownValueList { field, .. } => {
                 write!(f, "Field \"{field}\" references an unknown value list.")
             }
-            Self::NotInValueList { field } => {
+            Self::NotInValueList { field, .. } => {
                 write!(f, "Field \"{field}\" must be a member of its value list.")
             }
             Self::Storage { message } => write!(f, "{message}"),
+        }
+    }
+}
+
+impl ValidationError {
+    /// Stable field identity for structured runtime warnings. Storage failures
+    /// are record-level and therefore have no field id.
+    pub fn field_id(&self) -> Option<i64> {
+        match self {
+            Self::Required { field_id, .. }
+            | Self::NotUnique { field_id, .. }
+            | Self::NotANumber { field_id, .. }
+            | Self::InvalidMinimum { field_id, .. }
+            | Self::InvalidMaximum { field_id, .. }
+            | Self::BelowMinimum { field_id, .. }
+            | Self::AboveMaximum { field_id, .. }
+            | Self::UnknownValueList { field_id, .. }
+            | Self::NotInValueList { field_id, .. } => Some(*field_id),
+            Self::Storage { .. } => None,
+        }
+    }
+
+    /// Stable machine code for the JSON validation contract (#182).
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Required { .. } => "required",
+            Self::NotUnique { .. } => "not_unique",
+            Self::NotANumber { .. } => "not_a_number",
+            Self::InvalidMinimum { .. } => "invalid_minimum",
+            Self::InvalidMaximum { .. } => "invalid_maximum",
+            Self::BelowMinimum { .. } => "below_minimum",
+            Self::AboveMaximum { .. } => "above_maximum",
+            Self::UnknownValueList { .. } => "unknown_value_list",
+            Self::NotInValueList { .. } => "not_in_value_list",
+            Self::Storage { .. } => "storage",
         }
     }
 }
@@ -235,6 +270,7 @@ impl Solution {
             let trimmed = value.unwrap_or("").trim();
             if full && (rules.primary || rules.required) && (value.is_none() || trimmed.is_empty()) {
                 return Err(ValidationError::Required {
+                    field_id: field.id,
                     field: field.name.clone(),
                 });
             }
@@ -250,6 +286,7 @@ impl Solution {
                     .map_err(storage)?
             {
                 return Err(ValidationError::NotUnique {
+                    field_id: field.id,
                     field: field.name.clone(),
                 });
             }
@@ -275,6 +312,7 @@ impl Solution {
             .resolve_value_list(value_list_id)
             .map_err(storage)?
             .ok_or_else(|| ValidationError::UnknownValueList {
+                field_id: field.id,
                 field: field.name.clone(),
             })?;
         let allowed: HashSet<String> = items
@@ -289,6 +327,7 @@ impl Solution {
         {
             if !allowed.contains(part) {
                 return Err(ValidationError::NotInValueList {
+                    field_id: field.id,
                     field: field.name.clone(),
                 });
             }
@@ -307,16 +346,19 @@ fn validate_range(field: &FieldMeta, value: &str, range: &RangeRule) -> Result<(
             let parsed = value
                 .parse::<f64>()
                 .map_err(|_| ValidationError::NotANumber {
+                    field_id: field.id,
                     field: field.name.clone(),
                 })?;
             if let Some(min) = min {
                 let min = min
                     .parse::<f64>()
                     .map_err(|_| ValidationError::InvalidMinimum {
+                        field_id: field.id,
                         field: field.name.clone(),
                     })?;
                 if parsed < min {
                     return Err(ValidationError::BelowMinimum {
+                        field_id: field.id,
                         field: field.name.clone(),
                         min: min.to_string(),
                     });
@@ -326,10 +368,12 @@ fn validate_range(field: &FieldMeta, value: &str, range: &RangeRule) -> Result<(
                 let max = max
                     .parse::<f64>()
                     .map_err(|_| ValidationError::InvalidMaximum {
+                        field_id: field.id,
                         field: field.name.clone(),
                     })?;
                 if parsed > max {
                     return Err(ValidationError::AboveMaximum {
+                        field_id: field.id,
                         field: field.name.clone(),
                         max: max.to_string(),
                     });
@@ -340,6 +384,7 @@ fn validate_range(field: &FieldMeta, value: &str, range: &RangeRule) -> Result<(
             if let Some(min) = min {
                 if value < min {
                     return Err(ValidationError::BelowMinimum {
+                        field_id: field.id,
                         field: field.name.clone(),
                         min: min.to_string(),
                     });
@@ -348,6 +393,7 @@ fn validate_range(field: &FieldMeta, value: &str, range: &RangeRule) -> Result<(
             if let Some(max) = max {
                 if value > max {
                     return Err(ValidationError::AboveMaximum {
+                        field_id: field.id,
                         field: field.name.clone(),
                         max: max.to_string(),
                     });

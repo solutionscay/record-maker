@@ -13,7 +13,10 @@
 // On release Windows builds, hide the extra console window. Harmless elsewhere.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use record_maker_engine::Solution;
 use record_maker_server::{serve, AppState};
@@ -29,13 +32,30 @@ fn main() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
+    // Native close is a two-phase handshake (#182). The first request is held
+    // while the webview commits/reverts every open record; only the server's
+    // one-shot authorization lets the second native close proceed.
+    let native_close_authorized = Arc::new(AtomicBool::new(false));
+    let close_gate = native_close_authorized.clone();
+
     tauri::Builder::default()
-        .setup(|app| {
+        .on_window_event(move |window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if close_gate.swap(false, Ordering::AcqRel) {
+                    return;
+                }
+                api.prevent_close();
+                if let Some(webview) = window.get_webview_window(window.label()) {
+                    let _ = webview.eval(
+                        "if (window.rmRequestClose) { window.rmRequestClose(); } \
+                         else { fetch('/app/close-authorized', {method:'POST'}); }",
+                    );
+                }
+            }
+        })
+        .setup(move |app| {
             // --- Resolve per-app, writable/bundled paths from Tauri. ---
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .expect("resolve app data dir");
+            let data_dir = app.path().app_data_dir().expect("resolve app data dir");
             std::fs::create_dir_all(&data_dir).ok();
 
             // Resolve the built editor bundle (`/ui/*` assets), most-specific
@@ -71,11 +91,12 @@ fn main() {
             // --- Open the solution + build the shared app state. ---
             let sol = Solution::open(&data_dir).expect("open solution");
             let state = AppState::new(sol).with_ui_dir(ui_dir.to_string_lossy().to_string());
+            let close_signal = state.close_signal();
 
             // --- Bind the ephemeral loopback port NOW (fast, deterministic),
             // then hand the long-running server future to the async runtime. ---
-            let (addr, server) = tauri::async_runtime::block_on(serve(state, None))
-                .expect("bind embedded server");
+            let (addr, server) =
+                tauri::async_runtime::block_on(serve(state, None)).expect("bind embedded server");
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = server.await {
                     eprintln!("embedded server exited: {e}");
@@ -85,7 +106,7 @@ fn main() {
             // --- Point the WebView at the now-known port. ---
             let url = format!("http://127.0.0.1:{}", addr.port());
             eprintln!("record-maker desktop → {url}");
-            WebviewWindowBuilder::new(
+            let window = WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::External(url.parse().expect("parse server url")),
@@ -97,6 +118,21 @@ fn main() {
             .center()
             .build()
             .expect("create main window");
+
+            // The loopback handler cannot hold a native-window handle. Poll its
+            // atomic one-shot and issue the authorized close from Tauri instead.
+            let close_window = window.clone();
+            let native_close_authorized = native_close_authorized.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
+                loop {
+                    interval.tick().await;
+                    if close_signal.swap(false, Ordering::AcqRel) {
+                        native_close_authorized.store(true, Ordering::Release);
+                        let _ = close_window.close();
+                    }
+                }
+            });
 
             Ok(())
         })

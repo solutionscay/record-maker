@@ -9,11 +9,12 @@ use axum::{
     response::{Html, IntoResponse, Redirect},
 };
 
+use crate::edit_sessions::EditScope;
 use crate::viewmodel::{
-    build_bands, build_form_record, build_list, canonical_view, clamp_rec, flipbook,
-    layout_parts_with_objects, layout_stepper, layout_table, table_body_columns, view_label,
-    CellView, Chrome, DesignTemplate, FieldView, FormTemplate, LayoutsTemplate, ListTemplate,
-    RecordView, SchemaTemplate, TableTemplate,
+    build_bands, build_form_record, build_list, build_pending_form_record, build_pending_list_row,
+    canonical_view, clamp_rec, flipbook, layout_parts_with_objects, layout_stepper, layout_table,
+    table_body_columns, view_label, CellView, Chrome, DesignTemplate, FieldView, FormTemplate,
+    LayoutsTemplate, ListTemplate, RecordView, SchemaTemplate, TableTemplate,
 };
 use crate::{format, not_found, AppState};
 
@@ -54,30 +55,50 @@ pub(crate) async fn browse(
     let view = canonical_view(&lay.view);
     let mut chrome = Chrome::build(&sol, "browse", Some(&lay));
 
+    // A pending base insert is an in-memory overlay addressed only by its edit
+    // token. It is never returned by an engine found-set query (#182).
+    let pending = q
+        .get("edit")
+        .and_then(|token| state_pending(&st, token, layout_id, table.id));
+
     // Found set + flipbook position drive record navigation across all views.
     let ids = sol.record_ids(&table).unwrap();
-    let total = ids.len() as i64;
-    let rec = clamp_rec(&q, total);
-    let current_id = if rec >= 1 {
+    let canonical_total = ids.len() as i64;
+    let total = canonical_total + i64::from(pending.is_some());
+    let rec = if pending.is_some() {
+        total
+    } else {
+        clamp_rec(&q, total)
+    };
+    let current_id = if rec >= 1 && rec <= canonical_total {
         ids.get((rec - 1) as usize).copied()
     } else {
         None
     };
     chrome.nav = Some(flipbook(layout_id, view, rec, current_id, total));
-    chrome.editing = current_id.is_some_and(|cid| st.lock_held((table.id, cid)));
-
-    // Snapshot the in-process DRAFT set for this request (#173): base rows key on
-    // `table.id`, portal rows on their terminal table, so the renderers get the
-    // whole set and match per record. A record in here renders `data-draft` on its
-    // `.rec-edit` so the client runs the lenient draft edit loop + gated commit.
-    let drafts = st.drafts.lock().unwrap().clone();
+    chrome.editing =
+        pending.is_some() || current_id.is_some_and(|cid| st.lock_held((table.id, cid)));
 
     match view {
         "form" => {
             // `all_fields`: a manually-placed system-PK field object (#156) must
             // resolve its live value like any other placed field.
             let fields = sol.all_fields(table.id).unwrap();
-            let record = build_form_record(&sol, layout_id, &table, &fields, &ids, rec, &drafts);
+            let record = if let Some(session) = pending.as_ref() {
+                let EditScope::PendingBase { synthetic_id, .. } = session.scope else {
+                    unreachable!()
+                };
+                Some(build_pending_form_record(
+                    &sol,
+                    layout_id,
+                    &fields,
+                    synthetic_id,
+                    &session.working,
+                    session.token.clone(),
+                ))
+            } else {
+                build_form_record(&sol, layout_id, &table, &fields, &ids, rec)
+            };
             Html(
                 FormTemplate {
                     chrome,
@@ -92,7 +113,20 @@ pub(crate) async fn browse(
         "list" => {
             // `all_fields`: see the Form branch above.
             let fields = sol.all_fields(table.id).unwrap();
-            let (header, rows, footer) = build_list(&sol, layout_id, &table, &fields, rec, &drafts);
+            let (header, mut rows, footer) = build_list(&sol, layout_id, &table, &fields, rec);
+            if let Some(session) = pending.as_ref() {
+                let EditScope::PendingBase { synthetic_id, .. } = session.scope else {
+                    unreachable!()
+                };
+                rows.push(build_pending_list_row(
+                    &sol,
+                    layout_id,
+                    &fields,
+                    synthetic_id,
+                    &session.working,
+                    session.token.clone(),
+                ));
+            }
             Html(
                 ListTemplate {
                     chrome,
@@ -115,6 +149,40 @@ pub(crate) async fn browse(
             let column_fields = columns.iter().map(|c| c.field.clone()).collect::<Vec<_>>();
             let records = sol.list_records(&table, &column_fields).unwrap();
             let (header, footer) = build_bands(&parts);
+            let mut record_views: Vec<RecordView> = records
+                .into_iter()
+                .map(|r| RecordView {
+                    id: r.id,
+                    pending: false,
+                    edit_token: String::new(),
+                    cells: columns
+                        .iter()
+                        .zip(r.cells)
+                        .map(|(c, value)| table_cell(c, value))
+                        .collect(),
+                })
+                .collect();
+            if let Some(session) = pending.as_ref() {
+                let EditScope::PendingBase { synthetic_id, .. } = session.scope else {
+                    unreachable!()
+                };
+                record_views.push(RecordView {
+                    id: synthetic_id,
+                    pending: true,
+                    edit_token: session.token.clone(),
+                    cells: columns
+                        .iter()
+                        .map(|column| {
+                            let value = session
+                                .working
+                                .get(&column.field.id)
+                                .cloned()
+                                .unwrap_or_default();
+                            table_cell(column, value)
+                        })
+                        .collect(),
+                });
+            }
             let tmpl = TableTemplate {
                 chrome,
                 layout_id,
@@ -127,43 +195,44 @@ pub(crate) async fn browse(
                         name: c.field.name.clone(),
                     })
                     .collect(),
-                records: records
-                    .into_iter()
-                    .map(|r| RecordView {
-                        id: r.id,
-                        draft: drafts.contains(&(table.id, r.id)),
-                        cells: columns
-                            .iter()
-                            .zip(r.cells)
-                            .map(|(c, value)| {
-                                // Format the DISPLAY value only; the input still
-                                // commits the raw `value` (see _band controller).
-                                let (display, style) = match c.format.as_ref() {
-                                    Some(spec) => {
-                                        let fmt =
-                                            format::format_value(&value, Some(spec), c.field.kind);
-                                        let style = fmt
-                                            .color
-                                            .map(|c| format!("color:{c};"))
-                                            .unwrap_or_default();
-                                        (fmt.text, style)
-                                    }
-                                    None => (value.clone(), String::new()),
-                                };
-                                CellView {
-                                    field_id: c.field.id,
-                                    value,
-                                    display,
-                                    style,
-                                    read_only: c.read_only,
-                                }
-                            })
-                            .collect(),
-                    })
-                    .collect(),
+                records: record_views,
             };
             Html(tmpl.render().unwrap()).into_response()
         }
+    }
+}
+
+fn state_pending(
+    state: &AppState,
+    token: &str,
+    layout_id: i64,
+    table_id: i64,
+) -> Option<crate::edit_sessions::EditSession> {
+    state
+        .edits
+        .lock()
+        .unwrap()
+        .pending_base(token, layout_id, table_id)
+}
+
+fn table_cell(column: &crate::viewmodel::TableColumn, value: String) -> CellView {
+    let (display, style) = match column.format.as_ref() {
+        Some(spec) => {
+            let formatted = format::format_value(&value, Some(spec), column.field.kind);
+            let style = formatted
+                .color
+                .map(|color| format!("color:{color};"))
+                .unwrap_or_default();
+            (formatted.text, style)
+        }
+        None => (value.clone(), String::new()),
+    };
+    CellView {
+        field_id: column.field.id,
+        value,
+        display,
+        style,
+        read_only: column.read_only,
     }
 }
 

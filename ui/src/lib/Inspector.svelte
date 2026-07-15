@@ -137,6 +137,8 @@
 <div class="insp-body">
   {#if hasMultipleSelection}
     <ArrangeSection {doc} {layoutId} multi bind:busy />
+    <div class="insp-div"></div>
+    <SizeSection {doc} {layoutId} objects={selectedObjects} />
     {#if allCanFillLine || allCanTextFormat}
       <div class="insp-div"></div>
       {#if allCanFillLine}
@@ -152,7 +154,7 @@
     <div class="insp-div"></div>
     <PositionSection {doc} {layoutId} {selected} />
     <div class="insp-div"></div>
-    <SizeSection {doc} {layoutId} {selected} />
+    <SizeSection {doc} {layoutId} objects={selectedObjects} />
     <div class="insp-div"></div>
     {#if selected.kind === 'field' || selected.kind === 'text' || selected.kind === 'portal'}
       <ObjectSection {doc} {layoutId} {selected} fieldId={selectedBindingFieldId} />

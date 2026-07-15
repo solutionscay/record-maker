@@ -44,13 +44,55 @@ export function commitObjectGeometry(
   operation: 'position' | 'size',
   control: string,
 ): void {
-  const committed = doc.getObject(id);
-  if (!committed) return;
-  const geometry = { x: committed.x, y: committed.y, w: committed.w, h: committed.h };
-  const lineProps = committed.kind === 'line' ? parseProps(committed.props) : null;
-  doc.mark();
-  llog('persist', `inspector: set object ${operation}`, { id, control, geometry });
+  commitObjectGeometries(doc, layoutId, [id], operation, control);
+}
 
+/** Seal and persist the current snapshots for one or many objects. Applying all
+ * live edits before this call lets one mark capture the entire multi-selection
+ * as a single undo step. Persistence remains queued per object, preserving the
+ * Position -> Size ordering guarantee when edits overlap. */
+export function commitObjectGeometries(
+  doc: EditorDoc,
+  layoutId: string,
+  ids: readonly number[],
+  operation: 'position' | 'size',
+  control: string,
+): void {
+  const commits = ids.flatMap((id) => {
+    const committed = doc.getObject(id);
+    if (!committed) return [];
+    return [{
+      id,
+      geometry: { x: committed.x, y: committed.y, w: committed.w, h: committed.h },
+      lineProps: committed.kind === 'line' ? parseProps(committed.props) : null,
+    }];
+  });
+  if (commits.length === 0) return;
+  doc.mark();
+  llog('persist', `inspector: set object ${operation}${commits.length > 1 ? ' (many)' : ''}`, {
+    ids: commits.map(({ id }) => id),
+    control,
+    geometries: commits.map(({ id, geometry }) => ({ id, ...geometry })),
+  });
+
+  for (const { id, geometry, lineProps } of commits) enqueueGeometryPersistence(
+    doc,
+    layoutId,
+    id,
+    geometry,
+    lineProps,
+    operation,
+  );
+}
+
+function enqueueGeometryPersistence(
+  doc: EditorDoc,
+  layoutId: string,
+  id: number,
+  geometry: { x: number; y: number; w: number; h: number },
+  lineProps: Record<string, unknown> | null,
+  operation: 'position' | 'size',
+): void {
   let byId = persistQueues.get(doc);
   if (!byId) {
     byId = new Map();

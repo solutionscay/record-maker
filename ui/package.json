@@ -12,6 +12,7 @@
     "parity": "node scripts/parity-check.mjs",
     "test": "node scripts/doc-check.mjs",
     "test:position": "node scripts/position-check.mjs",
+    "test:size": "node scripts/size-check.mjs",
     "test:record-edit": "node scripts/record-edit-check.mjs",
     "monitor": "node scripts/monitor.mjs",
     "ctrlclick": "node scripts/ctrlclick-repro.mjs"

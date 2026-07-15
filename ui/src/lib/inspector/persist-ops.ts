@@ -86,6 +86,39 @@ export async function writeStyleMany(
   }
 }
 
+/** Transform every selected object's full props bag as one undoable update.
+ * Unlike `writeStyleMany`, each object may retain different values for the
+ * untouched portions of a composite key (notably #191's strokeSides array). */
+export async function transformStyleMany(
+  doc: EditorDoc,
+  layoutId: string,
+  ids: readonly number[],
+  label: string,
+  transform: (props: Record<string, unknown>) => Record<string, unknown>,
+): Promise<void> {
+  if (ids.length === 0) return;
+  llog('persist', `inspector: ${label} (many)`, { ids });
+  const nexts = new Map<number, Record<string, unknown>>();
+  for (const id of ids) {
+    const o = doc.getObject(id);
+    if (!o) continue;
+    const next = transform(parseProps(o.props));
+    nexts.set(id, next);
+    doc.setObjectProps(id, JSON.stringify(next));
+  }
+  doc.mark();
+  try {
+    await Promise.all(
+      [...nexts].map(async ([id, next]) => {
+        const styles = await persistProps(layoutId, id, next);
+        doc.setObjectStyles(id, styles);
+      }),
+    );
+  } catch (e) {
+    reportPersistError(doc, `${label} (many)`, e);
+  }
+}
+
 /** Apply a batch of absolute geometries as one undo step, then persist each in
  * parallel (per-object endpoint, as #83 specifies). No-op writes are skipped by
  * the store's diff, and only changed objects are passed in by the callers. */

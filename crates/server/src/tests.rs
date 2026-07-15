@@ -165,7 +165,7 @@ fn portal_object_renders_related_rows_in_form_view() {
                 binding: Some("customer".into()),
                 content: None,
                 props: Some(
-                    r##"{"rowCount":3,"fill":"#abc123","stroke":"#123abc","strokeWidth":2}"##
+                    r##"{"rowCount":3,"fill":"#abc123","stroke":"#123abc","strokeWidth":2,"strokeSides":["left","bottom","middle"]}"##
                         .into(),
                 ),
                 parent_object_id: None,
@@ -282,9 +282,13 @@ fn portal_object_renders_related_rows_in_form_view() {
     assert!(
         html.contains(r#"class="fm-obj fm-portal-obj"#)
             && html.contains(
-                r#"style="--fm-portal-row-h: 24px;--fm-portal-h: 72px;background:#abc123;box-shadow:0 0 0 2px #123abc;"#
+                r#"style="--fm-portal-row-h: 24px;--fm-portal-h: 72px;background:#abc123;border:0;box-shadow:none;--fm-stroke-color:#123abc;--fm-stroke-top:0px;--fm-stroke-right:0px;--fm-stroke-bottom:2px;--fm-stroke-left:2px;--fm-stroke-middle:2px;"#
             ),
-        "portal selects one 24px row while its Browse viewport spans three rows\n{html}"
+        "portal carries independent left, bottom, and middle lines across its three-row Browse viewport\n{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="fm-portal-lines" aria-hidden="true"></span>"#),
+        "Browse renders the fixed portal line overlay\n{html}"
     );
     assert!(
         html.contains(
@@ -2951,10 +2955,13 @@ async fn design_page_renders_tool_rail_mount_node() {
         "design page mounts the tool rail"
     );
     assert!(
-        html.contains(".fm-portal-preview::after")
+        html.contains(".fm-portal-lines::after")
             && html.contains("pointer-events: none;")
-            && html.contains("repeating-linear-gradient("),
-        "portal preview row guides use an interaction-transparent overlay"
+            && html.contains("position: sticky;")
+            && html.contains("var(--fm-stroke-middle, 0px)")
+            && html.contains("bottom: var(--fm-portal-row-h, 24px);")
+            && html.contains(r#".fm-portal-cell[style*="--fm-stroke-"]"#),
+        "portal borders and authored middle rules use a fixed interaction-transparent overlay"
     );
 
     let (_, browse) = get_body(state, &format!("/browse/{form}")).await;
@@ -3841,12 +3848,12 @@ async fn design_object_props_style_field_and_text_objects() {
     let (status, resp) = post_json_body(
         state.clone(),
         &format!("/design/{layout_id}/object/{field_id}/props"),
-        r##"{"props":{"fill":"#ffeecc","stroke":"#335577","strokeWidth":3,"textColor":"#112233","fontSize":18,"bold":true,"italic":true,"underline":true,"align":"right"}}"##,
+        r##"{"props":{"fill":"#ffeecc","stroke":"#335577","strokeWidth":3,"strokeSides":["top","right"],"textColor":"#112233","fontSize":18,"bold":true,"italic":true,"underline":true,"align":"right"}}"##,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        resp.contains(r#""objectStyle":"background:#ffeecc;box-shadow:0 0 0 3px #335577;""#),
+        resp.contains(r#""objectStyle":"background:#ffeecc;border:0;box-shadow:none;--fm-stroke-color:#335577;--fm-stroke-top:3px;--fm-stroke-right:3px;--fm-stroke-bottom:0px;--fm-stroke-left:0px;""#),
         "field box style\n{resp}"
     );
     assert!(
@@ -3868,7 +3875,7 @@ async fn design_object_props_style_field_and_text_objects() {
 
     let (_, model) = get_body(state, &format!("/design/{layout_id}/model")).await;
     assert!(
-        model.contains(r#""objectStyle":"background:#ffeecc;box-shadow:0 0 0 3px #335577;""#)
+        model.contains(r#""objectStyle":"background:#ffeecc;border:0;box-shadow:none;--fm-stroke-color:#335577;--fm-stroke-top:3px;--fm-stroke-right:3px;--fm-stroke-bottom:0px;--fm-stroke-left:0px;""#)
             && model.contains(r#""textStyle":"color:#445566;font-size:16px;text-align:center;justify-content:center;""#),
         "styles persist in design model\n{model}"
     );

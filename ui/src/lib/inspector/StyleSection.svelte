@@ -5,6 +5,13 @@
   // selection is simply never mixed) and writes fan out to all selected objects
   // as one undo step. Callers gate the section by the shared fill capability.
   import type { EditorDoc, ObjectDoc } from '../doc.svelte';
+  import {
+    hasAllOuterStrokeSides,
+    strokeSides,
+    withAllOuterStrokeSides,
+    withStrokeSide,
+    type StrokeSide,
+  } from '../border-sides';
   import { setObjectGeometry as persistGeometry } from '../persist';
   import { llog } from '../log';
   import {
@@ -14,7 +21,12 @@
     parseProps,
   } from '../object-props';
   import { colorValue, numberValue, sharedValue } from './values';
-  import { persistObjectPropsAndRefresh, reportPersistError, writeStyleMany } from './persist-ops';
+  import {
+    persistObjectPropsAndRefresh,
+    reportPersistError,
+    transformStyleMany,
+    writeStyleMany,
+  } from './persist-ops';
 
   let {
     doc,
@@ -26,6 +38,28 @@
   let mStrokeWidth = $derived(sharedValue(objects, (p) => numberValue(p.strokeWidth, 1)));
   let mStroke = $derived(sharedValue(objects, (p) => colorValue(p.stroke, '#d3d8de')));
 
+  // Border placement belongs only to rectangular boxes. Lines and ellipses keep
+  // their existing uniform stroke control. Middle is available only when every
+  // selected box is a portal, so a mixed field+portal selection cannot write an
+  // invalid portal-only placement onto fields.
+  let hasBorderPlacement = $derived(
+    objects.length > 0 && objects.every((o) => ['field', 'rect', 'portal'].includes(o.kind)),
+  );
+  let allPortals = $derived(objects.length > 0 && objects.every((o) => o.kind === 'portal'));
+  let mAllSides = $derived(sharedValue(objects, (p) => hasAllOuterStrokeSides(strokeSides(p))));
+  let mTop = $derived(sharedValue(objects, (p) => strokeSides(p).includes('top')));
+  let mRight = $derived(sharedValue(objects, (p) => strokeSides(p).includes('right')));
+  let mBottom = $derived(sharedValue(objects, (p) => strokeSides(p).includes('bottom')));
+  let mLeft = $derived(sharedValue(objects, (p) => strokeSides(p).includes('left')));
+  let mMiddle = $derived(sharedValue(objects, (p) => strokeSides(p).includes('middle')));
+
+  const sideButtons: { side: Exclude<StrokeSide, 'middle'>; label: string; path: string }[] = [
+    { side: 'left', label: 'Left border', path: 'M3 2V16' },
+    { side: 'right', label: 'Right border', path: 'M15 2V16' },
+    { side: 'top', label: 'Top border', path: 'M2 3H16' },
+    { side: 'bottom', label: 'Bottom border', path: 'M2 15H16' },
+  ];
+
   // A line's angle control applies to a SINGLE selected line only (a multi
   // selection never shows it — matching size/direction across lines is undefined).
   let line = $derived(objects.length === 1 && objects[0].kind === 'line' ? objects[0] : null);
@@ -33,6 +67,33 @@
 
   function setStyle(key: string, value: string | number | boolean): void {
     void writeStyleMany(doc, layoutId, objects.map((o) => o.id), key, value);
+  }
+
+  function sideState(side: StrokeSide): { mixed: boolean; value: boolean } {
+    switch (side) {
+      case 'top': return mTop;
+      case 'right': return mRight;
+      case 'bottom': return mBottom;
+      case 'left': return mLeft;
+      case 'middle': return mMiddle;
+    }
+  }
+
+  function setSide(side: StrokeSide): void {
+    const state = sideState(side);
+    const enabled = state.mixed || !state.value;
+    void transformStyleMany(doc, layoutId, objects.map((o) => o.id), `set ${side} border`, (props) => ({
+      ...props,
+      strokeSides: withStrokeSide(props, side, enabled),
+    }));
+  }
+
+  function setAllSides(): void {
+    const enabled = mAllSides.mixed || !mAllSides.value;
+    void transformStyleMany(doc, layoutId, objects.map((o) => o.id), 'set all outer borders', (props) => ({
+      ...props,
+      strokeSides: withAllOuterStrokeSides(props, enabled),
+    }));
   }
 
   async function setLineAngle(value: number): Promise<void> {
@@ -69,6 +130,54 @@
       />
     </div>
   </div>
+  {#if hasBorderPlacement}
+    <div class="insp-row border-placement-row">
+      <span>Placement</span>
+      <div class="border-grid" aria-label="Border placement">
+        <button
+          type="button"
+          class="border-btn"
+          class:active={!mAllSides.mixed && mAllSides.value}
+          class:mixed={mAllSides.mixed}
+          title="All outer borders"
+          aria-label="All outer borders"
+          aria-pressed={mAllSides.mixed ? 'mixed' : mAllSides.value}
+          onclick={setAllSides}
+        >
+          <svg viewBox="0 0 18 18" aria-hidden="true"><rect class="border-guide" x="3" y="3" width="12" height="12" /><rect class="border-mark" x="3" y="3" width="12" height="12" /></svg>
+        </button>
+        {#each sideButtons as button}
+          {@const state = sideState(button.side)}
+          <button
+            type="button"
+            class="border-btn"
+            class:active={!state.mixed && state.value}
+            class:mixed={state.mixed}
+            title={button.label}
+            aria-label={button.label}
+            aria-pressed={state.mixed ? 'mixed' : state.value}
+            onclick={() => setSide(button.side)}
+          >
+            <svg viewBox="0 0 18 18" aria-hidden="true"><rect class="border-guide" x="3" y="3" width="12" height="12" /><path class="border-mark" d={button.path} /></svg>
+          </button>
+        {/each}
+        {#if allPortals}
+          <button
+            type="button"
+            class="border-btn"
+            class:active={!mMiddle.mixed && mMiddle.value}
+            class:mixed={mMiddle.mixed}
+            title="Middle row separators"
+            aria-label="Middle row separators"
+            aria-pressed={mMiddle.mixed ? 'mixed' : mMiddle.value}
+            onclick={() => setSide('middle')}
+          >
+            <svg viewBox="0 0 18 18" aria-hidden="true"><rect class="border-guide" x="3" y="3" width="12" height="12" /><path class="border-mark" d="M3 9H15" /></svg>
+          </button>
+        {/if}
+      </div>
+    </div>
+  {/if}
   <div class="insp-row">
     <span>Border</span>
     <div class="insp-ctls">

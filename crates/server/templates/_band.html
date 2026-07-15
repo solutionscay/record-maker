@@ -59,6 +59,7 @@
        read-only row branch; the editable input subtree legitimately diverges, just
        as an ordinary field's does (the #44 parity contract). #}
     <div class="fm-portal{% if !o.portal_resolved %} fm-portal-preview{% endif %}"{% if (o.portal_row_height > 0 && o.portal_row_count > 0) || o.object_style != "" %} style="{% if o.portal_row_height > 0 && o.portal_row_count > 0 %}--fm-portal-row-h: {{ o.portal_row_height }}px;--fm-portal-h: {{ o.portal_row_height * o.portal_row_count }}px;{% endif %}{{ o.object_style }}"{% endif %} data-route="{{ o.binding }}">
+      <span class="fm-portal-lines" aria-hidden="true"></span>
       {% if !o.portal_resolved %}
       <span class="fm-portal-tag">{{ o.binding }}</span>
       {% else %}

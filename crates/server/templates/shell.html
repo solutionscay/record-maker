@@ -206,13 +206,30 @@
     /* A field renders its value only (#60); its caption is a separate fm-text. */
     .fm-field { display: flex; align-items: stretch; border: 1px solid #b9c2cc;
                 border-radius: 0; overflow: hidden; background: #fff; }
+    /* #191 partial border placements paint above content without entering the
+       box model, so authored geometry and field input alignment never shift. */
+    .fm-field::after, .fm-rect::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+    }
+    .fm-field::after, .fm-rect::after, .fm-portal-lines {
+      pointer-events: none;
+      z-index: 3;
+      border-radius: inherit;
+      background:
+        linear-gradient(var(--fm-stroke-color, transparent), var(--fm-stroke-color, transparent)) top / 100% var(--fm-stroke-top, 0px) no-repeat,
+        linear-gradient(var(--fm-stroke-color, transparent), var(--fm-stroke-color, transparent)) right / var(--fm-stroke-right, 0px) 100% no-repeat,
+        linear-gradient(var(--fm-stroke-color, transparent), var(--fm-stroke-color, transparent)) bottom / 100% var(--fm-stroke-bottom, 0px) no-repeat,
+        linear-gradient(var(--fm-stroke-color, transparent), var(--fm-stroke-color, transparent)) left / var(--fm-stroke-left, 0px) 100% no-repeat;
+    }
     .fm-fvalue { flex: 1 1 auto; display: flex; align-items: center; padding: .15rem .45rem;
                  color: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .fm-text { display: block; padding: .1rem .2rem; color: inherit; }
     /* Static shapes (rect / line / ellipse, #60) — a box whose fill/stroke/radius
        arrive inline from the object's props (#49); a faint default keeps an
        unstyled shape visible. The inner div fills the object's geometry box. */
-    .fm-shape { width: 100%; height: 100%; box-sizing: border-box;
+    .fm-shape { position: relative; width: 100%; height: 100%; box-sizing: border-box;
                 background: #f7f8fa; border: 1px solid #d3d8de; }
     .fm-ellipse { border-radius: 50%; }
     /* A line's thickness is its `strokeWidth` (inline `height` from shape_style),
@@ -235,29 +252,41 @@
        selection handles resize the reusable row template. The inner portal grows
        to the explicit row count and may paint below that selection box. */
     .fm-portal-obj { overflow: visible; }
-    .fm-portal { width: 100%; height: var(--fm-portal-h, 120px);
+    .fm-portal { position: relative; width: 100%; height: var(--fm-portal-h, 120px);
                  box-sizing: border-box;
                  overflow-x: hidden; overflow-y: auto;
                  background: #fbfcfe; box-shadow: inset 0 0 0 1px #b9c2cc; border-radius: 2px; }
-    /* Layout Mode has no base record, so rows below the authored first row are a
-       non-interactive preview. A repeating rule shows the exact configured count
-       without manufacturing DOM rows or persisted objects. */
-    .fm-portal-preview { position: relative; }
-    /* #186: keep row guides independent from the portal's inline fill. The fill
-       paints on the portal itself; this interaction-transparent overlay paints
-       the repeating preview rules above it. */
-    .fm-portal-preview::after {
+    /* The portal overlay is sticky inside the scrolling viewport: the outer frame
+       and configured visible-row rules remain fixed while excess records scroll.
+       Its negative margin makes it paint-only and leaves row flow untouched. */
+    .fm-portal-lines {
+      position: sticky;
+      top: 0;
+      display: block;
+      width: 100%;
+      height: var(--fm-portal-h, 120px);
+      margin-bottom: calc(-1 * var(--fm-portal-h, 120px));
+    }
+    /* #191 Middle is an authored, portal-only placement. It remains independent
+       from the outer frame and paints above resolved cell backgrounds in both
+       Layout and Browse. Stopping one row short avoids duplicating the bottom
+       outer edge. A zero-width default makes legacy Middle off. */
+    .fm-portal-lines::after {
       content: "";
       position: absolute;
-      inset: 0;
+      top: 0;
+      right: 0;
+      bottom: var(--fm-portal-row-h, 24px);
+      left: 0;
       pointer-events: none;
+      z-index: 4;
       border-radius: inherit;
       background-image: repeating-linear-gradient(
         to bottom,
         transparent 0,
-        transparent calc(var(--fm-portal-row-h, 24px) - 1px),
-        #dfe5ec calc(var(--fm-portal-row-h, 24px) - 1px),
-        #dfe5ec var(--fm-portal-row-h, 24px)
+        transparent calc(var(--fm-portal-row-h, 24px) - var(--fm-stroke-middle, 0px)),
+        var(--fm-stroke-color, transparent) calc(var(--fm-portal-row-h, 24px) - var(--fm-stroke-middle, 0px)),
+        var(--fm-stroke-color, transparent) var(--fm-portal-row-h, 24px)
       );
     }
     .fm-portal-tag { display: inline-block; margin: .2rem; padding: .05rem .35rem;
@@ -298,6 +327,16 @@
        transparent like a plain `.fm-finput`. Two classes ⇒ it outranks `.fm-finput`
        regardless of source order. */
     .fm-portal-cell.fm-finput { border: 1px solid #b9c2cc; background: #fff; }
+    /* A portal-owned field keeps its own #191 placement independently from the
+       portal frame/Middle setting. Inputs cannot host pseudo-elements, so their
+       per-edge variables project to ordinary border widths inside the already
+       fixed cell geometry. `!important` intentionally beats the inline `border:0`
+       used to suppress the legacy uniform frame for explicit partial placement. */
+    .fm-portal-cell[style*="--fm-stroke-"] {
+      border-style: solid !important;
+      border-color: var(--fm-stroke-color) !important;
+      border-width: var(--fm-stroke-top, 0px) var(--fm-stroke-right, 0px) var(--fm-stroke-bottom, 0px) var(--fm-stroke-left, 0px) !important;
+    }
     /* Per-row delete/unlink affordance (#172): a compact button shown only when the
        relationship permits delete; reddens on hover. Pinned to the row's right edge
        (the cells are absolutely placed at authored geometry, so it floats over the

@@ -4,6 +4,97 @@
 
 use record_maker_engine::ObjectKind;
 
+#[derive(Clone, Copy, Default)]
+struct StrokeSides {
+    top: bool,
+    right: bool,
+    bottom: bool,
+    left: bool,
+    middle: bool,
+}
+
+impl StrokeSides {
+    fn all_outer(self) -> bool {
+        self.top && self.right && self.bottom && self.left
+    }
+}
+
+/// `None` is the legacy contract: all four outer edges. An explicit array,
+/// including `[]`, is an authored #191 placement. Unknown entries are ignored.
+fn stroke_sides(v: &serde_json::Value) -> Option<StrokeSides> {
+    let values = v.get("strokeSides")?.as_array()?;
+    let mut sides = StrokeSides::default();
+    for value in values.iter().filter_map(serde_json::Value::as_str) {
+        match value {
+            "top" => sides.top = true,
+            "right" => sides.right = true,
+            "bottom" => sides.bottom = true,
+            "left" => sides.left = true,
+            "middle" => sides.middle = true,
+            _ => {}
+        }
+    }
+    Some(sides)
+}
+
+fn stroke_value<'a>(v: &'a serde_json::Value, fallback: &'a str) -> &'a str {
+    v.get("stroke")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(fallback)
+}
+
+fn stroke_width(v: &serde_json::Value, fallback: i64) -> i64 {
+    v.get("strokeWidth")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(fallback)
+        .max(0)
+}
+
+/// Append the #191 box-border projection. Returns true when the placement is
+/// explicit, letting callers avoid also emitting the legacy uniform ring.
+fn append_border_placement(
+    s: &mut String,
+    v: &serde_json::Value,
+    fallback_color: &str,
+    allow_middle: bool,
+) -> bool {
+    let Some(sides) = stroke_sides(v) else {
+        return false;
+    };
+    let color = stroke_value(v, fallback_color);
+    let width = stroke_width(v, 1);
+
+    if sides.all_outer() {
+        // Keep the established all-edge renderer byte-for-byte. This makes an
+        // explicit All visually match the legacy absent-metadata fallback.
+        if v.get("stroke")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        {
+            s.push_str(&format!("box-shadow:0 0 0 {width}px {color};"));
+        }
+    } else {
+        // Suppress each kind's default uniform frame and expose edge widths to
+        // the interaction-transparent CSS overlay. Geometry never changes.
+        s.push_str("border:0;box-shadow:none;");
+        s.push_str(&format!(
+            "--fm-stroke-color:{color};--fm-stroke-top:{}px;--fm-stroke-right:{}px;--fm-stroke-bottom:{}px;--fm-stroke-left:{}px;",
+            if sides.top { width } else { 0 },
+            if sides.right { width } else { 0 },
+            if sides.bottom { width } else { 0 },
+            if sides.left { width } else { 0 },
+        ));
+    }
+
+    if allow_middle && sides.middle {
+        if sides.all_outer() {
+            s.push_str(&format!("--fm-stroke-color:{color};"));
+        }
+        s.push_str(&format!("--fm-stroke-middle:{width}px;"));
+    }
+    true
+}
+
 pub(crate) fn parse_props(props: Option<&str>) -> Option<serde_json::Value> {
     let Some(props) = props else {
         return None;
@@ -13,7 +104,7 @@ pub(crate) fn parse_props(props: Option<&str>) -> Option<serde_json::Value> {
 
 /// Derive a shape object's inline CSS from its `props` JSON. #49 owns the full
 /// appearance contract; this reads the keys a rect/line/ellipse needs — `fill`,
-/// `stroke`, `strokeWidth`, `radius`. The string is computed once here and carried
+/// `stroke`, `strokeWidth`, `strokeSides`, `radius`. The string is computed once here and carried
 /// in [`ObjectView::shape_style`], so the askama band macro and the Svelte `Band`
 /// both just interpolate it — there is no second derivation to keep byte-equal.
 /// Empty for absent/invalid props (an unstyled shape falls back to its CSS class).
@@ -56,15 +147,19 @@ pub(crate) fn shape_style(kind: ObjectKind, props: Option<&str>) -> String {
     if let Some(fill) = v.get("fill").and_then(serde_json::Value::as_str) {
         s.push_str(&format!("background:{fill};"));
     }
-    if let Some(stroke) = v.get("stroke").and_then(serde_json::Value::as_str) {
-        let width = v
-            .get("strokeWidth")
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or(1);
-        // Render the stroke OUTSIDE the box (box-shadow ring) so a thicker stroke
-        // grows the object visually without eating into its stored geometry; the
-        // ring also follows `border-radius`, so ellipses stay round (#44 issue 2).
-        s.push_str(&format!("box-shadow:0 0 0 {width}px {stroke};"));
+    let explicit_placement = if matches!(kind, ObjectKind::Rect) {
+        append_border_placement(&mut s, &v, "#d3d8de", false)
+    } else {
+        false
+    };
+    if !explicit_placement {
+        if let Some(stroke) = v.get("stroke").and_then(serde_json::Value::as_str) {
+            let width = stroke_width(&v, 1);
+            // Render the stroke OUTSIDE the box (box-shadow ring) so a thicker stroke
+            // grows the object visually without eating into its stored geometry; the
+            // ring also follows `border-radius`, so ellipses stay round (#44 issue 2).
+            s.push_str(&format!("box-shadow:0 0 0 {width}px {stroke};"));
+        }
     }
     if let Some(radius) = v.get("radius").and_then(serde_json::Value::as_i64) {
         s.push_str(&format!("border-radius:{radius}px;"));
@@ -86,15 +181,18 @@ pub(crate) fn object_style(kind: ObjectKind, props: Option<&str>) -> String {
     if let Some(fill) = v.get("fill").and_then(serde_json::Value::as_str) {
         s.push_str(&format!("background:{fill};"));
     }
-    if let Some(stroke) = v.get("stroke").and_then(serde_json::Value::as_str) {
-        let width = v
-            .get("strokeWidth")
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or(1)
-            .max(0);
-        // Stroke grows outward (box-shadow ring) rather than inward, so geometry is
-        // preserved and a thicker border makes the object visually bigger (issue 2).
-        s.push_str(&format!("box-shadow:0 0 0 {width}px {stroke};"));
+    let explicit_placement = match kind {
+        ObjectKind::Field => append_border_placement(&mut s, &v, "#b9c2cc", false),
+        ObjectKind::Portal => append_border_placement(&mut s, &v, "#b9c2cc", true),
+        _ => false,
+    };
+    if !explicit_placement {
+        if let Some(stroke) = v.get("stroke").and_then(serde_json::Value::as_str) {
+            let width = stroke_width(&v, 1);
+            // Stroke grows outward (box-shadow ring) rather than inward, so geometry is
+            // preserved and a thicker border makes the object visually bigger (issue 2).
+            s.push_str(&format!("box-shadow:0 0 0 {width}px {stroke};"));
+        }
     }
     if let Some(radius) = v.get("radius").and_then(serde_json::Value::as_i64) {
         s.push_str(&format!("border-radius:{}px;", radius.max(0)));
@@ -161,4 +259,80 @@ pub(crate) fn text_style(kind: ObjectKind, props: Option<&str>) -> String {
         _ => {}
     }
     s
+}
+
+#[cfg(test)]
+mod border_placement_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_missing_placement_keeps_uniform_outer_ring() {
+        assert_eq!(
+            object_style(
+                ObjectKind::Field,
+                Some(r##"{"stroke":"#123456","strokeWidth":3}"##),
+            ),
+            "box-shadow:0 0 0 3px #123456;"
+        );
+    }
+
+    #[test]
+    fn rectangle_projects_independent_edges_without_geometry_changes() {
+        assert_eq!(
+            shape_style(
+                ObjectKind::Rect,
+                Some(
+                    r##"{"fill":"#ffffff","stroke":"#123456","strokeWidth":2,"strokeSides":["top","right"]}"##,
+                ),
+            ),
+            "background:#ffffff;border:0;box-shadow:none;--fm-stroke-color:#123456;--fm-stroke-top:2px;--fm-stroke-right:2px;--fm-stroke-bottom:0px;--fm-stroke-left:0px;"
+        );
+        assert_eq!(
+            shape_style(
+                ObjectKind::Rect,
+                Some(r##"{"stroke":"#123456","strokeWidth":2,"strokeSides":[]}"##,),
+            ),
+            "border:0;box-shadow:none;--fm-stroke-color:#123456;--fm-stroke-top:0px;--fm-stroke-right:0px;--fm-stroke-bottom:0px;--fm-stroke-left:0px;"
+        );
+    }
+
+    #[test]
+    fn portal_middle_is_independent_from_every_outer_edge() {
+        assert_eq!(
+            object_style(
+                ObjectKind::Portal,
+                Some(
+                    r##"{"stroke":"#123456","strokeWidth":2,"strokeSides":["middle"]}"##,
+                ),
+            ),
+            "border:0;box-shadow:none;--fm-stroke-color:#123456;--fm-stroke-top:0px;--fm-stroke-right:0px;--fm-stroke-bottom:0px;--fm-stroke-left:0px;--fm-stroke-middle:2px;"
+        );
+        assert_eq!(
+            object_style(
+                ObjectKind::Portal,
+                Some(
+                    r##"{"stroke":"#123456","strokeWidth":2,"strokeSides":["top","right","bottom","left","middle"]}"##,
+                ),
+            ),
+            "box-shadow:0 0 0 2px #123456;--fm-stroke-color:#123456;--fm-stroke-middle:2px;"
+        );
+    }
+
+    #[test]
+    fn ellipse_and_line_ignore_box_edge_metadata() {
+        assert_eq!(
+            shape_style(
+                ObjectKind::Ellipse,
+                Some(r##"{"stroke":"#123456","strokeWidth":2,"strokeSides":["top"]}"##,),
+            ),
+            "box-shadow:0 0 0 2px #123456;"
+        );
+        assert_eq!(
+            shape_style(
+                ObjectKind::Line,
+                Some(r##"{"stroke":"#123456","strokeWidth":2,"strokeSides":[]}"##,),
+            ),
+            "background:#123456;height:2px;"
+        );
+    }
 }

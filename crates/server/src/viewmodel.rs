@@ -369,8 +369,8 @@ pub(crate) struct ObjectView {
     pub(crate) content: String,
     /// The raw appearance bag (#49) the Style zone edits. Carried alongside the
     /// server-derived `shape_style` so the canvas renders from `shape_style` while
-    /// the inspector reads/writes the underlying `fill`/`stroke`/… keys. Empty
-    /// string when the object has no props.
+    /// the inspector reads/writes the underlying `fill`/`stroke`/`strokeWidth`/
+    /// `strokeSides` keys (#191). Empty string when the object has no props.
     pub(crate) props: String,
     pub(crate) object_style: String,
     pub(crate) text_style: String,

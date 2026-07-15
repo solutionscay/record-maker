@@ -60,6 +60,7 @@
           style={portalStyle(o)}
           data-route={o.binding}
         >
+          <span class="fm-portal-lines" aria-hidden="true"></span>
           {#if !o.portalResolved}
             <span class="fm-portal-tag">{o.binding}</span>
           {:else}

@@ -255,6 +255,58 @@
   border-radius: 5px;
   background: var(--rm-segment-track);
 }
+/* Border-placement palette (#191): All + independent box edges, followed by
+   the portal-only repeated horizontal Middle separator. */
+.border-placement-row {
+  align-items: flex-start;
+}
+.border-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 30px);
+  gap: 5px;
+}
+.border-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: 0.5px solid var(--rm-border);
+  border-radius: var(--rm-radius);
+  background: var(--rm-control-bg);
+  color: var(--rm-text-dim);
+  cursor: pointer;
+  box-shadow: var(--rm-elev-1);
+}
+.border-btn:hover {
+  background: #f0f0f2;
+}
+.border-btn.active {
+  border-color: var(--rm-accent);
+  background: color-mix(in srgb, var(--rm-accent) 12%, var(--rm-control-bg));
+  color: var(--rm-accent);
+}
+.border-btn.mixed {
+  outline: 1px dashed var(--rm-border-strong);
+  outline-offset: -3px;
+}
+.border-btn svg {
+  width: 19px;
+  height: 19px;
+}
+.border-guide {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 0.75;
+  opacity: 0.4;
+}
+.border-mark {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: square;
+}
 /* Pinned delete footer. */
 .insp-foot {
   margin-top: auto;

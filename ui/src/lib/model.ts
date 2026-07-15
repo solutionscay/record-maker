@@ -45,7 +45,9 @@ export interface ObjectView {
   content: string;
   /** Raw appearance bag JSON the Style zone edits (#49); empty when unset. Carried
    * alongside the server-derived `shapeStyle` so the inspector reads/writes the
-   * underlying `fill`/`stroke`/… keys while the canvas renders from `shapeStyle`. */
+   * underlying `fill`/`stroke`/`strokeWidth`/`strokeSides` keys while the canvas
+   * renders from the server-derived style strings. Missing `strokeSides` is the
+   * legacy all-outer placement; portal `middle` remains independent (#191). */
   props: string;
   /** Server-derived inline CSS for the object's outer box; empty when unset. */
   objectStyle: string;

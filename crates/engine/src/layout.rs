@@ -124,7 +124,9 @@ impl PartKind {
 /// - `Text` — **static** text/label content from its own `content` slot (never
 ///   editable). A field's label is one of these, auto-spawned beside the field.
 /// - `Rect` / `Line` / `Ellipse` — **shapes**: no data, no text; drawn as a styled
-///   box from `props` (fill / stroke / radius) at the object's geometry and `z`.
+///   box from `props` (fill / stroke / strokeWidth / strokeSides / radius) at the
+///   object's geometry and `z`. Missing `strokeSides` means every outer edge;
+///   `middle` is a portal-only repeated horizontal row separator (#191).
 /// - `Portal` — a **related-list container** (#168): binds a declared relationship
 ///   route (its dot-path rides the `binding` slot, exactly like a field binding)
 ///   and renders a repeating region of the related table's records (#169). FK-first

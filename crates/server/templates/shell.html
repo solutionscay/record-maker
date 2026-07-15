@@ -242,7 +242,16 @@
     /* Layout Mode has no base record, so rows below the authored first row are a
        non-interactive preview. A repeating rule shows the exact configured count
        without manufacturing DOM rows or persisted objects. */
-    .fm-portal-preview {
+    .fm-portal-preview { position: relative; }
+    /* #186: keep row guides independent from the portal's inline fill. The fill
+       paints on the portal itself; this interaction-transparent overlay paints
+       the repeating preview rules above it. */
+    .fm-portal-preview::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      border-radius: inherit;
       background-image: repeating-linear-gradient(
         to bottom,
         transparent 0,

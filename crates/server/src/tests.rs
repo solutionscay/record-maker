@@ -2950,6 +2950,12 @@ async fn design_page_renders_tool_rail_mount_node() {
         html.contains(r#"id="layout-tools""#),
         "design page mounts the tool rail"
     );
+    assert!(
+        html.contains(".fm-portal-preview::after")
+            && html.contains("pointer-events: none;")
+            && html.contains("repeating-linear-gradient("),
+        "portal preview row guides use an interaction-transparent overlay"
+    );
 
     let (_, browse) = get_body(state, &format!("/browse/{form}")).await;
     assert!(

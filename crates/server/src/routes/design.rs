@@ -17,9 +17,10 @@ use record_maker_engine::{
 
 use crate::style::{object_style, shape_style, text_style};
 use crate::viewmodel::{
-    by_name_for_rec, by_name_map, canvas_width, clamp_rec, field_choices, layout_parts_with_objects,
-    layout_table, object_view, part_view, related_route_choices, render_part_with_objects,
-    updated_object_view, updated_part_view, FieldChoice, ObjectView, PartView, RelatedRouteChoice,
+    by_name_for_rec, by_name_map, canvas_width, clamp_rec, field_choices,
+    layout_parts_with_objects, layout_table, normalized_portal_props, object_view, part_view,
+    related_route_choices, render_part_with_objects, updated_object_view, updated_part_view,
+    FieldChoice, ObjectView, PartView, RelatedRouteChoice,
 };
 use crate::{not_found, AppError, AppResult, AppState};
 
@@ -568,7 +569,11 @@ pub(crate) async fn create_design_object(
         } else {
             None
         };
-        let props = body.props.as_ref().map(|v| v.to_string());
+        let props = if kind == ObjectKind::Portal {
+            Some(normalized_portal_props(body.props.clone()).to_string())
+        } else {
+            body.props.as_ref().map(|v| v.to_string())
+        };
         let new = NewObject {
             part_id: body.part_id,
             kind,
@@ -898,7 +903,15 @@ pub(crate) async fn update_object_props(
     Json(body): Json<PropsBody>,
 ) -> AppResult<Json<StyleResult>> {
     let sol = st.sol.lock().unwrap();
-    let props = body.props.to_string();
+    let before = sol
+        .object_by_id(layout_id, object_id)
+        .unwrap()
+        .ok_or_else(AppError::not_found)?;
+    let props = if before.kind.is_portal() {
+        normalized_portal_props(Some(body.props)).to_string()
+    } else {
+        body.props.to_string()
+    };
     if sol.set_object_props(layout_id, object_id, &props).unwrap() == 0 {
         return Err(AppError::not_found());
     }

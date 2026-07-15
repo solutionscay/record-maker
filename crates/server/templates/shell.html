@@ -231,13 +231,30 @@
        pixel-exact under their heading labels (authored text objects at the same
        x/w) — one geometry source for heading and cell, matching Layout. A border
        would inset the content 1px and shift the whole body off the headings. */
-    .fm-portal { width: 100%; height: 100%; box-sizing: border-box;
+    /* #184: the `.fm-obj` portal box is exactly ONE authored row so Moveable's
+       selection handles resize the reusable row template. The inner portal grows
+       to the explicit row count and may paint below that selection box. */
+    .fm-portal-obj { overflow: visible; }
+    .fm-portal { width: 100%; height: var(--fm-portal-h, 120px);
+                 box-sizing: border-box;
                  overflow-x: hidden; overflow-y: auto;
                  background: #fbfcfe; box-shadow: inset 0 0 0 1px #b9c2cc; border-radius: 2px; }
+    /* Layout Mode has no base record, so rows below the authored first row are a
+       non-interactive preview. A repeating rule shows the exact configured count
+       without manufacturing DOM rows or persisted objects. */
+    .fm-portal-preview {
+      background-image: repeating-linear-gradient(
+        to bottom,
+        transparent 0,
+        transparent calc(var(--fm-portal-row-h, 24px) - 1px),
+        #dfe5ec calc(var(--fm-portal-row-h, 24px) - 1px),
+        #dfe5ec var(--fm-portal-row-h, 24px)
+      );
+    }
     .fm-portal-tag { display: inline-block; margin: .2rem; padding: .05rem .35rem;
                      font-size: .68rem; color: #5b6675; background: #eef2f7;
                      border-radius: 3px; white-space: nowrap; }
-    /* Resolved portal rows (#169): one row per related record. A row is a bare
+    /* Resolved portal rows (#169/#184): one row per related record. A row is a bare
        positioning context; each value cell is absolutely placed at its column's
        authored portal-relative x/w (inline `left`/`width`, from
        `portal_column_lefts`/`portal_column_widths`) so it sits directly under its
@@ -245,12 +262,9 @@
        x/w, so heading and cell share one geometry source, exactly as Layout renders
        them. No flex/gap/padding here: those redistributed cells to equal widths and
        drifted them off the fixed headings. The row-template height (#168) rides the
-       `--fm-portal-row-h` custom property set on `.fm-portal` (the tallest authored
-       column's height): every value row sizes to it, so the fixed-height portal
-       box — a clipping scroll viewport — shows `floor(body height / row height)`
-       rows and scrolls the rest. Absent (no authored columns) it falls back to
-       content height. Rows never shrink, so the count stays geometry-driven as the
-       box height changes. */
+       `--fm-portal-row-h` custom property set from the portal object's authored
+       first-row `h`. The inner viewport is independently sized to
+       `row height × rowCount`; excess related records scroll. */
     .fm-portal-row { position: relative; box-sizing: border-box;
                      height: var(--fm-portal-row-h, auto);
                      font-size: .72rem; white-space: nowrap; color: #2b3440; }

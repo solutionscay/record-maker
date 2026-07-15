@@ -24,7 +24,7 @@ export function defaultBox(tool: ToolKind): DefaultBox {
     case 'field':
       return { w: 200, h: 24 };
     case 'portal':
-      return { w: 280, h: 120 }; // a related-list container is a tall region (#168)
+      return { w: 280, h: 24 }; // #184: geometry is the reusable first row
     default:
       return { w: 80, h: 60 }; // rect / ellipse
   }
@@ -40,6 +40,8 @@ export function defaultProps(tool: ToolKind): Record<string, unknown> | undefine
       return { fill: '#f7f8fa', stroke: '#d3d8de', strokeWidth: 1 };
     case 'line':
       return { stroke: '#888888', strokeWidth: 2 };
+    case 'portal':
+      return { rowCount: 5 }; // #184: preview/viewport capacity, independent of row height
     default:
       return undefined; // text / field
   }

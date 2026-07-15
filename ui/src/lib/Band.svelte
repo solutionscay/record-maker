@@ -17,7 +17,7 @@
   // no stray whitespace inside tags (normalization only forgives whitespace
   // BETWEEN tags). Order: `fm-obj` [`fm-field`] [`fm-readonly`].
   function objClass(o: ObjectView): string {
-    return `fm-obj${o.field ? ' fm-field' : ''}${o.readOnly ? ' fm-readonly' : ''}`;
+    return `fm-obj${o.kind === 'portal' ? ' fm-portal-obj' : ''}${o.field ? ' fm-field' : ''}${o.readOnly ? ' fm-readonly' : ''}`;
   }
 
   function objStyle(o: ObjectView): string {
@@ -47,8 +47,10 @@
              the column count) picks the branch, so a resolved portal with zero
              columns still renders cleanly. -->
         <div
-          class="fm-portal"
-          style={(o.portalRowHeight ?? 0) > 0 ? `--fm-portal-row-h: ${o.portalRowHeight}px` : null}
+          class={`fm-portal${!o.portalResolved ? ' fm-portal-preview' : ''}`}
+          style={(o.portalRowHeight ?? 0) > 0 && (o.portalRowCount ?? 0) > 0
+            ? `--fm-portal-row-h: ${o.portalRowHeight}px;--fm-portal-h: ${(o.portalRowHeight ?? 0) * (o.portalRowCount ?? 0)}px`
+            : null}
           data-route={o.binding}
         >
           {#if !o.portalResolved}

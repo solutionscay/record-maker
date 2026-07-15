@@ -286,6 +286,52 @@ try {
     ok('props: undo restores props', obj(d3.renderModel, 14).props === props0);
   }
 
+  // 9b. #184 portal geometry is one row; props independently control the full
+  // preview footprint and remain ordinary undoable document state.
+  {
+    const model = fresh();
+    const portal = {
+      id: 184, kind: 'portal', field: false, shape: false, fieldId: null,
+      x: 8, y: 8, w: 280, h: 24, z: 0, readOnly: false,
+      binding: 'orders', content: '', props: '{"rowCount":4}',
+      objectStyle: '', textStyle: '', label: '', value: '', shapeStyle: '',
+      portalRowHeight: 24, portalRowCount: 4,
+    };
+    model.parts[1].objects.push(portal);
+    const d = new EditorDoc();
+    d.hydrate(model);
+    const first = obj(d.renderModel, 184);
+    ok('portal rows: store derives one-row geometry + explicit count',
+      first.h === 24 && first.portalRowHeight === 24 && first.portalRowCount === 4);
+    ok('portal rows: full preview contributes to minimum band height', d.minPartHeight(2) === 104);
+
+    d.setObjectProps(184, '{"rowCount":7}');
+    d.mark();
+    ok('portal rows: props edit changes count without changing row height',
+      obj(d.renderModel, 184).portalRowCount === 7 && obj(d.renderModel, 184).h === 24);
+    ok('portal rows: expanded preview updates effective footprint', d.minPartHeight(2) === 176);
+    d.undo();
+    ok('portal rows: undo restores count', obj(d.renderModel, 184).portalRowCount === 4);
+
+    d.resizeObject(184, { w: 320, h: 32 });
+    d.mark();
+    ok('portal rows: direct resize edits first-row width and height',
+      obj(d.renderModel, 184).w === 320 &&
+      obj(d.renderModel, 184).h === 32 &&
+      obj(d.renderModel, 184).portalRowHeight === 32 &&
+      obj(d.renderModel, 184).portalRowCount === 4);
+    ok('portal rows: resized row reflows the fixed-count footprint', d.minPartHeight(2) === 136);
+    d.undo();
+
+    const mod = await vite.ssrLoadModule('/src/lib/LayoutPreview.svelte');
+    const { render } = await vite.ssrLoadModule('svelte/server');
+    const { body } = render(mod.default, { props: { model: d.renderModel } });
+    ok('portal rows: Layout preview paints below one-row selection box',
+      body.includes('fm-obj fm-portal-obj') &&
+      body.includes('fm-portal fm-portal-preview') &&
+      body.includes('--fm-portal-row-h: 24px;--fm-portal-h: 96px'));
+  }
+
   // 10. Full loop: store.renderModel → <LayoutPreview> SSR === committed golden.
   {
     const mod = await vite.ssrLoadModule('/src/lib/LayoutPreview.svelte');

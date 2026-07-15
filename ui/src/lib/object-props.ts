@@ -1,5 +1,8 @@
 import type { ObjectDoc } from './doc.svelte';
 
+export const DEFAULT_PORTAL_ROW_COUNT = 5;
+export const MAX_PORTAL_ROW_COUNT = 1_000;
+
 export type LineBox = Pick<Readonly<ObjectDoc>, 'x' | 'y' | 'w' | 'h'>;
 
 export function parseProps(raw: string | null | undefined): Record<string, unknown> {
@@ -14,6 +17,21 @@ export function parseProps(raw: string | null | undefined): Record<string, unkno
 
 export function numberProp(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+/** #184: normalize the portal's explicit repeated-row setting from its props.
+ * Invalid metadata falls back to the five-row default; the ceiling mirrors the
+ * server so document-store rendering and fresh server projections cannot drift. */
+export function portalRowCount(props: Record<string, unknown>): number {
+  const raw = props.rowCount;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1) return DEFAULT_PORTAL_ROW_COUNT;
+  return Math.min(raw, MAX_PORTAL_ROW_COUNT);
+}
+
+/** Full visible height of a portal preview/viewport while its editable geometry
+ * remains one row. Non-portals retain their ordinary authored height. */
+export function objectFootprintHeight(o: Pick<Readonly<ObjectDoc>, 'kind' | 'h' | 'props'>): number {
+  return o.kind === 'portal' ? o.h * portalRowCount(parseProps(o.props)) : o.h;
 }
 
 export function normalizeAngle(angle: number): number {

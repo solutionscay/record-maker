@@ -82,10 +82,12 @@
          when the relationship permits create (`portal_can_create` — the route is
          create-determined AND `allow_create` is on, #11/#110). It is a `.fm-portal-add`
          scope (NOT a nested `<form>` — the base record is already a form); its own
-         controller posts the `f<field_id>` inputs to the portal's create endpoint on
-         commit (blur/Enter with any value), then reloads to surface the new row and a
-         fresh blank. An all-empty row is abandoned. `data-related` keeps its focus
-         events from bubbling to the enclosing base-record editor, like an edit row.
+         controller opens a working copy on the first meaningful value change and
+         posts the `f<field_id>` inputs to the portal's create endpoint on commit
+         (blur/Enter with any value), then reloads to surface the new row and a fresh
+         blank. Focus alone is inert and an all-empty row is abandoned. `data-related`
+         keeps its focus events from bubbling to the enclosing base-record editor,
+         like an edit row.
          Create-new only — associate-existing is deferred (#100). No Svelte mirror:
          the design canvas is never editable, so this editable-only subtree lives in
          askama alone, exactly as the edit-row inputs do (the #44 parity contract). #}

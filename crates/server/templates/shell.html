@@ -708,12 +708,14 @@
     var historyRestore = null;
     var scopeEls = Array.prototype.slice.call(document.querySelectorAll('.rec-edit, .fm-portal-add'));
     var scopes = scopeEls.map(function (el) {
+      var addRow = el.classList.contains('fm-portal-add');
       return {
         el: el,
         state: el.dataset.edit ? 'open' : 'closed',
         token: el.dataset.edit || '',
         owner: el.dataset.owner || owner,
-        pending: el.dataset.pending != null || el.classList.contains('fm-portal-add'),
+        addRow: addRow,
+        pending: el.dataset.pending != null || addRow,
         promise: null,
         lastResponse: null
       };
@@ -742,6 +744,12 @@
       p.set('_owner', scope.owner);
       if (scope.token) p.set('_edit', scope.token);
       return p;
+    }
+    function scopeHasValue(scope) {
+      return ownControls(scope).some(function (control) {
+        var value = control.dataset.raw != null ? control.dataset.raw : control.value;
+        return String(value || '').trim() !== '';
+      });
     }
 
     function post(url, body) {
@@ -796,7 +804,12 @@
       }
     }
     function revertScope(scope) {
-      if (!scope.token) return Promise.resolve({ resolved: true });
+      if (!scope.token) {
+        scope.state = 'closed';
+        scope.el.classList.remove('validation-invalid');
+        if (scope.pending) ownControls(scope).forEach(function (control) { control.value = ''; });
+        return Promise.resolve({ resolved: true, reverted: true });
+      }
       var body = new URLSearchParams();
       body.set('_owner', scope.owner);
       body.set('_edit', scope.token);
@@ -846,6 +859,10 @@
         });
       }
       if (scope.state === 'committing') return scope.promise;
+      // The trailing portal row is an invitation to create, not a record by
+      // itself. If an edit was erased back to empty, abandon its working copy
+      // silently instead of validating a record the user no longer intends.
+      if (scope.addRow && !scopeHasValue(scope)) return revertScope(scope);
       scope.state = 'committing';
       scope.el.classList.remove('validation-invalid');
       scope.promise = post(scope.el.dataset.action, recordBody(scope)).then(function (response) {
@@ -855,7 +872,10 @@
           scope.token = '';
           scope.el.removeAttribute('data-edit');
           scope.lastResponse = payload;
-          return { resolved: true, redirect: payload.redirect || null };
+          return {
+            resolved: true,
+            redirect: payload.redirect || (scope.addRow ? window.location.href : null)
+          };
         });
       }).catch(function (error) {
         return resolveFailure(scope, error);
@@ -919,26 +939,32 @@
           ownControls(scope).forEach(function (peer) {
             if (peer !== control && peer.name === control.name) peer.value = control.value;
           });
+          if (scope.addRow && scope.state === 'closed' && scopeHasValue(scope)) openScope(scope);
+        });
+        control.addEventListener('change', function () {
+          if (scope.addRow && scope.state === 'closed' && scopeHasValue(scope)) openScope(scope);
         });
       });
       scope.el.addEventListener('focusin', function (event) {
         if (event.target && (event.target.readOnly || event.target.disabled)) return;
-        openScope(scope);
+        if (!scope.addRow) openScope(scope);
         if (scope.el.dataset.related != null) event.stopPropagation();
       });
       scope.el.addEventListener('focusout', function (event) {
         if (scope.el.dataset.related != null) event.stopPropagation();
         if (scope.el.contains(event.relatedTarget)) return;
         setTimeout(function () {
-          if (!scope.el.contains(document.activeElement)) guard(null);
+          if (scope.state !== 'closed' && !scope.el.contains(document.activeElement)) guard(null);
         }, 0);
       });
       scope.el.addEventListener('keydown', function (event) {
+        if (scope.el.dataset.related != null) event.stopPropagation();
         if (event.key === 'Enter') {
           event.preventDefault();
-          guard(null);
+          if (scope.state !== 'closed') guard(null);
         } else if (event.key === 'Escape') {
           event.preventDefault();
+          if (scope.state === 'closed') return;
           revertScope(scope).then(function (result) {
             if (result.resolved) { allowExit = true; window.location.reload(); }
           });

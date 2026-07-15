@@ -9,7 +9,7 @@
 <form class="fm-edit rec-edit" data-action="/browse/{{ nav.layout_id }}/{{ r.id }}"
       data-open="/browse/{{ nav.layout_id }}/{{ r.id }}/open"
       data-revert="/browse/{{ nav.layout_id }}/{{ r.id }}/revert"
-      {% if r.draft %}data-draft="1" {% endif %}data-view="{{ nav.view }}" data-rec="{{ nav.current }}">
+      {% if r.pending %}data-pending="1" {% endif %}{% if !r.edit_token.is_empty() %}data-edit="{{ r.edit_token }}" {% endif %}data-view="{{ nav.view }}" data-rec="{{ nav.current }}">
   {# Header/footer bands stay fixed; body (and any summary) bands scroll between
      them. Wrappers are emitted tight so an absent header/footer is a no-op. #}
   <div class="fm-canvas">
@@ -25,7 +25,7 @@
 <div class="empty">
   <p class="empty-title">No records in {{ table }} yet</p>
   <p class="empty-sub">Create your first record to get started.</p>
-  <form class="inline" method="post" action="/browse/{{ nav.layout_id }}">
+  <form class="inline rm-new-record" method="post" action="/browse/{{ nav.layout_id }}">
     <input type="hidden" name="view" value="{{ nav.view }}">
     <button type="submit" class="empty-btn"><svg class="icon"><use href="#icon-plus"></use></svg>New record</button>
   </form>

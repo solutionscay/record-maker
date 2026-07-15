@@ -11,6 +11,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "parity": "node scripts/parity-check.mjs",
     "test": "node scripts/doc-check.mjs",
+    "test:record-edit": "node scripts/record-edit-check.mjs",
     "monitor": "node scripts/monitor.mjs",
     "ctrlclick": "node scripts/ctrlclick-repro.mjs"
   },

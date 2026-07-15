@@ -106,10 +106,8 @@ pub(crate) fn flipbook(
 /// chrome/stepper construction runs one `layouts()` query instead of one per
 /// table.
 fn layouts_for_table_in(layouts: &[LayoutMeta], table_id: i64) -> Vec<&LayoutMeta> {
-    let mut siblings: Vec<&LayoutMeta> = layouts
-        .iter()
-        .filter(|l| l.table_id == table_id)
-        .collect();
+    let mut siblings: Vec<&LayoutMeta> =
+        layouts.iter().filter(|l| l.table_id == table_id).collect();
     siblings.sort_by_key(|l| l.id);
     siblings
 }
@@ -297,10 +295,11 @@ pub(crate) struct FormTemplate {
 /// One record laid out per the layout's parts/objects, with live values (#25).
 pub(crate) struct FormRecord {
     pub(crate) id: i64,
-    /// This record is a never-committed DRAFT (#173): the template stamps
-    /// `data-draft` on its `.rec-edit` so the client runs the draft edit loop
-    /// (lenient per-field saves + a response-read record-exit commit).
-    pub(crate) draft: bool,
+    /// This is an in-memory pending insert overlay, never a canonical row.
+    pub(crate) pending: bool,
+    /// Pending inserts arrive already open with their owned edit token. Existing
+    /// rows acquire a token on focus, so these are empty for canonical records.
+    pub(crate) edit_token: String,
     pub(crate) parts: Vec<PartView>,
 }
 
@@ -505,11 +504,6 @@ pub(crate) struct PortalRowView {
     /// JSON) otherwise, so a row that may not be deleted renders no button.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) delete_url: String,
-    /// This terminal row is a never-committed DRAFT (#173) — the portal-row
-    /// parallel of [`FormRecord::draft`]. Only ever set in the editable Browse
-    /// render; skipped from the design-model JSON (the canvas is never editable).
-    #[serde(skip)]
-    pub(crate) draft: bool,
 }
 
 /// A bindable field on the layout's primary table — the Field tool's dropdown
@@ -633,9 +627,8 @@ pub(crate) struct ListTemplate {
 pub(crate) struct ListRow {
     id: i64,
     current: bool,
-    /// This row's record is a never-committed DRAFT (#173) — computed per row,
-    /// since drafts are id-keyed and several may coexist (a base + a portal one).
-    draft: bool,
+    pending: bool,
+    edit_token: String,
     parts: Vec<PartView>,
 }
 
@@ -655,8 +648,8 @@ pub(crate) struct TableColumn {
 
 pub(crate) struct RecordView {
     pub(crate) id: i64,
-    /// This row's record is a never-committed DRAFT (#173); per row (id-keyed).
-    pub(crate) draft: bool,
+    pub(crate) pending: bool,
+    pub(crate) edit_token: String,
     pub(crate) cells: Vec<CellView>,
 }
 
@@ -829,10 +822,6 @@ pub(crate) struct PortalCtx<'a> {
     pub(crate) layout_id: i64,
     pub(crate) base_table: i64,
     pub(crate) base_id: i64,
-    /// Snapshot of the in-process DRAFT set (#173), keyed `(table_id, record_id)`.
-    /// A portal row whose terminal `(terminal_table, id)` is in here is marked a
-    /// draft so its `.rec-edit` runs the same draft edit loop as a base record.
-    pub(crate) drafts: &'a HashSet<(i64, i64)>,
 }
 
 /// The resolved render state of a portal object (#168/#169/#170/#171): the AUTHORED
@@ -965,9 +954,7 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         columns.push(field.name.clone());
         field_ids.push(field.id);
         column_depths.push(depth);
-        column_editable.push(
-            depth == route.hops.len() && !field.is_system() && !child.read_only,
-        );
+        column_editable.push(depth == route.hops.len() && !field.is_system() && !child.read_only);
         // Authored column geometry, portal-relative — the same x/w the heading label
         // was placed at, so the Browse cell and its label align 1:1 (see the field
         // doc on `PortalResolved::column_lefts`).
@@ -996,21 +983,30 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
     // portal has no own flag. Suppressed on an Undetermined/base route or when
     // `allow_delete` is off; the engine's `delete_related_record` enforces the same
     // gate again.
-    let can_delete = route.class.create_determined()
-        && anchor_rel.as_ref().is_some_and(|r| r.allow_delete);
+    let can_delete =
+        route.class.create_determined() && anchor_rel.as_ref().is_some_and(|r| r.allow_delete);
     // Per-row inline-edit endpoints (#170), scoped to this portal object and the
     // terminal row id: `/browse/:layout/:base/related/:obj/:rec[/open|/revert|/delete]`.
-    let base = format!(
-        "/browse/{}/{}/related/{}",
-        ctx.layout_id, ctx.base_id, o.id
-    );
+    let base = format!("/browse/{}/{}/related/{}", ctx.layout_id, ctx.base_id, o.id);
     let row_editable = route.class.create_determined();
     let rows = records
         .into_iter()
         .map(|r| PortalRowView {
-            open_url: if row_editable { format!("{base}/{}/open", r.id) } else { String::new() },
-            action_url: if row_editable { format!("{base}/{}", r.id) } else { String::new() },
-            revert_url: if row_editable { format!("{base}/{}/revert", r.id) } else { String::new() },
+            open_url: if row_editable {
+                format!("{base}/{}/open", r.id)
+            } else {
+                String::new()
+            },
+            action_url: if row_editable {
+                format!("{base}/{}", r.id)
+            } else {
+                String::new()
+            },
+            revert_url: if row_editable {
+                format!("{base}/{}/revert", r.id)
+            } else {
+                String::new()
+            },
             delete_url: if can_delete {
                 format!("{base}/{}/delete", r.id)
             } else {
@@ -1018,8 +1014,6 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
             },
             id: r.id,
             editable: row_editable,
-            // Terminal-row draft-ness (#173), keyed on the terminal table.
-            draft: ctx.drafts.contains(&(route.terminal_table, r.id)),
             // Resolve every authored prefix/terminal field against this concrete
             // terminal row. Intermediate values select the association row whose
             // remaining route suffix reaches `r.id` (#180).
@@ -1081,7 +1075,11 @@ fn parse_portal_filter(props: Option<&str>) -> RelatedFilter {
         .iter()
         .filter_map(|c| {
             let field_id = c.get("field").and_then(serde_json::Value::as_i64)?;
-            let op = match c.get("op").and_then(serde_json::Value::as_str).unwrap_or("eq") {
+            let op = match c
+                .get("op")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("eq")
+            {
                 "ne" => FilterOp::Ne,
                 "lt" => FilterOp::Lt,
                 "le" => FilterOp::Le,
@@ -1126,7 +1124,11 @@ fn apply_portal_sort(props: Option<&str>, fields: &[FieldMeta], records: &mut [R
             (Ok(x), Ok(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
             _ => av.cmp(bv),
         };
-        if desc { ord.reverse() } else { ord }
+        if desc {
+            ord.reverse()
+        } else {
+            ord
+        }
     });
 }
 
@@ -1258,9 +1260,10 @@ pub(crate) fn related_route_choices(sol: &Solution, table: &TableMeta) -> Vec<Re
     let relationships = sol.relationships().unwrap_or_default();
     let mut routes = Vec::new();
 
-    for first in relationships.iter().filter(|rel| {
-        rel.from_table == table.id || rel.to_table == table.id
-    }) {
+    for first in relationships
+        .iter()
+        .filter(|rel| rel.from_table == table.id || rel.to_table == table.id)
+    {
         let (direction, cardinality, terminal_id) = if first.from_table == table.id {
             ("forward", "toOne", first.to_table)
         } else {
@@ -1399,9 +1402,7 @@ pub(crate) fn render_part_with_objects(
             // remain normal authored objects: in particular, the text labels placed
             // above portal columns are the headings and must retain their geometry.
             // On the design canvas (`portal` is `None`) every child stays visible.
-            .filter(|o| {
-                portal.is_none() || o.parent_object_id.is_none() || !o.kind.is_field()
-            })
+            .filter(|o| portal.is_none() || o.parent_object_id.is_none() || !o.kind.is_field())
             .map(|o| prepared_object_view(&prepare_object(o.clone()), by_name, portal))
             .collect(),
     }
@@ -1465,9 +1466,7 @@ pub(crate) fn render_prepared_part(
             // disappear in Browse. Authored labels and other non-field children
             // keep rendering at their stored positions.
             .filter(|p| {
-                portal.is_none()
-                    || p.meta.parent_object_id.is_none()
-                    || !p.meta.kind.is_field()
+                portal.is_none() || p.meta.parent_object_id.is_none() || !p.meta.kind.is_field()
             })
             .map(|p| prepared_object_view(p, by_name, portal))
             .collect(),
@@ -1528,7 +1527,6 @@ pub(crate) fn build_form_record(
     fields: &[FieldMeta],
     ids: &[i64],
     rec: i64,
-    drafts: &HashSet<(i64, i64)>,
 ) -> Option<FormRecord> {
     if rec <= 0 {
         return None;
@@ -1542,7 +1540,6 @@ pub(crate) fn build_form_record(
         layout_id,
         base_table: table.id,
         base_id: id,
-        drafts,
     };
     let parts = sol
         .parts(layout_id)
@@ -1552,7 +1549,8 @@ pub(crate) fn build_form_record(
         .collect();
     Some(FormRecord {
         id,
-        draft: drafts.contains(&(table.id, id)),
+        pending: false,
+        edit_token: String::new(),
         parts,
     })
 }
@@ -1561,9 +1559,7 @@ pub(crate) fn build_form_record(
 /// from prefetched parts+objects ([`layout_parts_with_objects`]). Shared by List
 /// and Table Browse views so both frame their rows with the same bands: header /
 /// sub-summary render above, footer / grand-summary below.
-pub(crate) fn build_bands(
-    parts: &[(PartMeta, Vec<ObjectMeta>)],
-) -> (Vec<PartView>, Vec<PartView>) {
+pub(crate) fn build_bands(parts: &[(PartMeta, Vec<ObjectMeta>)]) -> (Vec<PartView>, Vec<PartView>) {
     let no_record = HashMap::new();
     let (mut header, mut footer) = (Vec::new(), Vec::new());
     for (p, objects) in parts {
@@ -1591,7 +1587,6 @@ pub(crate) fn build_list(
     table: &TableMeta,
     fields: &[FieldMeta],
     current_rec: i64,
-    drafts: &HashSet<(i64, i64)>,
 ) -> (Vec<PartView>, Vec<ListRow>, Vec<PartView>) {
     let parts = layout_parts_with_objects(sol, layout_id);
     let (header, footer) = build_bands(&parts);
@@ -1602,7 +1597,12 @@ pub(crate) fn build_list(
         .collect();
 
     let mut rows = Vec::new();
-    for (i, r) in sol.list_records(table, fields).unwrap().into_iter().enumerate() {
+    for (i, r) in sol
+        .list_records(table, fields)
+        .unwrap()
+        .into_iter()
+        .enumerate()
+    {
         let base_id = r.id;
         let by_name = by_name_map(fields, r.cells);
         // Each row's portals anchor on that row's record (#169).
@@ -1611,7 +1611,6 @@ pub(crate) fn build_list(
             layout_id,
             base_table: table.id,
             base_id,
-            drafts,
         };
         let parts = body_parts
             .iter()
@@ -1620,11 +1619,69 @@ pub(crate) fn build_list(
         rows.push(ListRow {
             id: base_id,
             current: (i as i64) + 1 == current_rec,
-            draft: drafts.contains(&(table.id, base_id)),
+            pending: false,
+            edit_token: String::new(),
             parts,
         });
     }
     (header, rows, footer)
+}
+
+/// Render a synthetic pending base record from its in-memory working values.
+/// It is deliberately not part of any engine found-set/read query (#182).
+pub(crate) fn build_pending_form_record(
+    sol: &Solution,
+    layout_id: i64,
+    fields: &[FieldMeta],
+    synthetic_id: i64,
+    working: &HashMap<i64, String>,
+    edit_token: String,
+) -> FormRecord {
+    let cells = fields
+        .iter()
+        .map(|field| working.get(&field.id).cloned().unwrap_or_default())
+        .collect();
+    let by_name = by_name_map(fields, cells);
+    let parts = sol
+        .parts(layout_id)
+        .unwrap()
+        .iter()
+        .map(|part| render_part(sol, part, &by_name, None))
+        .collect();
+    FormRecord {
+        id: synthetic_id,
+        pending: true,
+        edit_token,
+        parts,
+    }
+}
+
+/// Append one synthetic Body row to List view without inserting it into data.db.
+pub(crate) fn build_pending_list_row(
+    sol: &Solution,
+    layout_id: i64,
+    fields: &[FieldMeta],
+    synthetic_id: i64,
+    working: &HashMap<i64, String>,
+    edit_token: String,
+) -> ListRow {
+    let cells = fields
+        .iter()
+        .map(|field| working.get(&field.id).cloned().unwrap_or_default())
+        .collect();
+    let by_name = by_name_map(fields, cells);
+    let parts = layout_parts_with_objects(sol, layout_id)
+        .into_iter()
+        .filter(|(part, _)| part.kind == PartKind::Body)
+        .map(|(part, objects)| render_part_with_objects(&part, &objects, &by_name, None))
+        .collect();
+    ListRow {
+        id: synthetic_id,
+        current: true,
+        pending: true,
+        edit_token,
+        parts,
+    }
 }
 
 /// Project Table Browse columns from field objects placed in Body parts. Schema

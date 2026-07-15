@@ -2,7 +2,7 @@
 //! #44 renderer-parity goldens. Kept as the crate-root `tests` module (see
 //! `lib.rs`) so test paths stay `tests::…` across the module split.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use askama::Template;
 use axum::http::StatusCode;
@@ -77,15 +77,24 @@ fn portal_object_renders_related_rows_in_form_view() {
     let customers = sol
         .create_table(
             "Customers",
-            &[NewField { name: "Name".into(), kind: FieldKind::Text }],
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
         )
         .unwrap();
     let invoices = sol
         .create_table(
             "Invoices",
             &[
-                NewField { name: "Total".into(), kind: FieldKind::Number },
-                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+                NewField {
+                    name: "Total".into(),
+                    kind: FieldKind::Number,
+                },
+                NewField {
+                    name: "CustomerId".into(),
+                    kind: FieldKind::Text,
+                },
             ],
         )
         .unwrap();
@@ -115,18 +124,24 @@ fn portal_object_renders_related_rows_in_form_view() {
 
     // Ada with two invoices; a second customer whose invoice must NOT leak in.
     let cust_tbl = sol.table_by_id(customers).unwrap().unwrap();
-    let name = sol.field_by_id(customers, field_named(&sol, customers, "Name")).unwrap().unwrap();
-    let ada = sol.insert_record(&cust_tbl, &[(&name, "Ada".into())]).unwrap();
+    let name = sol
+        .field_by_id(customers, field_named(&sol, customers, "Name"))
+        .unwrap()
+        .unwrap();
+    let ada = sol
+        .insert_record(&cust_tbl, &[(&name, "Ada".into())])
+        .unwrap();
     let route = sol.resolve_path(customers, "customer").unwrap();
-    let total = sol.field_by_id(invoices, field_named(&sol, invoices, "Total")).unwrap().unwrap();
-    sol.set_relationship_referential(
-        sol.relationships().unwrap()[0].id,
-        true,
-        true,
-    )
-    .unwrap();
-    sol.create_related_record(&route, ada, &[(&total, "42".into())], None).unwrap();
-    sol.create_related_record(&route, ada, &[(&total, "17".into())], None).unwrap();
+    let total = sol
+        .field_by_id(invoices, field_named(&sol, invoices, "Total"))
+        .unwrap()
+        .unwrap();
+    sol.set_relationship_referential(sol.relationships().unwrap()[0].id, true, true)
+        .unwrap();
+    sol.create_related_record(&route, ada, &[(&total, "42".into())], None)
+        .unwrap();
+    sol.create_related_record(&route, ada, &[(&total, "17".into())], None)
+        .unwrap();
 
     // Place a portal on the Customers Form body, bound to the "customer" route.
     let form = sol
@@ -157,18 +172,47 @@ fn portal_object_renders_related_rows_in_form_view() {
     // Author two columns (Total, then CustomerId) as the portal's child field
     // objects, bound ROUTE-RELATIVE to the terminal (Invoices) table (#168/#169).
     // Column order follows visual x, so Total (x=20) sorts before CustomerId (x=140).
-    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id), false)
-        .unwrap()
-        .unwrap();
-    sol.create_field_object(form.id, body.id, "customer.CustomerId", "CustomerId", 140, 20, 100, 24, Some(portal_id), false)
-        .unwrap()
-        .unwrap();
+    sol.create_field_object(
+        form.id,
+        body.id,
+        "customer.Total",
+        "Total",
+        20,
+        20,
+        100,
+        24,
+        Some(portal_id),
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    sol.create_field_object(
+        form.id,
+        body.id,
+        "customer.CustomerId",
+        "CustomerId",
+        140,
+        20,
+        100,
+        24,
+        Some(portal_id),
+        false,
+    )
+    .unwrap()
+    .unwrap();
 
     let fields = sol.fields(customers).unwrap();
     let ids = sol.record_ids(&cust_tbl).unwrap();
     let ada_pos = ids.iter().position(|&i| i == ada).unwrap() as i64 + 1;
-    let record =
-        build_form_record(&sol, form.id, &cust_tbl, &fields, &ids, ada_pos, &HashSet::new()).unwrap();
+    let record = build_form_record(
+        &sol,
+        form.id,
+        &cust_tbl,
+        &fields,
+        &ids,
+        ada_pos,
+    )
+    .unwrap();
     let portal = record
         .parts
         .iter()
@@ -177,11 +221,18 @@ fn portal_object_renders_related_rows_in_form_view() {
         .expect("portal object present");
     // Columns are the AUTHORED child columns, in visual order.
     assert!(portal.portal_resolved, "portal resolved against Ada");
-    assert_eq!(portal.portal_columns, vec!["Total".to_string(), "CustomerId".to_string()]);
+    assert_eq!(
+        portal.portal_columns,
+        vec!["Total".to_string(), "CustomerId".to_string()]
+    );
     // One row per related invoice, each addressable by its terminal id, carrying
     // only the authored columns' values (Total first).
     assert_eq!(portal.portal_rows.len(), 2);
-    let totals: Vec<&str> = portal.portal_rows.iter().map(|r| r.cells[0].as_str()).collect();
+    let totals: Vec<&str> = portal
+        .portal_rows
+        .iter()
+        .map(|r| r.cells[0].as_str())
+        .collect();
     assert!(totals.contains(&"42") && totals.contains(&"17"));
     assert!(portal.portal_rows.iter().all(|r| r.id > 0));
     // Portal-owned fields are internal row templates, but their ordinary text
@@ -197,7 +248,10 @@ fn portal_object_renders_related_rows_in_form_view() {
         "portal field templates don't paint as standalone band objects"
     );
     assert_eq!(
-        child_objects.iter().map(|o| o.content.as_str()).collect::<Vec<_>>(),
+        child_objects
+            .iter()
+            .map(|o| o.content.as_str())
+            .collect::<Vec<_>>(),
         vec!["Total", "CustomerId"],
         "authored portal labels remain visible in Browse"
     );
@@ -227,18 +281,39 @@ fn portal_object_renders_related_rows_in_form_view() {
 async fn multi_hop_portal_round_trips_many_to_many_and_scopes_mutations() {
     let mut sol = Solution::open_in_memory().unwrap();
     let students = sol
-        .create_table("Students", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+        .create_table(
+            "Students",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
         .unwrap();
     let courses = sol
-        .create_table("Courses", &[NewField { name: "Title".into(), kind: FieldKind::Text }])
+        .create_table(
+            "Courses",
+            &[NewField {
+                name: "Title".into(),
+                kind: FieldKind::Text,
+            }],
+        )
         .unwrap();
     let enrollments = sol
         .create_table(
             "Enrollments",
             &[
-                NewField { name: "StudentId".into(), kind: FieldKind::Text },
-                NewField { name: "CourseId".into(), kind: FieldKind::Text },
-                NewField { name: "Role".into(), kind: FieldKind::Text },
+                NewField {
+                    name: "StudentId".into(),
+                    kind: FieldKind::Text,
+                },
+                NewField {
+                    name: "CourseId".into(),
+                    kind: FieldKind::Text,
+                },
+                NewField {
+                    name: "Role".into(),
+                    kind: FieldKind::Text,
+                },
             ],
         )
         .unwrap();
@@ -248,12 +323,24 @@ async fn multi_hop_portal_round_trips_many_to_many_and_scopes_mutations() {
             from_table: enrollments,
             to_table: students,
             from_field: field_named(&sol, enrollments, "StudentId"),
-            to_field: sol.all_fields(students).unwrap().into_iter().find(|f| f.is_system()).unwrap().id,
+            to_field: sol
+                .all_fields(students)
+                .unwrap()
+                .into_iter()
+                .find(|f| f.is_system())
+                .unwrap()
+                .id,
         })
         .unwrap()
         .unwrap();
     let course_fk = field_named(&sol, enrollments, "CourseId");
-    let course_pk = sol.all_fields(courses).unwrap().into_iter().find(|f| f.is_system()).unwrap().id;
+    let course_pk = sol
+        .all_fields(courses)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.is_system())
+        .unwrap()
+        .id;
     let course_rel = sol
         .create_relationship(&NewRelationship {
             name: "enrollment_course".into(),
@@ -264,30 +351,51 @@ async fn multi_hop_portal_round_trips_many_to_many_and_scopes_mutations() {
         })
         .unwrap()
         .unwrap();
-    sol.set_relationship_referential(student_rel.id, true, true).unwrap();
+    sol.set_relationship_referential(student_rel.id, true, true)
+        .unwrap();
 
     let student_table = sol.table_by_id(students).unwrap().unwrap();
-    let student_name = sol.field_by_id(students, field_named(&sol, students, "Name")).unwrap().unwrap();
-    let ada = sol.insert_record(&student_table, &[(&student_name, "Ada".into())]).unwrap();
-    let grace = sol.insert_record(&student_table, &[(&student_name, "Grace".into())]).unwrap();
-    let route = sol.resolve_path(students, "student_enrollment.enrollment_course").unwrap();
+    let student_name = sol
+        .field_by_id(students, field_named(&sol, students, "Name"))
+        .unwrap()
+        .unwrap();
+    let ada = sol
+        .insert_record(&student_table, &[(&student_name, "Ada".into())])
+        .unwrap();
+    let grace = sol
+        .insert_record(&student_table, &[(&student_name, "Grace".into())])
+        .unwrap();
+    let route = sol
+        .resolve_path(students, "student_enrollment.enrollment_course")
+        .unwrap();
     let title_id = field_named(&sol, courses, "Title");
     let title = sol.field_by_id(courses, title_id).unwrap().unwrap();
-    let math = sol.create_related_record(&route, ada, &[(&title, "Math".into())], None).unwrap();
-    let private = sol.create_related_record(&route, grace, &[(&title, "Private".into())], None).unwrap();
+    let math = sol
+        .create_related_record(&route, ada, &[(&title, "Math".into())], None)
+        .unwrap();
+    let private = sol
+        .create_related_record(&route, grace, &[(&title, "Private".into())], None)
+        .unwrap();
     let role_id = field_named(&sol, enrollments, "Role");
     let role = sol.field_by_id(enrollments, role_id).unwrap().unwrap();
     let enrollment_route = sol.resolve_path(students, "student_enrollment").unwrap();
     let ada_enrollment = sol.route_record_set(&enrollment_route, ada).unwrap()[0];
     let enrollment_table = sol.table_by_id(enrollments).unwrap().unwrap();
-    sol.update_record(&enrollment_table, ada_enrollment, &[(&role, "Lead".into())]).unwrap();
+    sol.update_record(&enrollment_table, ada_enrollment, &[(&role, "Lead".into())])
+        .unwrap();
 
-    let form = sol.layouts_for_table(students).unwrap().into_iter().find(|l| l.view == "form").unwrap();
+    let form = sol
+        .layouts_for_table(students)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.view == "form")
+        .unwrap();
     let body = body_part(&sol, form.id);
     let state = state_for(sol);
 
     // The design contract exposes the two hops for the cascading picker.
-    let (status, model_json) = get_body(state.clone(), &format!("/design/{}/model?rec=1", form.id)).await;
+    let (status, model_json) =
+        get_body(state.clone(), &format!("/design/{}/model?rec=1", form.id)).await;
     assert_eq!(status, StatusCode::OK);
     let model: serde_json::Value = serde_json::from_str(&model_json).unwrap();
     let authored = model["relatedRoutes"]
@@ -321,7 +429,8 @@ async fn multi_hop_portal_round_trips_many_to_many_and_scopes_mutations() {
         &serde_json::json!({
             "partId": body.id, "kind": "portal", "x": 10, "y": 10,
             "w": 320, "h": 120, "binding": "student_enrollment.enrollment_course"
-        }).to_string(),
+        })
+        .to_string(),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
@@ -334,115 +443,177 @@ async fn multi_hop_portal_round_trips_many_to_many_and_scopes_mutations() {
             "binding": "student_enrollment.StudentId",
             "rec": 1,
             "validatePortal": true
-        }).to_string(),
+        })
+        .to_string(),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "a portal route cannot terminate in a field");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a portal route cannot terminate in a field"
+    );
     let (status, join_column) = post_json_body(
         state.clone(),
         &format!("/design/{}/object", form.id),
         &serde_json::json!({
             "partId": body.id, "kind": "field", "x": 20, "y": 20,
             "w": 120, "h": 24, "fieldId": role_id, "parentObjectId": portal_id
-        }).to_string(),
+        })
+        .to_string(),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{join_column}");
     let join_column: serde_json::Value = serde_json::from_str(&join_column).unwrap();
-    let join_field = join_column.as_array().unwrap().iter().find(|o| o["kind"] == "field").unwrap();
+    let join_field = join_column
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["kind"] == "field")
+        .unwrap();
     assert_eq!(join_field["binding"], "student_enrollment.Role");
-    assert_eq!(join_field["readOnly"], true, "intermediate columns seed read-only");
+    assert_eq!(
+        join_field["readOnly"], true,
+        "intermediate columns seed read-only"
+    );
     let (status, column) = post_json_body(
         state.clone(),
         &format!("/design/{}/object", form.id),
         &serde_json::json!({
             "partId": body.id, "kind": "field", "x": 150, "y": 20,
             "w": 120, "h": 24, "fieldId": title_id, "parentObjectId": portal_id
-        }).to_string(),
+        })
+        .to_string(),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{column}");
 
-    let (status, html) = get_body(state.clone(), &format!("/browse/{}?view=form&rec=1", form.id)).await;
+    let (status, html) = get_body(
+        state.clone(),
+        &format!("/browse/{}?view=form&rec=1", form.id),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     // The cell is placed at its column's authored portal-relative geometry
     // (x 20 − portal x 10 = left 10; width 120), matching its heading label 1:1.
-    assert!(html.contains(r#"<span class="fm-portal-cell" style="left:10px;width:120px;">Lead</span>"#), "join field renders read-only at authored geometry");
-    assert!(html.contains(&format!(r#"name="f{title_id}""#)), "terminal field stays editable");
+    assert!(
+        html.contains(r#"<span class="fm-portal-cell" style="left:10px;width:120px;">Lead</span>"#),
+        "join field renders read-only at authored geometry"
+    );
+    assert!(
+        html.contains(&format!(r#"name="f{title_id}""#)),
+        "terminal field stays editable"
+    );
     assert!(html.contains("Math"), "Ada sees her terminal Course");
-    assert!(!html.contains("Private"), "another Student's Course does not leak into the portal");
+    assert!(
+        !html.contains("Private"),
+        "another Student's Course does not leak into the portal"
+    );
 
     // A forged terminal id from Grace's resolved set is rejected for Ada.
-    let foreign_action = format!("/browse/{}/{}/related/{}/{}", form.id, ada, portal_id, private);
-    let (status, _) = post_form_body(state.clone(), &foreign_action, &format!("f{title_id}=Leaked")).await;
+    let foreign_action = format!(
+        "/browse/{}/{}/related/{}/{}",
+        form.id, ada, portal_id, private
+    );
+    let (status, _) = begin_edit(
+        state.clone(),
+        &format!("{foreign_action}/open"),
+        "multi-owner",
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     // The legitimate row edits, create-new mints terminal + join, and delete
     // unlinks only the join while preserving the terminal Course.
     let action = format!("/browse/{}/{}/related/{}/{}", form.id, ada, portal_id, math);
-    let (status, _) = post_form_body(state.clone(), &action, &format!("f{title_id}=Algebra")).await;
+    let (status, opened) =
+        begin_edit(state.clone(), &format!("{action}/open"), "multi-owner").await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    let edit = opened["editToken"].as_str().unwrap();
+    let (status, _) = post_form_body(
+        state.clone(),
+        &action,
+        &edit_body(&format!("f{title_id}=Algebra"), "multi-owner", edit),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let create_url = format!("/browse/{}/{}/related/{}", form.id, ada, portal_id);
-    let (status, _) = post_form_body(state.clone(), &create_url, &format!("f{title_id}=Science")).await;
+    let (status, opened) = begin_edit(
+        state.clone(),
+        &format!("{create_url}/new/open"),
+        "multi-owner",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    let edit = opened["editToken"].as_str().unwrap();
+    let (status, _) = post_form_body(
+        state.clone(),
+        &create_url,
+        &edit_body(&format!("f{title_id}=Science"), "multi-owner", edit),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
-    let science = state
+    assert!(state
         .sol
         .lock()
         .unwrap()
         .read_related_records(&route, ada)
         .unwrap()
         .into_iter()
-        .find(|r| r.cells[0] == "Science")
-        .unwrap()
-        .id;
-    let science_action = format!("/browse/{}/{}/related/{}/{}", form.id, ada, portal_id, science);
-    let (status, _) = post_form_body(state.clone(), &science_action, &format!("f{title_id}=Science")).await;
-    assert_eq!(status, StatusCode::OK, "the created terminal draft commits normally");
-
-    // Escape/revert of another newly-created terminal removes both the join and
-    // the draft terminal even when it has not been committed.
-    let (status, _) = post_form_body(state.clone(), &create_url, &format!("f{title_id}=Draft")).await;
+        .any(|record| record.cells[0] == "Science"));
+    // A second pending related row is only a working copy; revert creates no
+    // terminal or join row.
+    let (status, opened) = begin_edit(
+        state.clone(),
+        &format!("{create_url}/new/open"),
+        "multi-owner",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
-    let draft = state
-        .sol
-        .lock()
-        .unwrap()
-        .read_related_records(&route, ada)
-        .unwrap()
-        .into_iter()
-        .find(|r| r.cells[0] == "Draft")
-        .unwrap()
-        .id;
-    let revert = format!("/browse/{}/{}/related/{}/{}/revert", form.id, ada, portal_id, draft);
-    let (status, _) = post_form_body(state.clone(), &revert, "").await;
+    let edit = opened["editToken"].as_str().unwrap();
+    let (status, _) = post_form_body(
+        state.clone(),
+        &format!("{create_url}/new/revert"),
+        &edit_body("", "multi-owner", edit),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!state.is_draft((courses, draft)));
     let delete_url = format!("{action}/delete");
     let (status, _) = post_form_body(state.clone(), &delete_url, "").await;
     assert_eq!(status, StatusCode::OK);
 
     let sol = state.sol.lock().unwrap();
     let rows = sol.read_related_records(&route, ada).unwrap();
-    assert_eq!(rows.len(), 1, "Ada keeps only the newly-created Course association");
+    assert_eq!(
+        rows.len(),
+        1,
+        "Ada keeps only the newly-created Course association"
+    );
     assert_eq!(rows[0].cells[0], "Science");
     let course_table = sol.table_by_id(courses).unwrap().unwrap();
-    assert!(sol.get_record(&course_table, &[], math).unwrap().is_some(), "unlink preserves terminal Course");
+    assert!(
+        sol.get_record(&course_table, &[], math).unwrap().is_some(),
+        "unlink preserves terminal Course"
+    );
     drop(sol);
 
     // Renaming hop two rewrites both the portal and its route-prefixed column;
     // the column's terminal field token is left untouched.
-    state.sol.lock().unwrap().update_relationship(
-        course_rel.id,
-        &NewRelationship {
-            name: "enrollment_subject".into(),
-            from_table: enrollments,
-            to_table: courses,
-            from_field: course_fk,
-            to_field: course_pk,
-        },
-    )
-    .unwrap()
-    .unwrap();
+    state
+        .sol
+        .lock()
+        .unwrap()
+        .update_relationship(
+            course_rel.id,
+            &NewRelationship {
+                name: "enrollment_subject".into(),
+                from_table: enrollments,
+                to_table: courses,
+                from_field: course_fk,
+                to_field: course_pk,
+            },
+        )
+        .unwrap()
+        .unwrap();
     let (status, model_json) = get_body(state, &format!("/design/{}/model?rec=1", form.id)).await;
     assert_eq!(status, StatusCode::OK);
     let model: serde_json::Value = serde_json::from_str(&model_json).unwrap();
@@ -473,15 +644,24 @@ async fn field_placed_into_portal_becomes_a_child_column() {
     let customers = sol
         .create_table(
             "Customers",
-            &[NewField { name: "Name".into(), kind: FieldKind::Text }],
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
         )
         .unwrap();
     let invoices = sol
         .create_table(
             "Invoices",
             &[
-                NewField { name: "Total".into(), kind: FieldKind::Number },
-                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+                NewField {
+                    name: "Total".into(),
+                    kind: FieldKind::Number,
+                },
+                NewField {
+                    name: "CustomerId".into(),
+                    kind: FieldKind::Text,
+                },
             ],
         )
         .unwrap();
@@ -548,9 +728,12 @@ async fn field_placed_into_portal_becomes_a_child_column() {
         "fieldId": total_id,
         "parentObjectId": portal_id,
     });
-    let (status, resp) =
-        post_json_body(state.clone(), &format!("/design/{}/object", form.id), &create.to_string())
-            .await;
+    let (status, resp) = post_json_body(
+        state.clone(),
+        &format!("/design/{}/object", form.id),
+        &create.to_string(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{resp}");
     let views: serde_json::Value = serde_json::from_str(&resp).unwrap();
     let views = views.as_array().unwrap();
@@ -568,8 +751,7 @@ async fn field_placed_into_portal_becomes_a_child_column() {
     assert_eq!(field["binding"], "customer.Total");
 
     // The design model lets the portal enumerate its columns by parentObjectId.
-    let (status, body_json) =
-        get_body(state, &format!("/design/{}/model?rec=1", form.id)).await;
+    let (status, body_json) = get_body(state, &format!("/design/{}/model?rec=1", form.id)).await;
     assert_eq!(status, StatusCode::OK);
     let model: serde_json::Value = serde_json::from_str(&body_json).unwrap();
     let children: Vec<&serde_json::Value> = model["parts"]
@@ -588,7 +770,10 @@ async fn field_placed_into_portal_becomes_a_child_column() {
         .flat_map(|p| p["objects"].as_array().unwrap())
         .find(|o| o["id"] == portal_id)
         .unwrap();
-    assert!(portal.get("parentObjectId").is_none(), "portal is top-level");
+    assert!(
+        portal.get("parentObjectId").is_none(),
+        "portal is top-level"
+    );
 }
 
 /// Renaming a relationship (graph connector drawer) cascades to every binding that
@@ -599,14 +784,26 @@ async fn field_placed_into_portal_becomes_a_child_column() {
 async fn renaming_a_relationship_cascades_to_portal_bindings() {
     let mut sol = Solution::open_in_memory().unwrap();
     let customers = sol
-        .create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+        .create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
         .unwrap();
     let invoices = sol
         .create_table(
             "Invoices",
             &[
-                NewField { name: "Total".into(), kind: FieldKind::Number },
-                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+                NewField {
+                    name: "Total".into(),
+                    kind: FieldKind::Number,
+                },
+                NewField {
+                    name: "CustomerId".into(),
+                    kind: FieldKind::Text,
+                },
             ],
         )
         .unwrap();
@@ -618,7 +815,13 @@ async fn renaming_a_relationship_cascades_to_portal_bindings() {
         .unwrap()
         .id;
     let cust_name = sol.fields(customers).unwrap()[0].id;
-    let fk = sol.all_fields(invoices).unwrap().into_iter().find(|f| f.name == "CustomerId").unwrap().id;
+    let fk = sol
+        .all_fields(invoices)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name == "CustomerId")
+        .unwrap()
+        .id;
     let total_id = sol.fields(invoices).unwrap()[0].id;
     let rel_id = sol
         .create_relationship(&NewRelationship {
@@ -632,7 +835,12 @@ async fn renaming_a_relationship_cascades_to_portal_bindings() {
         .unwrap()
         .id;
 
-    let form = sol.layouts_for_table(customers).unwrap().into_iter().find(|l| l.view == "form").unwrap();
+    let form = sol
+        .layouts_for_table(customers)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.view == "form")
+        .unwrap();
     let body = body_part(&sol, form.id);
     let portal_id = sol
         .create_object(
@@ -680,15 +888,26 @@ async fn renaming_a_relationship_cascades_to_portal_bindings() {
     .await;
     assert_eq!(status, StatusCode::OK, "{resp}");
 
-    let (status, model_json) = get_body(state.clone(), &format!("/design/{}/model?rec=1", form.id)).await;
+    let (status, model_json) =
+        get_body(state.clone(), &format!("/design/{}/model?rec=1", form.id)).await;
     assert_eq!(status, StatusCode::OK);
     let model: serde_json::Value = serde_json::from_str(&model_json).unwrap();
-    let objs: Vec<&serde_json::Value> =
-        model["parts"].as_array().unwrap().iter().flat_map(|p| p["objects"].as_array().unwrap()).collect();
+    let objs: Vec<&serde_json::Value> = model["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["objects"].as_array().unwrap())
+        .collect();
     let portal = objs.iter().find(|o| o["id"] == portal_id).unwrap();
     assert_eq!(portal["binding"], "buyer", "portal route rewritten");
-    let column = objs.iter().find(|o| o["parentObjectId"] == portal_id && o["kind"] == "field").unwrap();
-    assert_eq!(column["binding"], "buyer.Total", "portal column route rewritten");
+    let column = objs
+        .iter()
+        .find(|o| o["parentObjectId"] == portal_id && o["kind"] == "field")
+        .unwrap();
+    assert_eq!(
+        column["binding"], "buyer.Total",
+        "portal column route rewritten"
+    );
     assert!(
         objs.iter().any(|o| o["binding"] == "Customers.Name"),
         "top-level Table.field binding untouched by the rename"
@@ -697,7 +916,12 @@ async fn renaming_a_relationship_cascades_to_portal_bindings() {
     // The source field's reference name is kept in step with the relationship.
     let (_s, fields_json) = get_body(state, &format!("/schema/tables/{invoices}/fields")).await;
     let fields: serde_json::Value = serde_json::from_str(&fields_json).unwrap();
-    let fk_field = fields.as_array().unwrap().iter().find(|f| f["id"] == fk).unwrap();
+    let fk_field = fields
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == fk)
+        .unwrap();
     assert_eq!(fk_field["options"]["reference"]["name"], "buyer");
 }
 
@@ -712,15 +936,24 @@ async fn portal_related_row_inline_edit_commits_child_record() {
     let customers = sol
         .create_table(
             "Customers",
-            &[NewField { name: "Name".into(), kind: FieldKind::Text }],
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
         )
         .unwrap();
     let invoices = sol
         .create_table(
             "Invoices",
             &[
-                NewField { name: "Total".into(), kind: FieldKind::Number },
-                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+                NewField {
+                    name: "Total".into(),
+                    kind: FieldKind::Number,
+                },
+                NewField {
+                    name: "CustomerId".into(),
+                    kind: FieldKind::Text,
+                },
             ],
         )
         .unwrap();
@@ -749,7 +982,9 @@ async fn portal_related_row_inline_edit_commits_child_record() {
         .field_by_id(customers, field_named(&sol, customers, "Name"))
         .unwrap()
         .unwrap();
-    let ada = sol.insert_record(&cust_tbl, &[(&name, "Ada".into())]).unwrap();
+    let ada = sol
+        .insert_record(&cust_tbl, &[(&name, "Ada".into())])
+        .unwrap();
     let route = sol.resolve_path(customers, "customer").unwrap();
     let total_fid = field_named(&sol, invoices, "Total");
     let total = sol.field_by_id(invoices, total_fid).unwrap().unwrap();
@@ -785,9 +1020,20 @@ async fn portal_related_row_inline_edit_commits_child_record() {
         .unwrap();
     // Author a Total column (child field, route-relative) so the portal renders a
     // Total cell per related row — the inline-edit input keys off it (#168/#170).
-    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id), false)
-        .unwrap()
-        .unwrap();
+    sol.create_field_object(
+        form.id,
+        body.id,
+        "customer.Total",
+        "Total",
+        20,
+        20,
+        100,
+        24,
+        Some(portal_id),
+        false,
+    )
+    .unwrap()
+    .unwrap();
 
     let state = AppState::new(sol);
 
@@ -796,12 +1042,30 @@ async fn portal_related_row_inline_edit_commits_child_record() {
     let (status, html) = get_body(state.clone(), &format!("/browse/{}?view=form", form.id)).await;
     assert_eq!(status, StatusCode::OK);
     let action = format!("/browse/{}/{}/related/{}/{}", form.id, ada, portal_id, inv);
-    assert!(html.contains(&format!(r#"data-action="{action}""#)), "row wired to related commit endpoint");
-    assert!(html.contains(&format!(r#"data-open="{action}/open""#)), "row wired to related open endpoint");
-    assert!(html.contains(&format!(r#"name="f{total_fid}""#)), "terminal field renders an editable input");
+    assert!(
+        html.contains(&format!(r#"data-action="{action}""#)),
+        "row wired to related commit endpoint"
+    );
+    assert!(
+        html.contains(&format!(r#"data-open="{action}/open""#)),
+        "row wired to related open endpoint"
+    );
+    assert!(
+        html.contains(&format!(r#"name="f{total_fid}""#)),
+        "terminal field renders an editable input"
+    );
 
-    // Committing the row writes the CHILD record through the related layer.
-    let (status, _) = post_form_body(state.clone(), &action, &format!("f{total_fid}=99")).await;
+    // Open owns the child lock; committing with that token writes the CHILD.
+    let (status, opened) =
+        begin_edit(state.clone(), &format!("{action}/open"), "portal-owner").await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    let edit = opened["editToken"].as_str().unwrap();
+    let (status, _) = post_form_body(
+        state.clone(),
+        &action,
+        &edit_body(&format!("f{total_fid}=99"), "portal-owner", edit),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let saved = state
         .sol
@@ -811,7 +1075,10 @@ async fn portal_related_row_inline_edit_commits_child_record() {
         .unwrap();
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].id, inv);
-    assert_eq!(saved[0].cells[0], "99", "commit updated the terminal record");
+    assert_eq!(
+        saved[0].cells[0], "99",
+        "commit updated the terminal record"
+    );
 }
 
 /// #171: a create-determined portal whose relationship permits create renders a
@@ -825,15 +1092,24 @@ async fn portal_blank_row_creates_related_record_when_allowed() {
     let customers = sol
         .create_table(
             "Customers",
-            &[NewField { name: "Name".into(), kind: FieldKind::Text }],
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
         )
         .unwrap();
     let invoices = sol
         .create_table(
             "Invoices",
             &[
-                NewField { name: "Total".into(), kind: FieldKind::Number },
-                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+                NewField {
+                    name: "Total".into(),
+                    kind: FieldKind::Number,
+                },
+                NewField {
+                    name: "CustomerId".into(),
+                    kind: FieldKind::Text,
+                },
             ],
         )
         .unwrap();
@@ -861,7 +1137,9 @@ async fn portal_blank_row_creates_related_record_when_allowed() {
         .field_by_id(customers, field_named(&sol, customers, "Name"))
         .unwrap()
         .unwrap();
-    let ada = sol.insert_record(&cust_tbl, &[(&name, "Ada".into())]).unwrap();
+    let ada = sol
+        .insert_record(&cust_tbl, &[(&name, "Ada".into())])
+        .unwrap();
     let route = sol.resolve_path(customers, "customer").unwrap();
     let total_fid = field_named(&sol, invoices, "Total");
 
@@ -892,9 +1170,20 @@ async fn portal_blank_row_creates_related_record_when_allowed() {
         .unwrap();
 
     // Author a Total column so the create/blank row carries an `f<id>` input for it.
-    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id), false)
-        .unwrap()
-        .unwrap();
+    sol.create_field_object(
+        form.id,
+        body.id,
+        "customer.Total",
+        "Total",
+        20,
+        20,
+        100,
+        24,
+        Some(portal_id),
+        false,
+    )
+    .unwrap()
+    .unwrap();
 
     // allow_create OFF → no blank create row, and the endpoint refuses.
     let state = AppState::new(sol);
@@ -902,11 +1191,15 @@ async fn portal_blank_row_creates_related_record_when_allowed() {
     let (status, html) = get_body(state.clone(), &format!("/browse/{}?view=form", form.id)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        !html.contains("data-create="),
+        !html.contains(&format!(r#"data-open="{create_url}/new/open""#)),
         "no create row when allow_create is off"
     );
-    let (status, _) =
-        post_form_body(state.clone(), &create_url, &format!("f{total_fid}=7")).await;
+    let (status, _) = begin_edit(
+        state.clone(),
+        &format!("{create_url}/new/open"),
+        "portal-create-owner",
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
@@ -927,13 +1220,25 @@ async fn portal_blank_row_creates_related_record_when_allowed() {
         "create row renders when allowed"
     );
     assert!(
-        html.contains(&format!(r#"data-create="{create_url}""#)),
+        html.contains(&format!(r#"data-action="{create_url}""#)),
         "blank row wired to the portal create endpoint"
     );
 
-    // POSTing the blank row mints a related record through the related layer.
-    let (status, _) =
-        post_form_body(state.clone(), &create_url, &format!("f{total_fid}=250")).await;
+    // Open creates only a working copy; commit mints the related record atomically.
+    let (status, opened) = begin_edit(
+        state.clone(),
+        &format!("{create_url}/new/open"),
+        "portal-create-owner",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    let edit = opened["editToken"].as_str().unwrap();
+    let (status, _) = post_form_body(
+        state.clone(),
+        &create_url,
+        &edit_body(&format!("f{total_fid}=250"), "portal-create-owner", edit),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let rows = state
         .sol
@@ -956,15 +1261,24 @@ async fn portal_row_deletes_related_record_when_allowed() {
     let customers = sol
         .create_table(
             "Customers",
-            &[NewField { name: "Name".into(), kind: FieldKind::Text }],
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
         )
         .unwrap();
     let invoices = sol
         .create_table(
             "Invoices",
             &[
-                NewField { name: "Total".into(), kind: FieldKind::Number },
-                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+                NewField {
+                    name: "Total".into(),
+                    kind: FieldKind::Number,
+                },
+                NewField {
+                    name: "CustomerId".into(),
+                    kind: FieldKind::Text,
+                },
             ],
         )
         .unwrap();
@@ -992,7 +1306,9 @@ async fn portal_row_deletes_related_record_when_allowed() {
         .field_by_id(customers, field_named(&sol, customers, "Name"))
         .unwrap()
         .unwrap();
-    let ada = sol.insert_record(&cust_tbl, &[(&name, "Ada".into())]).unwrap();
+    let ada = sol
+        .insert_record(&cust_tbl, &[(&name, "Ada".into())])
+        .unwrap();
     let route = sol.resolve_path(customers, "customer").unwrap();
 
     let form = sol
@@ -1023,15 +1339,25 @@ async fn portal_row_deletes_related_record_when_allowed() {
 
     // Author a Total column so the portal renders a row (with a delete affordance)
     // per related record (#168/#172).
-    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id), false)
-        .unwrap()
-        .unwrap();
+    sol.create_field_object(
+        form.id,
+        body.id,
+        "customer.Total",
+        "Total",
+        20,
+        20,
+        100,
+        24,
+        Some(portal_id),
+        false,
+    )
+    .unwrap()
+    .unwrap();
 
     // Seed one related record (allow_create on) so there is a row to delete.
-    sol.set_relationship_referential(rel_id, true, false).unwrap();
-    let child = sol
-        .create_related_record(&route, ada, &[], None)
+    sol.set_relationship_referential(rel_id, true, false)
         .unwrap();
+    let child = sol.create_related_record(&route, ada, &[], None).unwrap();
     let delete_url = format!(
         "/browse/{}/{}/related/{}/{}/delete",
         form.id, ada, portal_id, child
@@ -1052,7 +1378,13 @@ async fn portal_row_deletes_related_record_when_allowed() {
         "engine refuses delete when allow_delete is off"
     );
     assert_eq!(
-        state.sol.lock().unwrap().read_related_records(&route, ada).unwrap().len(),
+        state
+            .sol
+            .lock()
+            .unwrap()
+            .read_related_records(&route, ada)
+            .unwrap()
+            .len(),
         1,
         "related record still present after a refused delete"
     );
@@ -1079,7 +1411,13 @@ async fn portal_row_deletes_related_record_when_allowed() {
     let (status, _) = post_form_body(state.clone(), &delete_url, "").await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        state.sol.lock().unwrap().read_related_records(&route, ada).unwrap().is_empty(),
+        state
+            .sol
+            .lock()
+            .unwrap()
+            .read_related_records(&route, ada)
+            .unwrap()
+            .is_empty(),
         "related record deleted"
     );
 }
@@ -1143,7 +1481,8 @@ fn read_only_object_renders_value_editable_object_renders_input() {
         table: "T".into(),
         record: Some(FormRecord {
             id: 1,
-            draft: false,
+            pending: false,
+            edit_token: String::new(),
             parts: vec![part],
         }),
     };
@@ -1176,7 +1515,8 @@ fn object_z_order_renders_as_css_z_index() {
         table: "T".into(),
         record: Some(FormRecord {
             id: 1,
-            draft: false,
+            pending: false,
+            edit_token: String::new(),
             parts: vec![PartView {
                 id: 1,
                 kind: "body",
@@ -1488,6 +1828,24 @@ async fn post_form_body(state: AppState, uri: &str, body: &str) -> (StatusCode, 
     (status, String::from_utf8(bytes.to_vec()).unwrap())
 }
 
+async fn begin_edit(
+    state: AppState,
+    open_url: &str,
+    owner: &str,
+) -> (StatusCode, serde_json::Value) {
+    let (status, body) = post_form_body(state, open_url, &format!("_owner={owner}")).await;
+    let value = serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({ "raw": body }));
+    (status, value)
+}
+
+fn edit_body(values: &str, owner: &str, token: &str) -> String {
+    if values.is_empty() {
+        format!("_owner={owner}&_edit={token}")
+    } else {
+        format!("{values}&_owner={owner}&_edit={token}")
+    }
+}
+
 #[tokio::test]
 async fn schema_table_and_field_routes_manage_metadata_and_physical_table() {
     let state = state_for(Solution::open_in_memory().unwrap());
@@ -1611,7 +1969,12 @@ async fn schema_table_and_field_routes_manage_metadata_and_physical_table() {
     // Physical columns = the rowid `id` + every all_fields column (incl. the
     // system PK, #156), in all_fields order (the order the retype rebuilt them).
     let mut expected = vec!["id".to_string()];
-    expected.extend(sol.all_fields(table_id).unwrap().iter().map(|f| f.phys.clone()));
+    expected.extend(
+        sol.all_fields(table_id)
+            .unwrap()
+            .iter()
+            .map(|f| f.phys.clone()),
+    );
     assert_eq!(columns, expected);
 }
 
@@ -1620,13 +1983,21 @@ async fn duplicate_relationship_name_reference_is_rejected_with_conflict() {
     let state = state_for(Solution::open_in_memory().unwrap());
 
     // Target table — its system PK is what the two references point at.
-    let (status, resp) =
-        post_json_body(state.clone(), "/schema/tables", r#"{"name":"Gateway","fields":[]}"#).await;
+    let (status, resp) = post_json_body(
+        state.clone(),
+        "/schema/tables",
+        r#"{"name":"Gateway","fields":[]}"#,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{resp}");
     let gateway_id = serde_json::from_str::<serde_json::Value>(&resp).unwrap()["id"]
         .as_i64()
         .unwrap();
-    let (_, gw_fields) = get_body(state.clone(), &format!("/schema/tables/{gateway_id}/fields")).await;
+    let (_, gw_fields) = get_body(
+        state.clone(),
+        &format!("/schema/tables/{gateway_id}/fields"),
+    )
+    .await;
     let gw_pk = serde_json::from_str::<serde_json::Value>(&gw_fields).unwrap()[0]["id"]
         .as_i64()
         .unwrap();
@@ -1642,7 +2013,8 @@ async fn duplicate_relationship_name_reference_is_rejected_with_conflict() {
     let sensor_id = serde_json::from_str::<serde_json::Value>(&resp).unwrap()["id"]
         .as_i64()
         .unwrap();
-    let (_, s_fields) = get_body(state.clone(), &format!("/schema/tables/{sensor_id}/fields")).await;
+    let (_, s_fields) =
+        get_body(state.clone(), &format!("/schema/tables/{sensor_id}/fields")).await;
     let s_fields: serde_json::Value = serde_json::from_str(&s_fields).unwrap();
     let gw_a = s_fields[1]["id"].as_i64().unwrap();
     let gw_b = s_fields[2]["id"].as_i64().unwrap();
@@ -1688,7 +2060,7 @@ async fn duplicate_relationship_name_reference_is_rejected_with_conflict() {
 #[tokio::test]
 async fn schema_tables_reorder_endpoint() {
     let state = state_for(Solution::open_in_memory().unwrap());
-    
+
     // Create Table A
     let (status, resp) = post_json_body(
         state.clone(),
@@ -1834,64 +2206,84 @@ async fn record_commits_enforce_required_unique_range_and_value_list_constraints
     let state = state_for(sol);
     let layout = form_layout.id;
 
-    // The physical id of the newest record (record_ids is ORDER BY id), so a test
-    // can address the draft a New just minted for its record-EXIT commit.
-    let last_id = |st: &AppState| -> i64 {
-        let sol = st.sol.lock().unwrap();
-        let table = sol.table_by_id(table_id).unwrap().unwrap();
-        *sol.record_ids(&table).unwrap().last().unwrap()
-    };
-    let create = |st: AppState, num: &str, tot: &str, stat: &str| {
-        let body = format!("f{}={num}&f{}={tot}&f{}={stat}", number.id, total.id, status_field.id);
-        async move { post_form_body(st, &format!("/browse/{layout}"), &body).await }
-    };
-    let commit = |st: AppState, id: i64, num: &str, tot: &str, stat: &str| {
-        let body = format!("f{}={num}&f{}={tot}&f{}={stat}", number.id, total.id, status_field.id);
-        async move { post_form_body(st, &format!("/browse/{layout}/{id}"), &body).await }
-    };
+    // Starting New creates only an in-memory working copy.
+    let (status, opened) = begin_edit(
+        state.clone(),
+        &format!("/browse/{layout}/new/open"),
+        "validation-owner",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    let edit = opened["editToken"].as_str().unwrap();
+    let synthetic = opened["syntheticId"].as_i64().unwrap();
+    assert!(synthetic < 0);
+    assert_eq!(
+        record_count(&state, table_id),
+        0,
+        "pending New is not canonical"
+    );
 
-    // New mints a DRAFT: a blank required (primary) field NO LONGER 400s at create
-    // time (#173) — required is deferred to the record-EXIT commit.
-    let (status, _) = create(state.clone(), "", "5", "Open").await;
-    assert_eq!(status, StatusCode::SEE_OTHER, "blank required field mints a draft");
-    let draft_id = last_id(&state);
-    assert!(state.is_draft((table_id, draft_id)), "the new record is registered as a draft");
+    // Full commit validation is structured and retains the pending session.
+    let values = format!("f{}=&f{}=5&f{}=Open", number.id, total.id, status_field.id);
+    let (status, body) = post_form_body(
+        state.clone(),
+        &format!("/browse/{layout}/{synthetic}"),
+        &edit_body(&values, "validation-owner", edit),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["kind"], "validation");
+    assert_eq!(error["errors"][0]["fieldId"], number.id);
+    assert_eq!(error["errors"][0]["code"], "required");
+    assert_eq!(record_count(&state, table_id), 0);
 
-    // But the record-EXIT commit runs the FULL gate: committing the still-blank
-    // required field is rejected and the record stays a draft (kept open).
-    let (status, body) = commit(state.clone(), draft_id, "", "5", "Open").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body.contains("Number") && body.contains("required"));
-    assert!(state.is_draft((table_id, draft_id)), "a rejected commit keeps the draft open");
+    // Correcting the same working copy commits exactly one canonical row.
+    let values = format!(
+        "f{}=INV-1&f{}=5&f{}=Open",
+        number.id, total.id, status_field.id
+    );
+    let (status, body) = post_form_body(
+        state.clone(),
+        &format!("/browse/{layout}/{synthetic}"),
+        &edit_body(&values, "validation-owner", edit),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(record_count(&state, table_id), 1);
 
-    // Draft leniency stops at required + uniqueness: type/range/value-list on a
-    // PRESENT value are still enforced at mint time.
-    let (status, body) = create(state.clone(), "INV-1", "15", "Open").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "draft still enforces range");
-    assert!(body.contains("Total") && body.contains("at most 10"));
-
-    let (status, body) = create(state.clone(), "INV-1", "5", "Draft").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "draft still enforces value-list membership");
-    assert!(body.contains("Status") && body.contains("value list"));
-
-    // Uniqueness is deferred at mint, so the first INV-1 draft commits cleanly and
-    // is promoted out of the draft set.
-    let (status, _) = create(state.clone(), "INV-1", "5", "Open").await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    let first = last_id(&state);
-    let (status, _) = commit(state.clone(), first, "INV-1", "5", "Open").await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    assert!(!state.is_draft((table_id, first)), "a clean commit promotes the draft");
-
-    // A second INV-1 mints as a draft too (duplicate tolerated transiently), but
-    // its record-EXIT commit trips the FULL unique gate and stays a draft.
-    let (status, _) = create(state.clone(), "INV-1", "5", "Open").await;
-    assert_eq!(status, StatusCode::SEE_OTHER, "a duplicate unique value is allowed as a draft");
-    let dup = last_id(&state);
-    let (status, body) = commit(state.clone(), dup, "INV-1", "5", "Open").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body.contains("Number") && body.contains("unique"));
-    assert!(state.is_draft((table_id, dup)), "a rejected unique commit keeps the draft open");
+    // Every other rule also fires only at commit; no rejected pending row leaks.
+    let (status, opened) = begin_edit(
+        state.clone(),
+        &format!("/browse/{layout}/new/open"),
+        "validation-owner",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let edit = opened["editToken"].as_str().unwrap();
+    let synthetic = opened["syntheticId"].as_i64().unwrap();
+    let cases = [
+        ("INV-2", "15", "Open", total.id, "above_maximum"),
+        ("INV-2", "5", "Draft", status_field.id, "not_in_value_list"),
+        ("INV-1", "5", "Open", number.id, "not_unique"),
+    ];
+    for (num, tot, stat, field_id, code) in cases {
+        let values = format!(
+            "f{}={num}&f{}={tot}&f{}={stat}",
+            number.id, total.id, status_field.id
+        );
+        let (status, body) = post_form_body(
+            state.clone(),
+            &format!("/browse/{layout}/{synthetic}"),
+            &edit_body(&values, "validation-owner", edit),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(error["errors"][0]["fieldId"], field_id);
+        assert_eq!(error["errors"][0]["code"], code);
+        assert_eq!(record_count(&state, table_id), 1);
+    }
 }
 
 #[tokio::test]
@@ -2605,7 +2997,8 @@ async fn layout_manager_routes_crud_and_guard_last_layout() {
     assert_eq!(all.as_array().unwrap().len(), 3, "the default trio");
     assert_eq!(all[0]["tableName"].as_str(), Some("Contacts"));
 
-    let create = serde_json::json!({"name": "Contact Details", "tableId": table_id, "view": "form"});
+    let create =
+        serde_json::json!({"name": "Contact Details", "tableId": table_id, "view": "form"});
     let (status, resp) = post_json_body(state.clone(), "/layouts", &create.to_string()).await;
     assert_eq!(status, StatusCode::OK, "{resp}");
     let extra: serde_json::Value = serde_json::from_str(&resp).unwrap();
@@ -2637,8 +3030,8 @@ async fn layout_manager_routes_crud_and_guard_last_layout() {
     .await;
     assert_eq!(status, StatusCode::OK, "{resp}");
     assert!(resp.contains(r#""name":"Details""#));
-    let (status, _) = post_json_body(state.clone(), "/layouts/999999/rename", r#"{"name":"x"}"#)
-        .await;
+    let (status, _) =
+        post_json_body(state.clone(), "/layouts/999999/rename", r#"{"name":"x"}"#).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     // Reorder: reverse the full global order and confirm it persists.
@@ -2684,19 +3077,27 @@ async fn layout_manager_routes_crud_and_guard_last_layout() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|l| l["tableId"].as_i64() == Some(table_id) && l["isDefault"].as_bool() == Some(true))
+        .filter(|l| {
+            l["tableId"].as_i64() == Some(table_id) && l["isDefault"].as_bool() == Some(true)
+        })
         .collect();
     assert_eq!(defaults.len(), 3, "the default trio");
-    assert!(defaults.iter().all(|l| l["enabled"].as_bool() == Some(true)));
+    assert!(defaults
+        .iter()
+        .all(|l| l["enabled"].as_bool() == Some(true)));
     let by_view = |v: &str| -> i64 {
-        defaults.iter().find(|l| l["view"].as_str() == Some(v)).unwrap()["id"]
+        defaults
+            .iter()
+            .find(|l| l["view"].as_str() == Some(v))
+            .unwrap()["id"]
             .as_i64()
             .unwrap()
     };
     let (form, list, table) = (by_view("form"), by_view("list"), by_view("table"));
 
     // A default can't be deleted.
-    let (status, resp) = post_json_body(state.clone(), &format!("/layouts/{form}/delete"), "{}").await;
+    let (status, resp) =
+        post_json_body(state.clone(), &format!("/layouts/{form}/delete"), "{}").await;
     assert_eq!(status, StatusCode::CONFLICT, "{resp}");
 
     // Disable two of three; the last enabled default refuses to disable.
@@ -2761,18 +3162,34 @@ async fn disabling_form_falls_through_to_next_enabled_default() {
 
     // Disable Form. Home now redirects to List (not a dead end), and the picker
     // still lists the table (its List layout is the landing handle).
-    let (status, _) =
-        post_json_body(state.clone(), &format!("/layouts/{form}/enabled"), r#"{"enabled":false}"#)
-            .await;
+    let (status, _) = post_json_body(
+        state.clone(),
+        &format!("/layouts/{form}/enabled"),
+        r#"{"enabled":false}"#,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     let resp = app(state.clone())
-        .oneshot(Request::builder().uri("/").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    assert!(resp.status().is_redirection(), "home should redirect, got {}", resp.status());
+    assert!(
+        resp.status().is_redirection(),
+        "home should redirect, got {}",
+        resp.status()
+    );
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(location, format!("/browse/{list}"), "lands on List when Form is off");
+    assert_eq!(
+        location,
+        format!("/browse/{list}"),
+        "lands on List when Form is off"
+    );
 
     // The picker (rendered into the browse shell) still names the table.
     let (status, html) = get_body(state.clone(), &format!("/browse/{list}")).await;
@@ -2789,11 +3206,19 @@ async fn home_redirects_to_schema_when_nothing_browsable() {
     // A brand-new in-memory solution has no tables/layouts at all.
     let state = state_for(Solution::open_in_memory().unwrap());
     let resp = app(state)
-        .oneshot(Request::builder().uri("/").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert!(resp.status().is_redirection());
-    assert_eq!(resp.headers().get("location").unwrap().to_str().unwrap(), "/schema");
+    assert_eq!(
+        resp.headers().get("location").unwrap().to_str().unwrap(),
+        "/schema"
+    );
 }
 
 /// #48 create: placing a shape POSTs `{partId,kind,x,y,w,h,props}`, persists a
@@ -3003,14 +3428,26 @@ async fn design_duplicate_field_by_binding_without_field_id() {
 async fn design_portal_paste_carries_route_binding() {
     let mut sol = Solution::open_in_memory().unwrap();
     let customers = sol
-        .create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+        .create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
         .unwrap();
     let invoices = sol
         .create_table(
             "Invoices",
             &[
-                NewField { name: "Total".into(), kind: FieldKind::Number },
-                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+                NewField {
+                    name: "Total".into(),
+                    kind: FieldKind::Number,
+                },
+                NewField {
+                    name: "CustomerId".into(),
+                    kind: FieldKind::Text,
+                },
             ],
         )
         .unwrap();
@@ -3056,15 +3493,25 @@ async fn design_portal_paste_carries_route_binding() {
     let (status, resp) =
         post_json_body(state.clone(), &format!("/design/{layout_id}/object"), &body).await;
     assert_eq!(status, StatusCode::OK, "portal paste with route\n{resp}");
-    assert!(resp.contains(r#""kind":"portal""#), "portal created\n{resp}");
-    assert!(resp.contains(r#""binding":"customer""#), "route preserved on the clone\n{resp}");
+    assert!(
+        resp.contains(r#""kind":"portal""#),
+        "portal created\n{resp}"
+    );
+    assert!(
+        resp.contains(r#""binding":"customer""#),
+        "route preserved on the clone\n{resp}"
+    );
 
     // The regression itself: dropping the binding (the pre-fix client behavior)
     // is rejected — proving the route is load-bearing, not optional.
     let no_route =
         format!(r#"{{"partId":{part_id},"kind":"portal","x":60,"y":60,"w":300,"h":120}}"#);
-    let (status, resp) =
-        post_json_body(state.clone(), &format!("/design/{layout_id}/object"), &no_route).await;
+    let (status, resp) = post_json_body(
+        state.clone(),
+        &format!("/design/{layout_id}/object"),
+        &no_route,
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
@@ -3081,14 +3528,26 @@ async fn design_portal_paste_carries_route_binding() {
 async fn design_portal_paste_reparents_columns_and_renders() {
     let mut sol = Solution::open_in_memory().unwrap();
     let customers = sol
-        .create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+        .create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
         .unwrap();
     let invoices = sol
         .create_table(
             "Invoices",
             &[
-                NewField { name: "Total".into(), kind: FieldKind::Number },
-                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+                NewField {
+                    name: "Total".into(),
+                    kind: FieldKind::Number,
+                },
+                NewField {
+                    name: "CustomerId".into(),
+                    kind: FieldKind::Text,
+                },
             ],
         )
         .unwrap();
@@ -3118,12 +3577,22 @@ async fn design_portal_paste_reparents_columns_and_renders() {
         .unwrap();
     // Ada with one invoice (Total 42) so the pasted portal has a row to render.
     let cust_tbl = sol.table_by_id(customers).unwrap().unwrap();
-    let name = sol.field_by_id(customers, field_named(&sol, customers, "Name")).unwrap().unwrap();
-    let ada = sol.insert_record(&cust_tbl, &[(&name, "Ada".into())]).unwrap();
+    let name = sol
+        .field_by_id(customers, field_named(&sol, customers, "Name"))
+        .unwrap()
+        .unwrap();
+    let ada = sol
+        .insert_record(&cust_tbl, &[(&name, "Ada".into())])
+        .unwrap();
     let route = sol.resolve_path(customers, "customer").unwrap();
-    let total = sol.field_by_id(invoices, field_named(&sol, invoices, "Total")).unwrap().unwrap();
-    sol.set_relationship_referential(rel_id.id, true, true).unwrap();
-    sol.create_related_record(&route, ada, &[(&total, "42".into())], None).unwrap();
+    let total = sol
+        .field_by_id(invoices, field_named(&sol, invoices, "Total"))
+        .unwrap()
+        .unwrap();
+    sol.set_relationship_referential(rel_id.id, true, true)
+        .unwrap();
+    sol.create_related_record(&route, ada, &[(&total, "42".into())], None)
+        .unwrap();
 
     let form = sol
         .layouts_for_table(customers)
@@ -3167,8 +3636,7 @@ async fn design_portal_paste_reparents_columns_and_renders() {
 
     // End to end: the pasted portal resolves its route against Ada and renders the
     // re-parented column's related value.
-    let (status, html) =
-        get_body(state, &format!("/browse/{layout_id}?view=form&rec={ada}")).await;
+    let (status, html) = get_body(state, &format!("/browse/{layout_id}?view=form&rec={ada}")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
         html.contains("fm-portal-cell") && html.contains(r#"value="42""#),
@@ -4217,20 +4685,23 @@ async fn browse_applies_value_format_in_form_list_and_table() {
 }
 
 // ---------------------------------------------------------------------------
-// #173 — new-record draft lifecycle (server).
+// #182 — owned record edit sessions and crash-safe working copies.
 // ---------------------------------------------------------------------------
 
-/// A one-table fixture with a `Number` primary field (⇒ required + unique) and a
-/// free-text `Note`, plus its Form layout id. The shared shape for the draft
-/// lifecycle tests below.
-fn draft_fixture() -> (AppState, i64, i64, i64, i64) {
+fn edit_fixture() -> (AppState, i64, i64, i64, i64) {
     let mut sol = Solution::open_in_memory().unwrap();
     let table_id = sol
         .create_table(
             "Invoices",
             &[
-                NewField { name: "Number".into(), kind: FieldKind::Text },
-                NewField { name: "Note".into(), kind: FieldKind::Text },
+                NewField {
+                    name: "Number".into(),
+                    kind: FieldKind::Text,
+                },
+                NewField {
+                    name: "Note".into(),
+                    kind: FieldKind::Text,
+                },
             ],
         )
         .unwrap();
@@ -4248,141 +4719,126 @@ fn draft_fixture() -> (AppState, i64, i64, i64, i64) {
     (state_for(sol), table_id, layout, number, note)
 }
 
-fn newest_id(st: &AppState, table_id: i64) -> i64 {
-    let sol = st.sol.lock().unwrap();
-    let table = sol.table_by_id(table_id).unwrap().unwrap();
-    *sol.record_ids(&table).unwrap().last().unwrap()
-}
-
 fn record_count(st: &AppState, table_id: i64) -> usize {
     let sol = st.sol.lock().unwrap();
     let table = sol.table_by_id(table_id).unwrap().unwrap();
     sol.record_ids(&table).unwrap().len()
 }
 
-fn read_note(st: &AppState, table_id: i64, note_fid: i64, id: i64) -> String {
+fn read_field(st: &AppState, table_id: i64, field_id: i64, id: i64) -> String {
     let sol = st.sol.lock().unwrap();
     let table = sol.table_by_id(table_id).unwrap().unwrap();
-    let note = sol.field_by_id(table_id, note_fid).unwrap().unwrap();
-    sol.get_record(&table, std::slice::from_ref(&note), id)
+    let field = sol.field_by_id(table_id, field_id).unwrap().unwrap();
+    sol.get_record(&table, std::slice::from_ref(&field), id)
         .unwrap()
         .unwrap()[0]
         .clone()
 }
 
-/// New mints a blank record even when the table has a required field, and the
-/// per-field `/draft` save persists partial progress WITHOUT the required/unique
-/// gate — the user can tab between fields with `Number` still blank.
 #[tokio::test]
-async fn new_mints_blank_draft_and_draft_saves_skip_required_and_unique() {
-    let (state, table_id, layout, number, note) = draft_fixture();
-
-    // The bug fix: a blank New on a required-field table no longer 400s; it mints
-    // a draft and redirects onto it.
-    let (status, _) =
-        post_form_body(state.clone(), &format!("/browse/{layout}"), &format!("f{number}=&f{note}=")).await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    let id = newest_id(&state, table_id);
-    assert!(state.is_draft((table_id, id)), "New registers the record as a draft");
-
-    // A per-field draft save persists Note while Number is still blank — required
-    // is deferred, so this does NOT 400, and the record stays a draft (open).
-    let (status, _) = post_form_body(
+async fn pending_new_is_synthetic_and_revert_leaves_no_row() {
+    let (state, table_id, layout, _number, _note) = edit_fixture();
+    let (status, opened) = begin_edit(
         state.clone(),
-        &format!("/browse/{layout}/{id}/draft"),
-        &format!("f{number}=&f{note}=hello"),
+        &format!("/browse/{layout}/new/open"),
+        "new-owner",
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "draft field-save does not enforce required");
-    assert_eq!(read_note(&state, table_id, note, id), "hello", "partial progress persisted");
-    assert!(state.is_draft((table_id, id)), "a draft save keeps the record a draft");
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    let token = opened["editToken"].as_str().unwrap();
+    let synthetic = opened["syntheticId"].as_i64().unwrap();
+    assert!(synthetic < 0);
+    assert_eq!(record_count(&state, table_id), 0);
+
+    let (status, html) =
+        get_body(state.clone(), &format!("/browse/{layout}?edit={token}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains(r#"data-pending="1""#));
+    assert!(html.contains(&format!(r#"data-edit="{token}""#)));
+    assert!(!html.contains("data-owner="), "owner token must stay client-side");
+
+    let (status, body) = post_form_body(
+        state.clone(),
+        &format!("/browse/{layout}/{synthetic}/revert"),
+        &edit_body("", "new-owner", token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(record_count(&state, table_id), 0);
+    assert_eq!(state.edits.lock().unwrap().len(), 0);
 }
 
-/// The record-EXIT commit is the FULL gate: it rejects an incomplete draft (kept
-/// open) and, once complete, promotes it out of the draft set.
 #[tokio::test]
-async fn record_exit_commit_rejects_then_promotes_a_draft() {
-    let (state, table_id, layout, number, note) = draft_fixture();
-    let (status, _) =
-        post_form_body(state.clone(), &format!("/browse/{layout}"), &format!("f{number}=&f{note}=")).await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    let id = newest_id(&state, table_id);
+async fn existing_lock_is_owned_revert_preserves_row_and_unplaced_values_survive_commit() {
+    let (state, table_id, layout, number, note) = edit_fixture();
+    let id = {
+        let sol = state.sol.lock().unwrap();
+        let table = sol.table_by_id(table_id).unwrap().unwrap();
+        let number_field = sol.field_by_id(table_id, number).unwrap().unwrap();
+        let note_field = sol.field_by_id(table_id, note).unwrap().unwrap();
+        sol.insert_record(
+            &table,
+            &[(&number_field, "INV-9".into()), (&note_field, "old".into())],
+        )
+        .unwrap()
+    };
+    let open_url = format!("/browse/{layout}/{id}/open");
+    let (status, opened) = begin_edit(state.clone(), &open_url, "owner-a").await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    let token = opened["editToken"].as_str().unwrap();
+    let (status, conflict) = begin_edit(state.clone(), &open_url, "owner-b").await;
+    assert_eq!(status, StatusCode::LOCKED);
+    assert_eq!(conflict["kind"], "lock_conflict");
 
-    // Commit with the required Number still blank → 400, draft stays open.
+    // Submit only Note: Number was not placed/submitted but comes from the full
+    // server snapshot, so required validation and the canonical value both hold.
     let (status, body) = post_form_body(
         state.clone(),
         &format!("/browse/{layout}/{id}"),
-        &format!("f{number}=&f{note}=x"),
+        &edit_body(&format!("f{note}=changed"), "owner-a", token),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body.contains("Number") && body.contains("required"));
-    assert!(state.is_draft((table_id, id)), "a rejected commit keeps the draft open");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(read_field(&state, table_id, number, id), "INV-9");
+    assert_eq!(read_field(&state, table_id, note, id), "changed");
 
-    // Commit with Number filled → promoted (redirect + removed from the draft set).
-    let (status, _) = post_form_body(
+    let (status, opened) = begin_edit(state.clone(), &open_url, "owner-b").await;
+    assert_eq!(status, StatusCode::OK);
+    let token = opened["editToken"].as_str().unwrap();
+    let (status, body) = post_form_body(
         state.clone(),
-        &format!("/browse/{layout}/{id}"),
-        &format!("f{number}=INV-1&f{note}=x"),
+        &format!("/browse/{layout}/{id}/revert"),
+        &edit_body("", "owner-b", token),
     )
     .await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    assert!(!state.is_draft((table_id, id)), "a complete commit promotes the draft");
-    assert_eq!(record_count(&state, table_id), 1);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(read_field(&state, table_id, note, id), "changed");
 }
 
-/// Escape/revert on a never-committed draft DELETES the row; Escape on an
-/// existing (committed) record only releases its lock — the row survives.
 #[tokio::test]
-async fn revert_deletes_a_fresh_draft_but_spares_an_existing_record() {
-    let (state, table_id, layout, number, note) = draft_fixture();
-
-    // A fresh draft that Escape deletes outright.
-    let (status, _) =
-        post_form_body(state.clone(), &format!("/browse/{layout}"), &format!("f{number}=&f{note}=")).await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    let draft = newest_id(&state, table_id);
-    assert_eq!(record_count(&state, table_id), 1);
-    let (status, _) =
-        post_form_body(state.clone(), &format!("/browse/{layout}/{draft}/revert"), "").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(record_count(&state, table_id), 0, "reverting a fresh draft deletes it");
-    assert!(!state.is_draft((table_id, draft)), "the draft registration is cleared");
-
-    // A committed record that Escape must NOT delete.
-    let (status, _) =
-        post_form_body(state.clone(), &format!("/browse/{layout}"), &format!("f{number}=&f{note}=")).await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    let existing = newest_id(&state, table_id);
-    let (status, _) = post_form_body(
-        state.clone(),
-        &format!("/browse/{layout}/{existing}"),
-        &format!("f{number}=INV-9&f{note}="),
-    )
-    .await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    assert!(!state.is_draft((table_id, existing)));
-    let (status, _) =
-        post_form_body(state.clone(), &format!("/browse/{layout}/{existing}/revert"), "").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(record_count(&state, table_id), 1, "reverting an existing record spares the row");
-}
-
-/// The portal blank create-row mints its related record as a DRAFT too (#171):
-/// create succeeds even with the terminal's required field blank, the terminal is
-/// registered as a draft, and reverting the child scope deletes it.
-#[tokio::test]
-async fn portal_create_new_mints_a_related_draft_and_reverts_it() {
+async fn pending_related_validation_and_revert_never_create_terminal_or_link_rows() {
     let mut sol = Solution::open_in_memory().unwrap();
     let customers = sol
-        .create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+        .create_table(
+            "Customers",
+            &[NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            }],
+        )
         .unwrap();
     let invoices = sol
         .create_table(
             "Invoices",
             &[
-                NewField { name: "Total".into(), kind: FieldKind::Number },
-                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+                NewField {
+                    name: "Total".into(),
+                    kind: FieldKind::Number,
+                },
+                NewField {
+                    name: "CustomerId".into(),
+                    kind: FieldKind::Text,
+                },
             ],
         )
         .unwrap();
@@ -4404,8 +4860,9 @@ async fn portal_create_new_mints_a_related_draft_and_reverts_it() {
     .unwrap()
     .unwrap();
     let rel_id = sol.relationships().unwrap()[0].id;
-    sol.set_relationship_referential(rel_id, true, false).unwrap();
-    // Make the terminal's Total REQUIRED: pre-#173 the portal create would 400.
+    sol.set_relationship_referential(rel_id, true, false)
+        .unwrap();
+    // Make the terminal's Total required so commit can prove rollback.
     let total_fid = field_named(&sol, invoices, "Total");
     sol.update_field_options(invoices, total_fid, r#"{"validation":{"required":true}}"#)
         .unwrap();
@@ -4415,7 +4872,9 @@ async fn portal_create_new_mints_a_related_draft_and_reverts_it() {
         .field_by_id(customers, field_named(&sol, customers, "Name"))
         .unwrap()
         .unwrap();
-    let ada = sol.insert_record(&cust_tbl, &[(&name, "Ada".into())]).unwrap();
+    let ada = sol
+        .insert_record(&cust_tbl, &[(&name, "Ada".into())])
+        .unwrap();
     let route = sol.resolve_path(customers, "customer").unwrap();
 
     let form = sol
@@ -4443,26 +4902,185 @@ async fn portal_create_new_mints_a_related_draft_and_reverts_it() {
         )
         .unwrap()
         .unwrap();
-    sol.create_field_object(form.id, body.id, "customer.Total", "Total", 20, 20, 100, 24, Some(portal_id), false)
-        .unwrap()
-        .unwrap();
+    sol.create_field_object(
+        form.id,
+        body.id,
+        "customer.Total",
+        "Total",
+        20,
+        20,
+        100,
+        24,
+        Some(portal_id),
+        false,
+    )
+    .unwrap()
+    .unwrap();
 
     let state = AppState::new(sol);
     let create_url = format!("/browse/{}/{}/related/{}", form.id, ada, portal_id);
 
-    // Blank required Total mints the terminal as a DRAFT (no 400).
-    let (status, _) = post_form_body(state.clone(), &create_url, &format!("f{total_fid}=")).await;
-    assert_eq!(status, StatusCode::OK, "portal create defers required, minting a draft");
-    let rows = state.sol.lock().unwrap().read_related_records(&route, ada).unwrap();
-    assert_eq!(rows.len(), 1, "the related draft exists");
-    let term_id = rows[0].id;
-    assert!(state.is_draft((invoices, term_id)), "the terminal is registered as a draft");
+    let (status, opened) = begin_edit(
+        state.clone(),
+        &format!("{create_url}/new/open"),
+        "related-owner",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    let token = opened["editToken"].as_str().unwrap();
+    assert!(state
+        .sol
+        .lock()
+        .unwrap()
+        .read_related_records(&route, ada)
+        .unwrap()
+        .is_empty());
 
-    // Reverting the child scope deletes the fresh terminal draft.
-    let revert_url = format!("/browse/{}/{}/related/{}/{}/revert", form.id, ada, portal_id, term_id);
-    let (status, _) = post_form_body(state.clone(), &revert_url, "").await;
+    let (status, body) = post_form_body(
+        state.clone(),
+        &create_url,
+        &edit_body(&format!("f{total_fid}="), "related-owner", token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(state
+        .sol
+        .lock()
+        .unwrap()
+        .read_related_records(&route, ada)
+        .unwrap()
+        .is_empty());
+
+    let (status, body) = post_form_body(
+        state.clone(),
+        &format!("{create_url}/new/revert"),
+        &edit_body("", "related-owner", token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(state
+        .sol
+        .lock()
+        .unwrap()
+        .read_related_records(&route, ada)
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn dropping_app_state_is_an_implicit_revert_for_pending_and_existing_edits() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("record-maker-182-{unique}"));
+    let mut sol = Solution::open(&dir).unwrap();
+    let table_id = sol
+        .create_table(
+            "Invoices",
+            &[
+                NewField {
+                    name: "Number".into(),
+                    kind: FieldKind::Text,
+                },
+                NewField {
+                    name: "Note".into(),
+                    kind: FieldKind::Text,
+                },
+            ],
+        )
+        .unwrap();
+    let fields = sol.fields(table_id).unwrap();
+    let table = sol.table_by_id(table_id).unwrap().unwrap();
+    let existing = sol
+        .insert_record(
+            &table,
+            &[(&fields[0], "INV-1".into()), (&fields[1], "old".into())],
+        )
+        .unwrap();
+    let layout = sol
+        .layouts_for_table(table_id)
+        .unwrap()
+        .into_iter()
+        .find(|layout| layout.view == "form")
+        .unwrap()
+        .id;
+    let state = AppState::new(sol);
+    let (status, _) = begin_edit(
+        state.clone(),
+        &format!("/browse/{layout}/new/open"),
+        "crash-owner",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
-    let rows = state.sol.lock().unwrap().read_related_records(&route, ada).unwrap();
-    assert_eq!(rows.len(), 0, "reverting a fresh related draft deletes it");
-    assert!(!state.is_draft((invoices, term_id)), "the terminal draft registration is cleared");
+    let (status, _) = begin_edit(
+        state.clone(),
+        &format!("/browse/{layout}/{existing}/open"),
+        "crash-owner",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    drop(state);
+
+    let reopened = Solution::open(&dir).unwrap();
+    let table = reopened.table_by_id(table_id).unwrap().unwrap();
+    assert_eq!(reopened.record_ids(&table).unwrap(), vec![existing]);
+    assert_eq!(
+        reopened
+            .get_record(&table, &fields, existing)
+            .unwrap()
+            .unwrap()[1],
+        "old"
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn stale_token_cannot_duplicate_a_successful_commit() {
+    let (state, table_id, layout, number, note) = edit_fixture();
+    let id = {
+        let solution = state.sol.lock().unwrap();
+        let table = solution.table_by_id(table_id).unwrap().unwrap();
+        let fields = solution.fields(table_id).unwrap();
+        solution
+            .insert_record(
+                &table,
+                &[(&fields[0], "INV-1".into()), (&fields[1], "old".into())],
+            )
+            .unwrap()
+    };
+    let (status, opened) = begin_edit(
+        state.clone(),
+        &format!("/browse/{layout}/{id}/open"),
+        "race-owner",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = opened["editToken"].as_str().unwrap();
+    let body = edit_body(
+        &format!("f{number}=INV-1&f{note}=once"),
+        "race-owner",
+        token,
+    );
+    let (status, response) =
+        post_form_body(state.clone(), &format!("/browse/{layout}/{id}"), &body).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let (status, response) =
+        post_form_body(state.clone(), &format!("/browse/{layout}/{id}"), &body).await;
+    assert_eq!(status, StatusCode::GONE, "{response}");
+    assert_eq!(read_field(&state, table_id, note, id), "once");
+}
+
+#[tokio::test]
+async fn close_authorization_is_an_explicit_one_shot_signal() {
+    use std::sync::atomic::Ordering;
+
+    let state = state_for(Solution::open_in_memory().unwrap());
+    let signal = state.close_signal();
+    assert!(!signal.load(Ordering::Acquire));
+    let (status, body) = post_form_body(state, "/app/close-authorized", "").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(signal.swap(false, Ordering::AcqRel));
+    assert!(!signal.load(Ordering::Acquire));
 }

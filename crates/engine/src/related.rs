@@ -331,7 +331,15 @@ impl Solution {
         values: &[(&FieldMeta, String)],
         associate_existing: Option<i64>,
     ) -> Result<i64> {
-        self.create_related_record_mode(route, base_id, values, associate_existing, ValidationMode::Full)
+        self.in_transaction(|s| {
+            s.create_related_record_mode(
+                route,
+                base_id,
+                values,
+                associate_existing,
+                ValidationMode::Full,
+            )
+        })
     }
 
     /// Mint a related record as a DRAFT (#173): identical to
@@ -348,7 +356,15 @@ impl Solution {
         values: &[(&FieldMeta, String)],
         associate_existing: Option<i64>,
     ) -> Result<i64> {
-        self.create_related_record_mode(route, base_id, values, associate_existing, ValidationMode::Draft)
+        self.in_transaction(|s| {
+            s.create_related_record_mode(
+                route,
+                base_id,
+                values,
+                associate_existing,
+                ValidationMode::Draft,
+            )
+        })
     }
 
     fn create_related_record_mode(
@@ -377,17 +393,12 @@ impl Solution {
                     // base is the parent; the child (from_table) carries the FK.
                     // Stamp the child's FK with the base record's key.
                     HopDirection::Reverse => {
-                        let base_key =
-                            self.key_value(rel.to_table, rel.to_field, base_id)?;
+                        let base_key = self.key_value(rel.to_table, rel.to_field, base_id)?;
                         let child_table = self.related_table(rel.from_table)?;
                         let fk = self.related_field(rel.from_table, rel.from_field)?;
                         match associate_existing {
                             Some(existing) => {
-                                self.update_record(
-                                    &child_table,
-                                    existing,
-                                    &[(&fk, base_key)],
-                                )?;
+                                self.update_record(&child_table, existing, &[(&fk, base_key)])?;
                                 Ok(existing)
                             }
                             None => {
@@ -405,8 +416,7 @@ impl Solution {
                             Some(existing) => existing,
                             None => self.insert_record_mode(&parent_table, values, mode)?,
                         };
-                        let parent_key =
-                            self.key_value(rel.to_table, rel.to_field, parent_id)?;
+                        let parent_key = self.key_value(rel.to_table, rel.to_field, parent_id)?;
                         self.update_record_mode(
                             &base_table,
                             base_id,
@@ -432,20 +442,18 @@ impl Solution {
                 let join_fk_term = self.related_field(terminal.from_table, terminal.from_field)?;
                 let terminal_table = self.related_table(terminal.to_table)?;
 
-                self.in_transaction(|s| {
-                    let terminal_id = match associate_existing {
-                        Some(existing) => existing,
-                        None => s.insert_record_mode(&terminal_table, values, mode)?,
-                    };
-                    let terminal_key =
-                        s.key_value(terminal.to_table, terminal.to_field, terminal_id)?;
-                    s.insert_record_mode(
-                        &join_table,
-                        &[(&join_fk_base, base_key), (&join_fk_term, terminal_key)],
-                        mode,
-                    )?;
-                    Ok(terminal_id)
-                })
+                let terminal_id = match associate_existing {
+                    Some(existing) => existing,
+                    None => self.insert_record_mode(&terminal_table, values, mode)?,
+                };
+                let terminal_key =
+                    self.key_value(terminal.to_table, terminal.to_field, terminal_id)?;
+                self.insert_record_mode(
+                    &join_table,
+                    &[(&join_fk_base, base_key), (&join_fk_term, terminal_key)],
+                    mode,
+                )?;
+                Ok(terminal_id)
             }
             RouteClass::BaseRecord | RouteClass::Undetermined => {
                 // Already handled above, but keep the match exhaustive.
@@ -465,6 +473,27 @@ impl Solution {
     ) -> Result<()> {
         let table = self.related_table(route.terminal_table)?;
         self.update_record(&table, record_id, values)
+    }
+
+    /// Record-session related UPDATE commit (#182): keep the validation read and
+    /// terminal-row write atomic, mirroring [`Solution::commit_update_record`].
+    pub fn commit_related_record_update(
+        &self,
+        route: &ResolvedRoute,
+        record_id: i64,
+        values: &[(&FieldMeta, String)],
+    ) -> Result<()> {
+        self.data.execute_batch("BEGIN IMMEDIATE")?;
+        match self.update_related_record(route, record_id, values) {
+            Ok(()) => {
+                self.data.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.data.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
     }
 
     /// **Delete** the nearest record for `route` / base `base_id`:
@@ -640,7 +669,7 @@ impl Solution {
     /// on `Err`. Uses raw `BEGIN`/`COMMIT`/`ROLLBACK` so the enclosed `&self`
     /// CRUD helpers compose without needing a `&mut` borrow of the connection.
     fn in_transaction<T>(&self, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
-        self.data.execute_batch("BEGIN")?;
+        self.data.execute_batch("BEGIN IMMEDIATE")?;
         match f(self) {
             Ok(v) => {
                 self.data.execute_batch("COMMIT")?;
@@ -658,10 +687,8 @@ impl Solution {
 mod tests {
     use crate::options::FieldOptions;
     use crate::path::RouteClass;
-    use crate::related::{
-        FilterClause, FilterOp, FilterOperand, RelatedCrudError, RelatedFilter,
-    };
-    use crate::{FieldKind, NewField, NewRelationship, Solution};
+    use crate::related::{FilterClause, FilterOp, FilterOperand, RelatedCrudError, RelatedFilter};
+    use crate::{FieldKind, NewField, NewRelationship, NewValueList, Solution};
 
     fn field_id(s: &Solution, table_id: i64, name: &str) -> i64 {
         s.all_fields(table_id)
@@ -711,14 +738,26 @@ mod tests {
     /// Customers ← Invoices via a direct FK. Returns (invoices, customers, rel_id).
     fn invoice_customer(s: &mut Solution) -> (i64, i64, i64) {
         let customers = s
-            .create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .create_table(
+                "Customers",
+                &[NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                }],
+            )
             .unwrap();
         let invoices = s
             .create_table(
                 "Invoices",
                 &[
-                    NewField { name: "Total".into(), kind: FieldKind::Number },
-                    NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+                    NewField {
+                        name: "Total".into(),
+                        kind: FieldKind::Number,
+                    },
+                    NewField {
+                        name: "CustomerId".into(),
+                        kind: FieldKind::Text,
+                    },
                 ],
             )
             .unwrap();
@@ -839,17 +878,35 @@ mod tests {
     /// (students, courses, enrollments, rel_student, rel_course).
     fn student_course(s: &mut Solution) -> (i64, i64, i64, i64, i64) {
         let students = s
-            .create_table("Students", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .create_table(
+                "Students",
+                &[NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                }],
+            )
             .unwrap();
         let courses = s
-            .create_table("Courses", &[NewField { name: "Title".into(), kind: FieldKind::Text }])
+            .create_table(
+                "Courses",
+                &[NewField {
+                    name: "Title".into(),
+                    kind: FieldKind::Text,
+                }],
+            )
             .unwrap();
         let enrollments = s
             .create_table(
                 "Enrollments",
                 &[
-                    NewField { name: "StudentId".into(), kind: FieldKind::Text },
-                    NewField { name: "CourseId".into(), kind: FieldKind::Text },
+                    NewField {
+                        name: "StudentId".into(),
+                        kind: FieldKind::Text,
+                    },
+                    NewField {
+                        name: "CourseId".into(),
+                        kind: FieldKind::Text,
+                    },
                 ],
             )
             .unwrap();
@@ -883,7 +940,8 @@ mod tests {
         let mut s = Solution::open_in_memory().unwrap();
         let (students, courses, enrollments, rel_student, _rel_course) = student_course(&mut s);
         // Anchor is the first hop (student): enable create+delete on it.
-        s.set_relationship_referential(rel_student, true, true).unwrap();
+        s.set_relationship_referential(rel_student, true, true)
+            .unwrap();
 
         let s_tbl = s.table_by_id(students).unwrap().unwrap();
         let s_name = field(&s, students, "Name");
@@ -909,7 +967,9 @@ mod tests {
         let e_tbl = s.table_by_id(enrollments).unwrap().unwrap();
         let n_enroll: i64 = s
             .data
-            .query_row(&format!("SELECT COUNT(*) FROM {}", e_tbl.phys), [], |r| r.get(0))
+            .query_row(&format!("SELECT COUNT(*) FROM {}", e_tbl.phys), [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(n_enroll, 1);
         let math_uuid = pk_value(&s, courses, math);
@@ -923,7 +983,8 @@ mod tests {
     fn join_mn_associate_existing_only_mints_join() {
         let mut s = Solution::open_in_memory().unwrap();
         let (students, courses, enrollments, rel_student, _rc) = student_course(&mut s);
-        s.set_relationship_referential(rel_student, true, true).unwrap();
+        s.set_relationship_referential(rel_student, true, true)
+            .unwrap();
 
         let s_tbl = s.table_by_id(students).unwrap().unwrap();
         let s_name = field(&s, students, "Name");
@@ -943,13 +1004,17 @@ mod tests {
         // No new Course minted (still just Art); one join row.
         let n_courses: i64 = s
             .data
-            .query_row(&format!("SELECT COUNT(*) FROM {}", c_tbl.phys), [], |r| r.get(0))
+            .query_row(&format!("SELECT COUNT(*) FROM {}", c_tbl.phys), [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(n_courses, 1);
         let e_tbl = s.table_by_id(enrollments).unwrap().unwrap();
         let n_enroll: i64 = s
             .data
-            .query_row(&format!("SELECT COUNT(*) FROM {}", e_tbl.phys), [], |r| r.get(0))
+            .query_row(&format!("SELECT COUNT(*) FROM {}", e_tbl.phys), [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(n_enroll, 1);
         assert_eq!(s.read_related_records(&route, ada).unwrap().len(), 1);
@@ -959,7 +1024,8 @@ mod tests {
     fn join_mn_delete_unlinks_join_not_terminal() {
         let mut s = Solution::open_in_memory().unwrap();
         let (students, courses, enrollments, rel_student, _rc) = student_course(&mut s);
-        s.set_relationship_referential(rel_student, true, true).unwrap();
+        s.set_relationship_referential(rel_student, true, true)
+            .unwrap();
 
         let s_tbl = s.table_by_id(students).unwrap().unwrap();
         let s_name = field(&s, students, "Name");
@@ -977,7 +1043,9 @@ mod tests {
         let e_tbl = s.table_by_id(enrollments).unwrap().unwrap();
         let n_enroll: i64 = s
             .data
-            .query_row(&format!("SELECT COUNT(*) FROM {}", e_tbl.phys), [], |r| r.get(0))
+            .query_row(&format!("SELECT COUNT(*) FROM {}", e_tbl.phys), [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(n_enroll, 0);
         let c_tbl = s.table_by_id(courses).unwrap().unwrap();
@@ -989,13 +1057,31 @@ mod tests {
     fn to_many_chain_create_is_refused() {
         let mut s = Solution::open_in_memory().unwrap();
         let companies = s
-            .create_table("Companies", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+            .create_table(
+                "Companies",
+                &[NewField {
+                    name: "Name".into(),
+                    kind: FieldKind::Text,
+                }],
+            )
             .unwrap();
         let departments = s
-            .create_table("Departments", &[NewField { name: "CompanyId".into(), kind: FieldKind::Text }])
+            .create_table(
+                "Departments",
+                &[NewField {
+                    name: "CompanyId".into(),
+                    kind: FieldKind::Text,
+                }],
+            )
             .unwrap();
         let _employees = s
-            .create_table("Employees", &[NewField { name: "DeptId".into(), kind: FieldKind::Text }])
+            .create_table(
+                "Employees",
+                &[NewField {
+                    name: "DeptId".into(),
+                    kind: FieldKind::Text,
+                }],
+            )
             .unwrap();
         s.create_relationship(&NewRelationship {
             name: "company".into(),
@@ -1018,7 +1104,9 @@ mod tests {
 
         let c_tbl = s.table_by_id(companies).unwrap().unwrap();
         let c_name = field(&s, companies, "Name");
-        let acme = s.insert_record(&c_tbl, &[(&c_name, "Acme".into())]).unwrap();
+        let acme = s
+            .insert_record(&c_tbl, &[(&c_name, "Acme".into())])
+            .unwrap();
 
         // Company → departments (to-many) → employees (to-many): undetermined.
         let route = s.resolve_path(companies, "company.department").unwrap();
@@ -1106,6 +1194,44 @@ mod tests {
         assert!(s.get_record(&c_tbl, &[], new_cust).unwrap().is_some());
     }
 
+    #[test]
+    fn direct_forward_create_rolls_back_terminal_when_link_update_fails() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let (invoices, customers, rel) = invoice_customer(&mut s);
+        s.set_relationship_referential(rel, true, true).unwrap();
+
+        let inv_tbl = s.table_by_id(invoices).unwrap().unwrap();
+        let total = field(&s, invoices, "Total");
+        let inv = s.insert_record(&inv_tbl, &[(&total, "42".into())]).unwrap();
+
+        // Make the base FK reject every generated customer key. This forces the
+        // second half of the forward create to fail after the terminal insert.
+        let list = s
+            .create_value_list(&NewValueList {
+                name: "Allowed customer keys".into(),
+                source: "custom".into(),
+                config: r#"{"values":["never-a-generated-key"]}"#.into(),
+            })
+            .unwrap();
+        let fk = field(&s, invoices, "CustomerId");
+        s.update_field_options(
+            invoices,
+            fk.id,
+            &format!(r#"{{"validation":{{"memberOfValueList":{}}}}}"#, list.id),
+        )
+        .unwrap();
+
+        let route = s.resolve_path(invoices, "customer").unwrap();
+        let name = field(&s, customers, "Name");
+        assert!(s
+            .create_related_record(&route, inv, &[(&name, "Ada".into())], None)
+            .is_err());
+
+        let customer_table = s.table_by_id(customers).unwrap().unwrap();
+        assert!(s.record_ids(&customer_table).unwrap().is_empty());
+        assert_eq!(fk_of(&s, invoices, "CustomerId", inv), "");
+    }
+
     // --- #112: display-only filter ----------------------------------------
 
     #[test]
@@ -1175,7 +1301,10 @@ mod tests {
         // A per-customer threshold field on the parent (base) table.
         s.add_field(
             customers,
-            &NewField { name: "MinTotal".into(), kind: FieldKind::Number },
+            &NewField {
+                name: "MinTotal".into(),
+                kind: FieldKind::Number,
+            },
         )
         .unwrap();
         let (ada, _) = a_customer(&s, customers, "Ada");
@@ -1217,7 +1346,10 @@ mod tests {
         s.set_relationship_referential(rel, true, true).unwrap();
         s.add_field(
             invoices,
-            &NewField { name: "Status".into(), kind: FieldKind::Text },
+            &NewField {
+                name: "Status".into(),
+                kind: FieldKind::Text,
+            },
         )
         .unwrap();
         let (ada, _) = a_customer(&s, customers, "Ada");

@@ -404,16 +404,16 @@ pub(crate) struct ObjectView {
     /// empty so the flat design-model fixture stays byte-identical (#44).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) portal_columns: Vec<String>,
-    /// Portal (#168): the repeating-row template height in px — the tallest authored
-    /// column field object's `h`, i.e. the row slot the designer sized by dragging
-    /// the column height. The renderer sizes every value row to
-    /// this, so the portal box (a fixed-height viewport) shows `floor(body height /
-    /// row height)` rows and scrolls the rest — the visible-row count is geometry-
-    /// driven (box height + row height), never a numeric setting. `0` for a non-portal
-    /// object, an unresolved portal frame, and a resolved portal with no columns yet;
-    /// skipped from JSON then so those stay byte-identical (#44).
+    /// Portal (#184): the reusable first-row height in px. This is the portal
+    /// object's authored `h` itself — direct canvas resizing edits one row, never
+    /// the whole repeated preview. `0` for non-portals.
     #[serde(skip_serializing_if = "is_zero")]
     pub(crate) portal_row_height: i64,
+    /// Portal (#184): positive number of repeated rows visible in the Layout
+    /// preview and Browse viewport. Persisted as `props.rowCount`; defaults to five
+    /// for a legacy/programmatic portal without the key. `0` for non-portals.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub(crate) portal_row_count: i64,
     /// Portal (#170): the terminal-table field id each AUTHORED column binds to,
     /// parallel to [`Self::portal_columns`]. A resolved portal in an editable view
     /// renders each cell as an `f<field_id>` input off these ids so a per-row commit
@@ -853,11 +853,6 @@ struct PortalResolved {
     /// in Layout — the default `.fm-field` border/fill comes from CSS, these carry
     /// the per-object overrides on top. Empty string for an unstyled column.
     column_styles: Vec<String>,
-    /// #168: the repeating-row template height — the tallest authored column field
-    /// object's `h`. Sizes the header + each value row so the fixed-height portal
-    /// box shows a geometry-driven number of rows and scrolls the rest. `0` when the
-    /// portal has no authored columns yet (nothing to size a row from).
-    row_height: i64,
     rows: Vec<PortalRowView>,
     /// #171: the route is create-determined AND the anchor relationship's
     /// `allow_create` is on — the trailing blank create row may render.
@@ -911,10 +906,6 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
     let mut column_lefts: Vec<i64> = Vec::new();
     let mut column_widths: Vec<i64> = Vec::new();
     let mut column_styles: Vec<String> = Vec::new();
-    // The row-template height is the tallest authored column's `h` — the row slot
-    // the designer sized. It drives both the header and each value row so the
-    // fixed-height portal box shows `floor(body / row)` rows and scrolls the rest.
-    let mut row_height: i64 = 0;
     for child in &children {
         if !child.kind.is_field() {
             continue;
@@ -968,7 +959,6 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
             object_style(child.kind, child.props.as_deref()),
             text_style(child.kind, child.props.as_deref()),
         ));
-        row_height = row_height.max(child.h);
     }
     // The anchoring relationship (the route's first hop) carries the referential
     // flags (#110) that gate both the create-new and the delete/unlink affordances.
@@ -1048,7 +1038,6 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         column_lefts,
         column_widths,
         column_styles,
-        row_height,
         rows,
         can_create,
         create_url,
@@ -1132,6 +1121,41 @@ fn apply_portal_sort(props: Option<&str>, fields: &[FieldMeta], records: &mut [R
     });
 }
 
+/// #184: the explicit number of repeated portal rows. The editor persists this
+/// as `props.rowCount`; five matches the pre-#184 default portal footprint
+/// (120px viewport / 24px row). Malformed, fractional, zero, and negative values
+/// fail safely to that default. A generous ceiling prevents hostile metadata from
+/// producing an unbounded CSS viewport while preserving practical layouts.
+pub(crate) fn portal_row_count(props: Option<&str>) -> i64 {
+    parse_props(props)
+        .and_then(|v| v.get("rowCount").and_then(serde_json::Value::as_i64))
+        .filter(|&n| n > 0)
+        .unwrap_or(5)
+        .min(1_000)
+}
+
+/// Canonicalize a portal props payload at the write boundary so every API-created
+/// or inspector-edited portal persists an explicit, valid row count. Other props
+/// keys survive untouched. Direct engine callers still receive the read-time
+/// fallback above, which keeps the lower-level API backwards compatible.
+pub(crate) fn normalized_portal_props(props: Option<serde_json::Value>) -> serde_json::Value {
+    let mut props = match props {
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+        _ => serde_json::json!({}),
+    };
+    let count = props
+        .get("rowCount")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|&n| n > 0)
+        .unwrap_or(5)
+        .min(1_000);
+    props
+        .as_object_mut()
+        .expect("portal props normalized to an object")
+        .insert("rowCount".into(), serde_json::Value::from(count));
+    props
+}
+
 /// Project a prepared object against one record's `by_name` map — the
 /// record-dependent half of [`object_view`]. `portal` supplies the anchor a
 /// portal object resolves its related rows against (#169); `None` renders a
@@ -1142,6 +1166,11 @@ fn prepared_object_view(
     portal: Option<&PortalCtx>,
 ) -> ObjectView {
     let o = &p.meta;
+    let (portal_row_height, portal_row_count) = if o.kind.is_portal() {
+        (o.h, portal_row_count(o.props.as_deref()))
+    } else {
+        (0, 0)
+    };
     let portal_resolved = match (o.kind.is_portal(), portal) {
         (true, Some(ctx)) => resolve_portal(o, ctx),
         _ => PortalResolved::default(),
@@ -1154,7 +1183,6 @@ fn prepared_object_view(
         column_lefts: portal_column_lefts,
         column_widths: portal_column_widths,
         column_styles: portal_column_styles,
-        row_height: portal_row_height,
         rows: portal_rows,
         can_create: portal_can_create,
         create_url: portal_create_url,
@@ -1202,6 +1230,7 @@ fn prepared_object_view(
         portal_resolved,
         portal_columns,
         portal_row_height,
+        portal_row_count,
         portal_field_ids,
         portal_column_editable,
         portal_column_lefts,

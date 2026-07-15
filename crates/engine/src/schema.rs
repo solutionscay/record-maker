@@ -70,6 +70,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0015_object_parent",
         include_str!("migrations/0015_object_parent.sql"),
     ),
+    (
+        "0016_portal_row_count",
+        include_str!("migrations/0016_portal_row_count.sql"),
+    ),
 ];
 
 /// Schema version this build targets (the number of migrations defined).
@@ -130,5 +134,41 @@ mod tests {
 
         // re-running at the current version changes nothing
         assert_eq!(migrate(&mut conn).unwrap(), v);
+    }
+
+    #[test]
+    fn migration_0016_converts_portal_viewport_height_to_row_geometry() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for (_, sql) in &MIGRATIONS[..15] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 15).unwrap();
+
+        conn.execute_batch(
+            "INSERT INTO meta_table(id, name, phys_name) VALUES (1, 'Parent', 'parent');
+             INSERT INTO meta_layout(id, name, table_id, view) VALUES (1, 'Form', 1, 'form');
+             INSERT INTO meta_part(id, layout_id, kind, height, position)
+                 VALUES (1, 1, 'body', 400, 0);
+             INSERT INTO meta_object(id, part_id, kind, x, y, w, h, props)
+                 VALUES (1, 1, 'portal', 10, 10, 300, 120, '{\"fill\":\"#ffffff\"}');
+             INSERT INTO meta_object(id, part_id, kind, x, y, w, h, parent_object_id)
+                 VALUES (2, 1, 'field', 10, 10, 100, 24, 1);",
+        )
+        .unwrap();
+
+        assert_eq!(migrate(&mut conn).unwrap(), target_version());
+        let (height, props): (i64, String) = conn
+            .query_row("SELECT h, props FROM meta_object WHERE id=1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(height, 24, "portal h becomes the reusable row height");
+        let props: serde_json::Value = serde_json::from_str(&props).unwrap();
+        assert_eq!(
+            props["rowCount"], 5,
+            "legacy 120px viewport retains five 24px rows"
+        );
+        assert_eq!(props["fill"], "#ffffff", "existing portal props survive");
     }
 }

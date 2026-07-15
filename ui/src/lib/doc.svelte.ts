@@ -38,6 +38,7 @@ import type {
   RelatedRouteChoice,
 } from './model';
 import { llog } from './log';
+import { objectFootprintHeight, parseProps, portalRowCount } from './object-props';
 
 // ── document types ──────────────────────────────────────────────────────────
 
@@ -510,6 +511,9 @@ export class EditorDoc {
       label: r.label,
       value: r.value,
       shapeStyle: r.shapeStyle,
+      ...(o.kind === 'portal'
+        ? { portalRowHeight: o.h, portalRowCount: portalRowCount(parseProps(o.props)) }
+        : {}),
     };
   }
 
@@ -878,7 +882,7 @@ export class EditorDoc {
   minPartHeight(id: number): number {
     let min = 1;
     for (const o of this.#objects.values()) {
-      if (o.partId === id) min = Math.max(min, o.y + o.h);
+      if (o.partId === id) min = Math.max(min, o.y + objectFootprintHeight(o));
     }
     return min;
   }

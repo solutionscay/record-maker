@@ -1772,7 +1772,7 @@ mod tests {
                     x: 0,
                     y: 0,
                     w: 300,
-                    h: 120,
+                    h: 24,
                     binding: Some("sensors".into()),
                     content: None,
                     props: None,

@@ -11,7 +11,7 @@ import { createObject, deleteObject, setObjectReadOnly, setObjectsZ } from '../p
 import { deleteSelected as deleteSelectedAction, isDeleting } from '../actions';
 import { GRID, clampOrigin, snapToGrid } from '../canvas-edit';
 import { llog, lerror } from '../log';
-import { parseProps } from '../object-props';
+import { objectFootprintHeight, parseProps } from '../object-props';
 import type { CanvasContext } from './context';
 
 export class ClipboardController {
@@ -332,7 +332,7 @@ export class ClipboardController {
     for (const { c, partId, partH } of resolved) {
       const e = ext.get(partId) ?? { maxX: 0, maxY: 0, partH };
       e.maxX = Math.max(e.maxX, c.x + c.w);
-      e.maxY = Math.max(e.maxY, c.y + c.h);
+      e.maxY = Math.max(e.maxY, c.y + objectFootprintHeight(c));
       ext.set(partId, e);
     }
     const capToGrid = (max: number) =>

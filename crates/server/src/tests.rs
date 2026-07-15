@@ -53,6 +53,7 @@ fn field_obj(field_id: i64, value: &str, read_only: bool) -> ObjectView {
         portal_resolved: false,
         portal_columns: Vec::new(),
         portal_row_height: 0,
+        portal_row_count: 0,
         portal_field_ids: Vec::new(),
         portal_column_editable: Vec::new(),
         portal_column_lefts: Vec::new(),
@@ -160,10 +161,10 @@ fn portal_object_renders_related_rows_in_form_view() {
                 x: 10,
                 y: 10,
                 w: 300,
-                h: 120,
+                h: 24,
                 binding: Some("customer".into()),
                 content: None,
-                props: None,
+                props: Some(r#"{"rowCount":3}"#.into()),
                 parent_object_id: None,
             },
         )
@@ -222,6 +223,14 @@ fn portal_object_renders_related_rows_in_form_view() {
     // Columns are the AUTHORED child columns, in visual order.
     assert!(portal.portal_resolved, "portal resolved against Ada");
     assert_eq!(
+        portal.portal_row_height, 24,
+        "portal h is the reusable row height"
+    );
+    assert_eq!(
+        portal.portal_row_count, 3,
+        "rowCount is independent of row height"
+    );
+    assert_eq!(
         portal.portal_columns,
         vec!["Total".to_string(), "CustomerId".to_string()]
     );
@@ -266,6 +275,11 @@ fn portal_object_renders_related_rows_in_form_view() {
     assert!(
         !html.contains("fm-portal-head"),
         "Browse must not synthesize a portal header row"
+    );
+    assert!(
+        html.contains(r#"class="fm-obj fm-portal-obj"#)
+            && html.contains(r#"style="--fm-portal-row-h: 24px;--fm-portal-h: 72px"#),
+        "portal selects one 24px row while its Browse viewport spans three rows\n{html}"
     );
     assert!(
         html.contains(r#"class="fm-text">Total</span>"#)
@@ -428,7 +442,7 @@ async fn multi_hop_portal_round_trips_many_to_many_and_scopes_mutations() {
         &format!("/design/{}/object", form.id),
         &serde_json::json!({
             "partId": body.id, "kind": "portal", "x": 10, "y": 10,
-            "w": 320, "h": 120, "binding": "student_enrollment.enrollment_course"
+            "w": 320, "h": 24, "binding": "student_enrollment.enrollment_course"
         })
         .to_string(),
     )
@@ -705,7 +719,7 @@ async fn field_placed_into_portal_becomes_a_child_column() {
                 x: 10,
                 y: 10,
                 w: 300,
-                h: 120,
+                h: 24,
                 binding: Some("customer".into()),
                 content: None,
                 props: None,
@@ -770,6 +784,11 @@ async fn field_placed_into_portal_becomes_a_child_column() {
         .flat_map(|p| p["objects"].as_array().unwrap())
         .find(|o| o["id"] == portal_id)
         .unwrap();
+    assert_eq!(portal["portalRowHeight"], 24, "authored h is one row");
+    assert_eq!(
+        portal["portalRowCount"], 5,
+        "missing rowCount uses the default"
+    );
     assert!(
         portal.get("parentObjectId").is_none(),
         "portal is top-level"
@@ -851,7 +870,7 @@ async fn renaming_a_relationship_cascades_to_portal_bindings() {
                 x: 10,
                 y: 10,
                 w: 300,
-                h: 120,
+                h: 24,
                 binding: Some("customer".into()),
                 content: None,
                 props: None,
@@ -1009,7 +1028,7 @@ async fn portal_related_row_inline_edit_commits_child_record() {
                 x: 10,
                 y: 10,
                 w: 300,
-                h: 120,
+                h: 24,
                 binding: Some("customer".into()),
                 content: None,
                 props: None,
@@ -1159,7 +1178,7 @@ async fn portal_blank_row_creates_related_record_when_allowed() {
                 x: 10,
                 y: 10,
                 w: 300,
-                h: 120,
+                h: 24,
                 binding: Some("customer".into()),
                 content: None,
                 props: None,
@@ -1327,7 +1346,7 @@ async fn portal_row_deletes_related_record_when_allowed() {
                 x: 10,
                 y: 10,
                 w: 300,
-                h: 120,
+                h: 24,
                 binding: Some("customer".into()),
                 content: None,
                 props: None,
@@ -3488,7 +3507,7 @@ async fn design_portal_paste_carries_route_binding() {
     // Exactly what the canvas POSTs when pasting/duplicating a portal: kind=portal,
     // no createLabel, the route riding the `binding` slot.
     let body = format!(
-        r#"{{"partId":{part_id},"kind":"portal","x":40,"y":40,"w":300,"h":120,"binding":"customer"}}"#
+        r#"{{"partId":{part_id},"kind":"portal","x":40,"y":40,"w":300,"h":24,"binding":"customer"}}"#
     );
     let (status, resp) =
         post_json_body(state.clone(), &format!("/design/{layout_id}/object"), &body).await;
@@ -3501,11 +3520,50 @@ async fn design_portal_paste_carries_route_binding() {
         resp.contains(r#""binding":"customer""#),
         "route preserved on the clone\n{resp}"
     );
+    let created: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let portal_id = created[0]["id"].as_i64().unwrap();
+    let props: serde_json::Value =
+        serde_json::from_str(created[0]["props"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        props["rowCount"], 5,
+        "API-created portals persist the default count"
+    );
+
+    // The generic props endpoint canonicalizes portal rowCount at the server
+    // boundary; invalid metadata cannot persist a zero-height preview.
+    let (status, resp) = post_json_body(
+        state.clone(),
+        &format!("/design/{layout_id}/object/{portal_id}/props"),
+        r##"{"props":{"rowCount":0,"fill":"#ffffff"}}"##,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "normalize portal props\n{resp}");
+    let (status, model) =
+        get_body(state.clone(), &format!("/design/{layout_id}/model?rec=1")).await;
+    assert_eq!(status, StatusCode::OK);
+    let model: serde_json::Value = serde_json::from_str(&model).unwrap();
+    let portal = model["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|part| part["objects"].as_array().unwrap())
+        .find(|object| object["id"] == portal_id)
+        .unwrap();
+    assert_eq!(
+        portal["portalRowCount"], 5,
+        "invalid rowCount normalizes to default"
+    );
+    let props: serde_json::Value = serde_json::from_str(portal["props"].as_str().unwrap()).unwrap();
+    assert_eq!(props["rowCount"], 5);
+    assert_eq!(
+        props["fill"], "#ffffff",
+        "unrelated portal props survive normalization"
+    );
 
     // The regression itself: dropping the binding (the pre-fix client behavior)
     // is rejected — proving the route is load-bearing, not optional.
     let no_route =
-        format!(r#"{{"partId":{part_id},"kind":"portal","x":60,"y":60,"w":300,"h":120}}"#);
+        format!(r#"{{"partId":{part_id},"kind":"portal","x":60,"y":60,"w":300,"h":24}}"#);
     let (status, resp) = post_json_body(
         state.clone(),
         &format!("/design/{layout_id}/object"),
@@ -3608,12 +3666,13 @@ async fn design_portal_paste_reparents_columns_and_renders() {
     let (status, resp) = post_json_body(
         state.clone(),
         &format!("/design/{layout_id}/object"),
-        &format!(r#"{{"partId":{part_id},"kind":"portal","x":10,"y":10,"w":300,"h":120,"binding":"customer"}}"#),
+        &format!(r#"{{"partId":{part_id},"kind":"portal","x":10,"y":10,"w":300,"h":24,"binding":"customer","props":{{"rowCount":7}}}}"#),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "paste portal frame\n{resp}");
     let portal: serde_json::Value = serde_json::from_str(&resp).unwrap();
     let new_portal_id = portal[0]["id"].as_i64().unwrap();
+    assert_eq!(portal[0]["portalRowCount"], 7, "paste preserves rowCount props");
 
     // Phase 2: each column is re-created as a CHILD pointing at the NEW portal id
     // (value-only field copy, route-relative binding), exactly what the two-phase
@@ -4893,7 +4952,7 @@ async fn pending_related_validation_and_revert_never_create_terminal_or_link_row
                 x: 10,
                 y: 10,
                 w: 300,
-                h: 120,
+                h: 24,
                 binding: Some("customer".into()),
                 content: None,
                 props: None,

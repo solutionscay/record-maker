@@ -13,7 +13,8 @@
     setObjectReadOnly as persistReadOnly,
   } from '../persist';
   import { llog } from '../log';
-  import { reportPersistError } from './persist-ops';
+  import { MAX_PORTAL_ROW_COUNT, parseProps, portalRowCount } from '../object-props';
+  import { reportPersistError, writeObjectProps } from './persist-ops';
 
   let {
     doc,
@@ -145,6 +146,16 @@
       ? (doc.relatedRoutes.find((r) => r.path === selected.binding) ?? null)
       : null,
   );
+  let portalProps = $derived(parseProps(selected.props));
+  let portalRows = $derived(portalRowCount(portalProps));
+
+  async function setPortalRows(value: number): Promise<void> {
+    if (selected.kind !== 'portal') return;
+    const rowCount = Math.min(MAX_PORTAL_ROW_COUNT, Math.max(1, Math.round(value || 1)));
+    const next = { ...portalProps, rowCount };
+    llog('persist', 'inspector: set portal row count', { id: selected.id, rowCount });
+    await writeObjectProps(doc, layoutId, selected.id, next, 'set portal row count');
+  }
 
   async function setSelectedReadOnly(readOnly: boolean): Promise<void> {
     llog('persist', 'inspector: set read-only', { id: selected.id, readOnly });
@@ -199,6 +210,17 @@
         onchange={setSelectedRoute}
       />
     {/if}
+    <div class="insp-row">
+      <span>Rows</span>
+      <input
+        class="ctl-num"
+        type="number"
+        min="1"
+        max={MAX_PORTAL_ROW_COUNT}
+        value={portalRows}
+        onchange={(e) => setPortalRows(Number(e.currentTarget.value))}
+      />
+    </div>
   {:else}
     <input
       class="ctl-input"

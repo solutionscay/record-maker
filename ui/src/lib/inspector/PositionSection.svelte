@@ -1,7 +1,7 @@
 <script lang="ts">
-  // Single-object edge controls (#188). Values are part-relative grid pixels:
-  // Left=x, Right=x+w, Top=y, Bottom=y+h. Moving one edge preserves its opposite
-  // edge, and valid drafts update the canvas immediately like SizeSection.
+  // Single-object edge controls (#188/#189). Values are part-relative grid pixels:
+  // Left=x, Right=x+w, Top=y, Bottom=y+h. Every control moves the whole object
+  // without resizing it, and valid drafts update the canvas like SizeSection.
   import type { EditorDoc, ObjectDoc } from '../doc.svelte';
   import { applyLiveObjectGeometry, commitObjectGeometry } from './geometry-commit';
   import { edgeValue, geometryForEdge, type ObjectEdge } from './position';
@@ -44,7 +44,7 @@
     if (!current) return;
     const value = pixels(input.value);
     if (value === null || !applyLive(edge, value)) {
-      // Empty, invalid, or crossed-edge drafts never poison geometry.
+      // Empty, invalid, or before-origin drafts never poison geometry.
       input.value = String(edgeValue(current, edge));
     }
     commitObjectGeometry(doc, layoutId, current.id, 'position', edge);

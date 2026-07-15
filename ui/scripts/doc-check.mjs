@@ -403,7 +403,7 @@ try {
 
   // 13. Shared object props and line geometry helpers (#92).
   {
-    const { parseProps, normalizeAngle, lineLength, lineGeometryForAngle, lineAngle } =
+    const { parseProps, normalizeAngle, lineLength, linePropsForBox, lineGeometryForAngle, lineAngle } =
       await vite.ssrLoadModule('/src/lib/object-props.ts');
 
     eq('parseProps: valid object parses', parseProps('{"fill":"#fff","strokeWidth":2}'), {
@@ -418,6 +418,15 @@ try {
     ok('angle: normalization wraps and rounds', normalizeAngle(-45) === 315 && normalizeAngle(720.126) === 0.13);
     ok('line: angle from endpoints normalizes', lineAngle(0, 0, 0, -10) === 270);
     ok('line: explicit length prop wins', lineLength({ w: 3, h: 4 }, { length: 12 }) === 12);
+    eq('line: resized box derives visible angle and length', linePropsForBox({ w: 30, h: 40 }, { stroke: '#123456' }), {
+      stroke: '#123456',
+      angle: 53.13,
+      length: 50,
+    });
+    eq('line: thin horizontal box stays horizontal', linePropsForBox({ w: 80, h: 1 }, { angle: 0 }), {
+      angle: 0,
+      length: 80,
+    });
     eq('line: geometry rotates around center', lineGeometryForAngle({ x: 10, y: 20, w: 30, h: 10 }, 90, 40), {
       x: 25,
       y: 5,

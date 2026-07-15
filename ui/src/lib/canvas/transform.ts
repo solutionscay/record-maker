@@ -23,7 +23,7 @@ import {
   setObjectsGeometry,
 } from '../persist';
 import { llog, lerror } from '../log';
-import { lineAngle, lineGeometryForAngle, lineLength, lineShapeStyle, normalizeAngle, numberProp, parseProps } from '../object-props';
+import { lineGeometryForAngle, lineLength, linePropsForBox, lineShapeStyle, normalizeAngle, numberProp, parseProps } from '../object-props';
 import type { CanvasContext } from './context';
 
 type PendingObjectClick = { id: number; clientX: number; clientY: number };
@@ -737,20 +737,7 @@ export class TransformController {
   #syncLineToBox(id: number): void {
     const o = this.#ctx.doc.getObject(id);
     if (!o || o.kind !== 'line') return;
-    const props = parseProps(o.props);
-    const currentAngle = numberProp(props.angle, 0);
-    const radians = (currentAngle * Math.PI) / 180;
-    const horizontalish = currentAngle <= 5 || currentAngle >= 355 || Math.abs(currentAngle - 180) <= 5;
-    const verticalish = Math.abs(currentAngle - 90) <= 5 || Math.abs(currentAngle - 270) <= 5;
-    const w = Math.max(1, o.w);
-    const h = horizontalish && o.h <= 2 ? 0 : Math.max(1, o.h);
-    const dx = (Math.cos(radians) < 0 ? -1 : 1) * (verticalish && o.w <= 2 ? 0 : w);
-    const dy = (Math.sin(radians) < 0 ? -1 : 1) * h;
-    const next = {
-      ...props,
-      angle: lineAngle(0, 0, dx, dy),
-      length: Math.max(1, Math.hypot(dx, dy)),
-    };
+    const next = linePropsForBox(o, parseProps(o.props));
     this.#ctx.doc.setObjectProps(id, JSON.stringify(next));
     this.#setLineShapeStyle(id, next);
     this.#dirtyLineProps.add(id);

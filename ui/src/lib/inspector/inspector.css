@@ -63,6 +63,13 @@
   align-items: center;
   gap: 10px;
 }
+.insp-pixel-ctl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--rm-text-dim);
+  font-size: 11px;
+}
 .insp-empty {
   margin: 0;
   font-size: 12px;

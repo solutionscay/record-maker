@@ -48,6 +48,25 @@ export function lineLength(box: Pick<LineBox, 'w' | 'h'>, props: Record<string, 
   return Math.max(1, numberProp(props.length, Math.hypot(box.w, box.h) || box.w || 1));
 }
 
+/** Resolve a line's authored angle/length from its resized bounding box. Canvas
+ * handles and Inspector pixel inputs both use this path so the visible stroke
+ * stays synchronized with w/h instead of only resizing its outer hit box. */
+export function linePropsForBox(box: Pick<LineBox, 'w' | 'h'>, props: Record<string, unknown>): Record<string, unknown> {
+  const currentAngle = numberProp(props.angle, 0);
+  const radians = (currentAngle * Math.PI) / 180;
+  const horizontalish = currentAngle <= 5 || currentAngle >= 355 || Math.abs(currentAngle - 180) <= 5;
+  const verticalish = Math.abs(currentAngle - 90) <= 5 || Math.abs(currentAngle - 270) <= 5;
+  const w = Math.max(1, box.w);
+  const h = horizontalish && box.h <= 2 ? 0 : Math.max(1, box.h);
+  const dx = (Math.cos(radians) < 0 ? -1 : 1) * (verticalish && box.w <= 2 ? 0 : w);
+  const dy = (Math.sin(radians) < 0 ? -1 : 1) * h;
+  return {
+    ...props,
+    angle: lineAngle(0, 0, dx, dy),
+    length: Math.max(1, Math.hypot(dx, dy)),
+  };
+}
+
 export function lineGeometryForAngle(box: LineBox, angle: number, length: number): LineBox {
   const radians = (angle * Math.PI) / 180;
   const w = Math.max(1, Math.round(Math.abs(Math.cos(radians)) * length));

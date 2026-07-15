@@ -21,7 +21,16 @@
   }
 
   function objStyle(o: ObjectView): string {
-    return `left:${o.x}px; top:${o.y}px; width:${o.w}px; height:${o.h}px; z-index:${o.z};${o.objectStyle}`;
+    // #185: a portal's outer box is only the selectable first-row geometry.
+    // Its fill/border/radius belong on the full-height inner viewport instead.
+    return `left:${o.x}px; top:${o.y}px; width:${o.w}px; height:${o.h}px; z-index:${o.z};${o.kind === 'portal' ? '' : o.objectStyle}`;
+  }
+
+  function portalStyle(o: ObjectView): string | null {
+    const geometry = (o.portalRowHeight ?? 0) > 0 && (o.portalRowCount ?? 0) > 0
+      ? `--fm-portal-row-h: ${o.portalRowHeight}px;--fm-portal-h: ${(o.portalRowHeight ?? 0) * (o.portalRowCount ?? 0)}px;`
+      : '';
+    return `${geometry}${o.objectStyle}` || null;
   }
 
   function fieldText(o: ObjectView): string {
@@ -48,9 +57,7 @@
              columns still renders cleanly. -->
         <div
           class={`fm-portal${!o.portalResolved ? ' fm-portal-preview' : ''}`}
-          style={(o.portalRowHeight ?? 0) > 0 && (o.portalRowCount ?? 0) > 0
-            ? `--fm-portal-row-h: ${o.portalRowHeight}px;--fm-portal-h: ${(o.portalRowHeight ?? 0) * (o.portalRowCount ?? 0)}px`
-            : null}
+          style={portalStyle(o)}
           data-route={o.binding}
         >
           {#if !o.portalResolved}

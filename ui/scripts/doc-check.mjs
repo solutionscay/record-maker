@@ -293,8 +293,10 @@ try {
     const portal = {
       id: 184, kind: 'portal', field: false, shape: false, fieldId: null,
       x: 8, y: 8, w: 280, h: 24, z: 0, readOnly: false,
-      binding: 'orders', content: '', props: '{"rowCount":4}',
-      objectStyle: '', textStyle: '', label: '', value: '', shapeStyle: '',
+      binding: 'orders', content: '',
+      props: '{"rowCount":4,"fill":"#abc123","stroke":"#123abc","strokeWidth":2}',
+      objectStyle: 'background:#abc123;box-shadow:0 0 0 2px #123abc;',
+      textStyle: '', label: '', value: '', shapeStyle: '',
       portalRowHeight: 24, portalRowCount: 4,
     };
     model.parts[1].objects.push(portal);
@@ -330,6 +332,11 @@ try {
       body.includes('fm-obj fm-portal-obj') &&
       body.includes('fm-portal fm-portal-preview') &&
       body.includes('--fm-portal-row-h: 24px;--fm-portal-h: 96px'));
+    ok('portal style: fill and border paint on the full preview',
+      body.includes('--fm-portal-h: 96px;background:#abc123;box-shadow:0 0 0 2px #123abc;'));
+    ok('portal style: one-row selection wrapper carries geometry only',
+      body.includes('left:8px; top:8px; width:280px; height:24px; z-index:0;') &&
+      !body.includes('z-index:0;background:#abc123'));
   }
 
   // 10. Full loop: store.renderModel → <LayoutPreview> SSR === committed golden.

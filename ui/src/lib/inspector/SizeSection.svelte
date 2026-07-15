@@ -5,10 +5,7 @@
   // A change commit seals the live edits as one undo step and persists the full
   // geometry snapshot.
   import type { EditorDoc, ObjectDoc } from '../doc.svelte';
-  import { llog } from '../log';
-  import { linePropsForBox, lineShapeStyle, parseProps } from '../object-props';
-  import { setObjectGeometry as persistGeometry } from '../persist';
-  import { persistObjectPropsAndRefresh, reportPersistError } from './persist-ops';
+  import { applyLiveObjectGeometry, commitObjectGeometry } from './geometry-commit';
 
   let {
     doc,
@@ -18,39 +15,17 @@
 
   type Dimension = 'w' | 'h';
 
-  // Serialize commits from rapid Width -> Height edits so an older request can
-  // never arrive last and overwrite the newer full-geometry snapshot.
-  let persistQueue = Promise.resolve();
-
   function pixels(raw: string): number | null {
     if (raw.trim() === '') return null;
     const value = Number(raw);
     return Number.isFinite(value) && value > 0 ? Math.max(1, Math.round(value)) : null;
   }
 
-  /** Apply valid input immediately. Lines also derive their visible stroke from
-   * the new box, mirroring the canvas handle-resize path. */
+  /** Apply valid input immediately through the shared geometry path. */
   function applyLive(dimension: Dimension, value: number): void {
     const current = doc.getObject(selected.id);
     if (!current) return;
-    doc.setObjectGeometry(current.id, { [dimension]: value });
-
-    const resized = doc.getObject(current.id);
-    if (!resized || resized.kind !== 'line') return;
-    const nextProps = linePropsForBox(resized, parseProps(resized.props));
-    doc.setObjectProps(resized.id, JSON.stringify(nextProps));
-
-    // Shape styles are ordinarily server-derived. During live input, derive the
-    // same line-only CSS locally (as handle resizing does), then refresh from the
-    // authoritative server response after commit.
-    const resolved = doc.getResolved(resized.id);
-    if (resolved) {
-      doc.setObjectStyles(resized.id, {
-        objectStyle: resolved.objectStyle,
-        textStyle: resolved.textStyle,
-        shapeStyle: lineShapeStyle(nextProps),
-      });
-    }
+    applyLiveObjectGeometry(doc, current.id, { [dimension]: value });
   }
 
   function inputDimension(dimension: Dimension, input: HTMLInputElement): void {
@@ -69,23 +44,7 @@
       applyLive(dimension, value);
     }
 
-    const committed = doc.getObject(current.id);
-    if (!committed) return;
-    const geometry = { x: committed.x, y: committed.y, w: committed.w, h: committed.h };
-    const lineProps = committed.kind === 'line' ? parseProps(committed.props) : null;
-    doc.mark();
-    llog('persist', 'inspector: set object size', { id: committed.id, dimension, value: geometry[dimension] });
-
-    persistQueue = persistQueue.then(async () => {
-      try {
-        await persistGeometry(layoutId, committed.id, geometry);
-        if (lineProps) {
-          await persistObjectPropsAndRefresh(doc, layoutId, committed.id, lineProps, 'set line size');
-        }
-      } catch (e) {
-        reportPersistError(doc, 'set object size', e);
-      }
-    });
+    commitObjectGeometry(doc, layoutId, current.id, 'size', dimension);
   }
 
   function finishOnEnter(event: KeyboardEvent): void {

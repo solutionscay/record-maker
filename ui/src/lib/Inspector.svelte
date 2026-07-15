@@ -14,6 +14,7 @@
   import StyleSection from './inspector/StyleSection.svelte';
   import TextSection from './inspector/TextSection.svelte';
   import ObjectSection from './inspector/ObjectSection.svelte';
+  import PositionSection from './inspector/PositionSection.svelte';
   import SizeSection from './inspector/SizeSection.svelte';
   import FormatSection from './inspector/FormatSection.svelte';
   import PartSection from './inspector/PartSection.svelte';
@@ -148,6 +149,8 @@
     {/if}
   {:else if selected}
     <ArrangeSection {doc} {layoutId} bind:busy />
+    <div class="insp-div"></div>
+    <PositionSection {doc} {layoutId} {selected} />
     <div class="insp-div"></div>
     <SizeSection {doc} {layoutId} {selected} />
     <div class="insp-div"></div>

@@ -10,7 +10,9 @@
  *  (for fieldId, which no store getter exposes). fieldId is non-null ONLY when
  *  kind === 'field'. props is the raw JSON STRING as it sits on ObjectDoc/View. */
 export interface ClipboardObject {
-  kind: string;            // 'field' | 'text' | 'rect' | 'line' | 'ellipse'
+  id: number;              // source object id — lets a copied portal's columns name their parent for re-parenting on paste
+  kind: string;            // 'field' | 'text' | 'rect' | 'line' | 'ellipse' | 'portal'
+  parentObjectId: number | null; // owning portal at copy time; remapped to the NEW portal id on paste (#168/#169)
   partId: number;          // source band (object→part membership lives on the object)
   x: number;               // part-relative geometry at copy time
   y: number;

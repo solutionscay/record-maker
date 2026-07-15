@@ -401,6 +401,16 @@ export class EditorDoc {
     return this.#objects.get(id);
   }
 
+  /** The ids of every object OWNED by `parentId` — a portal's authored columns
+   * and their caption labels (`parentObjectId === parentId`, #168/#169). Copy and
+   * duplicate use it to pull a portal's whole column set along with the frame so
+   * the clone re-creates them under the new portal. */
+  childObjectIds(parentId: number): number[] {
+    const ids: number[] = [];
+    for (const o of this.#objects.values()) if (o.parentObjectId === parentId) ids.push(o.id);
+    return ids;
+  }
+
   /** The server-resolved render projection for one object (session scope):
    * the resolved `fieldId`, label/value, derived styles. This is what the
    * inspector reads for field identity — the binding string is never re-parsed

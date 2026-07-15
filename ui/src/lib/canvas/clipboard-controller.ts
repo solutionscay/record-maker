@@ -25,16 +25,28 @@ export class ClipboardController {
    *  structural fields from getObject (ObjectDoc) and fieldId from the render
    *  model's ObjectView projection. No store mutation, no persist, not undoable. */
   copySelection(): boolean {
-    const ids = [...this.#ctx.doc.selection];
-    if (ids.length === 0) return false;
+    const seed = [...this.#ctx.doc.selection];
+    if (seed.length === 0) return false;
+
+    // Pull a copied portal's authored columns + their caption labels (its owned
+    // children, #168/#169) along with the frame, so paste re-creates them under
+    // the new portal. A child selected on its own is copied as-is.
+    const ids = new Set<number>(seed);
+    for (const id of seed) {
+      if (this.#ctx.doc.getObject(id)?.kind === 'portal') {
+        for (const c of this.#ctx.doc.childObjectIds(id)) ids.add(c);
+      }
+    }
 
     const objects: ClipboardObject[] = [];
     for (const id of ids) {
-      const d = this.#ctx.doc.getObject(id); // ObjectDoc: kind/partId/x/y/w/h/z/readOnly/binding/content/props
+      const d = this.#ctx.doc.getObject(id); // ObjectDoc: id/kind/parentObjectId/partId/x/y/w/h/z/readOnly/binding/content/props
       if (!d) continue;
       const v = this.#ctx.objectView(id); // ObjectView: fieldId
       objects.push({
+        id: d.id,
         kind: d.kind,
+        parentObjectId: d.parentObjectId,
         partId: d.partId,
         x: d.x,
         y: d.y,
@@ -90,6 +102,13 @@ export class ClipboardController {
   async duplicateSelected(): Promise<void> {
     const ids = new Set(this.#ctx.doc.selection);
     if (ids.size === 0 || this.#ctx.placing) return;
+    // A duplicated portal brings its authored columns + caption labels (its owned
+    // children, #168/#169) so the copy is a complete, working portal.
+    for (const id of [...ids]) {
+      if (this.#ctx.doc.getObject(id)?.kind === 'portal') {
+        for (const c of this.#ctx.doc.childObjectIds(id)) ids.add(c);
+      }
+    }
     // ObjectView (unlike the store's own ObjectDoc) carries the resolved fieldId
     // a clone needs, but not which part it's in — that's implicit in which
     // PartView it's nested under in renderModel, so pair the two here.
@@ -98,7 +117,9 @@ export class ClipboardController {
       for (const view of part.objects) {
         if (!ids.has(view.id)) continue;
         clips.push({
+          id: view.id,
           kind: view.kind,
+          parentObjectId: view.parentObjectId ?? null,
           partId: part.id,
           x: view.x,
           y: view.y,
@@ -159,11 +180,13 @@ export class ClipboardController {
     });
     const offset = this.#cloneOffsets(resolved, model.width, policy.offset);
 
-    // Build one create request per clip, offset by its part's shared (dx,dy).
-    const plans = resolved.map(({ c, partId }) => {
+    // One create request per clip, offset by its part's shared (dx,dy). The
+    // parent link is resolved separately per phase: a portal (or any top-level
+    // object) sends `null`; a child column/label sends its NEW parent id.
+    const buildReq = (c: ClipboardObject, partId: number, parentObjectId: number | null): NewObjectRequest => {
       const { dx, dy } = offset.get(partId) ?? { dx: 0, dy: 0 };
       const caps = doc.capsFor(c.kind);
-      const req: NewObjectRequest = {
+      return {
         partId,
         kind: c.kind,
         x: clampOrigin(snapToGrid(c.x + dx)),
@@ -185,31 +208,65 @@ export class ClipboardController {
         createLabel: caps.bindable ? false : undefined, // NEVER auto-spawn a caption
         content: caps.contentSlot ? c.content : null,
         props: c.props ? parseProps(c.props) : null, // string → object for the wire
+        parentObjectId,
       };
-      return { req, partId, clip: c };
-    });
+    };
+
+    // Partition into parents and their owned children (#168/#169). A child whose
+    // parent is ALSO being cloned re-parents onto the new parent; an orphan child
+    // (parent not in this run) is created top-level, exactly as before. Parents
+    // must be created FIRST so their fresh ids exist to point the children at.
+    const clonedIds = new Set(resolved.map((r) => r.c.id));
+    const isChild = (c: ClipboardObject) => c.parentObjectId !== null && clonedIds.has(c.parentObjectId);
+    const parentRes = resolved.filter((r) => !isChild(r.c));
+    const childRes = resolved.filter((r) => isChild(r.c));
 
     const created: { view: ObjectView; partId: number; clip: ClipboardObject }[] = [];
     const landedIds: number[] = []; // every server row created this run — for rollback
     let committed = false; // true once addObject + mark() fold the clones into store/undo
-    try {
-      // 1. Persist all (fresh ids). allSettled so a partial failure rolls back cleanly.
-      const results = await Promise.allSettled(plans.map((p) => createObject(this.#ctx.layoutId, p.req)));
-      for (const r of results) if (r.status === 'fulfilled') for (const v of r.value) landedIds.push(v.id);
-
-      // 2. Any create failed → nothing enters the store/undo; the catch deletes
-      //    whatever DID land so the server never keeps phantom rows.
+    // Reject if any create in a phase failed; the catch rolls back landed rows.
+    const throwIfAnyRejected = (results: PromiseSettledResult<ObjectView[]>[]) => {
       if (results.some((r) => r.status === 'rejected')) {
         const firstRej = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
         throw firstRej?.reason ?? new Error(`${policy.label} failed`);
       }
-
-      // 3. All succeeded. Collect views (each field is length-1: createLabel:false).
-      results.forEach((r, i) => {
-        for (const v of (r as PromiseFulfilledResult<ObjectView[]>).value) {
-          created.push({ view: v, partId: plans[i].partId, clip: plans[i].clip });
-        }
+    };
+    try {
+      // 1. Phase 1 — persist every PARENT (fresh ids). allSettled so a partial
+      //    failure rolls back cleanly. Map each source id → its new id so the
+      //    children can point at the clone rather than the original portal.
+      const parentPlans = parentRes.map(({ c, partId }) => ({ partId, clip: c, req: buildReq(c, partId, null) }));
+      const parentResults = await Promise.allSettled(parentPlans.map((p) => createObject(this.#ctx.layoutId, p.req)));
+      for (const r of parentResults) if (r.status === 'fulfilled') for (const v of r.value) landedIds.push(v.id);
+      throwIfAnyRejected(parentResults);
+      const srcToNew = new Map<number, number>(); // source object id → new clone id
+      parentResults.forEach((r, i) => {
+        const views = (r as PromiseFulfilledResult<ObjectView[]>).value;
+        for (const v of views) created.push({ view: v, partId: parentPlans[i].partId, clip: parentPlans[i].clip });
+        if (views[0]) srcToNew.set(parentPlans[i].clip.id, views[0].id);
       });
+
+      // 2. Phase 2 — persist the CHILDREN, each re-parented onto its new portal.
+      if (childRes.length) {
+        const childPlans = childRes.map(({ c, partId }) => ({
+          partId,
+          clip: c,
+          req: buildReq(c, partId, srcToNew.get(c.parentObjectId as number) ?? null),
+        }));
+        const childResults = await Promise.allSettled(childPlans.map((p) => createObject(this.#ctx.layoutId, p.req)));
+        for (const r of childResults) if (r.status === 'fulfilled') for (const v of r.value) landedIds.push(v.id);
+        throwIfAnyRejected(childResults);
+        childResults.forEach((r, i) => {
+          for (const v of (r as PromiseFulfilledResult<ObjectView[]>).value) {
+            created.push({ view: v, partId: childPlans[i].partId, clip: childPlans[i].clip });
+          }
+        });
+      }
+
+      // 3. Restore ascending source-z order across BOTH phases so the restack pass
+      //    and the store insert preserve the group's internal stacking (a portal's
+      //    columns/labels stack above its frame).
+      created.sort((a, b) => a.clip.z - b.clip.z || a.clip.id - b.clip.id);
 
       // 4. Paste-only z / readOnly fidelity: place the cloned group ON TOP of each
       //    target part in preserved relative order, and restore readOnly. Persist

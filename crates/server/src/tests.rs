@@ -3072,6 +3072,110 @@ async fn design_portal_paste_carries_route_binding() {
     );
 }
 
+/// Duplicating/pasting a portal must bring its authored columns along, re-parented
+/// onto the NEW portal (#168/#169). The canvas clone flow is two-phase: create the
+/// portal, then create each column as a CHILD pointing at the fresh portal id. This
+/// locks that server-side sequence end to end — the re-parent sticks and the pasted
+/// portal actually resolves its column values in Browse.
+#[tokio::test]
+async fn design_portal_paste_reparents_columns_and_renders() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    let customers = sol
+        .create_table("Customers", &[NewField { name: "Name".into(), kind: FieldKind::Text }])
+        .unwrap();
+    let invoices = sol
+        .create_table(
+            "Invoices",
+            &[
+                NewField { name: "Total".into(), kind: FieldKind::Number },
+                NewField { name: "CustomerId".into(), kind: FieldKind::Text },
+            ],
+        )
+        .unwrap();
+    let cust_pk = sol
+        .all_fields(customers)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name.eq_ignore_ascii_case("id"))
+        .map(|f| f.id)
+        .unwrap();
+    let fk = sol
+        .all_fields(invoices)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name == "CustomerId")
+        .unwrap()
+        .id;
+    let rel_id = sol
+        .create_relationship(&NewRelationship {
+            name: "customer".into(),
+            from_table: invoices,
+            to_table: customers,
+            from_field: fk,
+            to_field: cust_pk,
+        })
+        .unwrap()
+        .unwrap();
+    // Ada with one invoice (Total 42) so the pasted portal has a row to render.
+    let cust_tbl = sol.table_by_id(customers).unwrap().unwrap();
+    let name = sol.field_by_id(customers, field_named(&sol, customers, "Name")).unwrap().unwrap();
+    let ada = sol.insert_record(&cust_tbl, &[(&name, "Ada".into())]).unwrap();
+    let route = sol.resolve_path(customers, "customer").unwrap();
+    let total = sol.field_by_id(invoices, field_named(&sol, invoices, "Total")).unwrap().unwrap();
+    sol.set_relationship_referential(rel_id.id, true, true).unwrap();
+    sol.create_related_record(&route, ada, &[(&total, "42".into())], None).unwrap();
+
+    let form = sol
+        .layouts_for_table(customers)
+        .unwrap()
+        .into_iter()
+        .find(|l| l.view == "form")
+        .unwrap();
+    let layout_id = form.id;
+    let part_id = body_part(&sol, layout_id).id;
+    let state = state_for(sol);
+
+    // Phase 1: the clone flow POSTs the portal frame with its route.
+    let (status, resp) = post_json_body(
+        state.clone(),
+        &format!("/design/{layout_id}/object"),
+        &format!(r#"{{"partId":{part_id},"kind":"portal","x":10,"y":10,"w":300,"h":120,"binding":"customer"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "paste portal frame\n{resp}");
+    let portal: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let new_portal_id = portal[0]["id"].as_i64().unwrap();
+
+    // Phase 2: each column is re-created as a CHILD pointing at the NEW portal id
+    // (value-only field copy, route-relative binding), exactly what the two-phase
+    // clone flow sends after mapping the source portal id to its clone.
+    let (status, resp) = post_json_body(
+        state.clone(),
+        &format!("/design/{layout_id}/object"),
+        &format!(
+            r#"{{"partId":{part_id},"kind":"field","x":20,"y":20,"w":100,"h":24,"createLabel":false,"binding":"customer.Total","parentObjectId":{new_portal_id},"rec":{ada}}}"#
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "paste re-parented column\n{resp}");
+    let column: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(
+        column[0]["parentObjectId"].as_i64(),
+        Some(new_portal_id),
+        "the column is owned by the NEW portal, not orphaned top-level\n{resp}"
+    );
+
+    // End to end: the pasted portal resolves its route against Ada and renders the
+    // re-parented column's related value.
+    let (status, html) =
+        get_body(state, &format!("/browse/{layout_id}?view=form&rec={ada}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.contains("fm-portal-cell") && html.contains(r#"value="42""#),
+        "pasted portal renders its re-parented column value\n{html}"
+    );
+}
+
 #[tokio::test]
 async fn design_selected_object_inspector_updates_field_text_and_read_only() {
     let mut sol = Solution::open_in_memory().unwrap();

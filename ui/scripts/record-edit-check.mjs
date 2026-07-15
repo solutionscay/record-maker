@@ -95,6 +95,15 @@ async function run() {
     notes: '',
     fields: [{ name: 'Name', kind: 'text' }]
   });
+  const portalRows = await postJson('/schema/tables', {
+    name: 'Browser Portal Rows',
+    notes: '',
+    fields: [
+      { name: 'Required Code', kind: 'text' },
+      { name: 'Note', kind: 'text' },
+      { name: 'Parent Id', kind: 'text' }
+    ]
+  });
   const fields = await request(`/schema/tables/${invoices.id}/fields`);
   const number = fields.find((field) => field.name === 'Number');
   const note = fields.find((field) => field.name === 'Note');
@@ -103,6 +112,27 @@ async function run() {
     kind: 'text',
     options: { validation: { required: true, unique: true } }
   });
+  const portalFields = await request(`/schema/tables/${portalRows.id}/fields`);
+  const requiredCode = portalFields.find((field) => field.name === 'Required Code');
+  const portalNote = portalFields.find((field) => field.name === 'Note');
+  const parentId = portalFields.find((field) => field.name === 'Parent Id');
+  const baseId = fields.find((field) => field.options?.system);
+  await postJson(`/schema/tables/${portalRows.id}/fields/${requiredCode.id}`, {
+    name: 'Required Code',
+    kind: 'text',
+    options: { validation: { required: true } }
+  });
+  const relationship = await postJson('/schema/relationships', {
+    name: 'browser_parent',
+    fromTable: portalRows.id,
+    toTable: invoices.id,
+    fromField: parentId.id,
+    toField: baseId.id
+  });
+  await postJson(`/schema/relationships/${relationship.id}/referential`, {
+    allowCreate: true,
+    allowDelete: false
+  });
   const layouts = await request('/layouts/all');
   const layout = (tableId, view) => layouts.find(
     (candidate) => candidate.tableId === tableId && candidate.view === view
@@ -110,6 +140,40 @@ async function run() {
   const formLayout = layout(invoices.id, 'form');
   const listLayout = layout(invoices.id, 'list');
   const otherLayout = layout(second.id, 'form');
+  const designModel = await request(`/design/${formLayout}/model`);
+  const bodyPart = designModel.parts.find((part) => part.kind === 'body');
+  const createdPortal = await postJson(`/design/${formLayout}/object`, {
+    partId: bodyPart.id,
+    kind: 'portal',
+    x: 390,
+    y: 8,
+    w: 360,
+    h: 90,
+    binding: 'browser_parent'
+  });
+  const portalId = createdPortal[0].id;
+  await postJson(`/design/${formLayout}/object`, {
+    partId: bodyPart.id,
+    kind: 'field',
+    x: 0,
+    y: 0,
+    w: 160,
+    h: 24,
+    createLabel: false,
+    binding: 'browser_parent.Required Code',
+    parentObjectId: portalId
+  });
+  await postJson(`/design/${formLayout}/object`, {
+    partId: bodyPart.id,
+    kind: 'field',
+    x: 170,
+    y: 0,
+    w: 160,
+    h: 24,
+    createLabel: false,
+    binding: 'browser_parent.Note',
+    parentObjectId: portalId
+  });
 
   const browser = await playwright.chromium.launch({
     headless: true,
@@ -118,6 +182,9 @@ async function run() {
   const page = await browser.newPage();
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
+  const baseField = (field) => page.locator(
+    `xpath=//input[@name='f${field.id}' and not(ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' fm-portal-row ')])]`
+  ).first();
 
   try {
     // A new record is an overlay only. Invalid navigation stays put, preserves
@@ -126,11 +193,11 @@ async function run() {
     await page.locator('#rm-new-record').click();
     await page.waitForURL((url) => url.searchParams.has('edit'));
     assert.equal(await canonicalTotal(formLayout), 0);
-    await page.locator(`input[name="f${note.id}"]`).fill('kept working value');
+    await baseField(note).fill('kept working value');
     await page.locator(`.view-switch a[href="/browse/${listLayout}"]`).click();
     assert.match(await dialog(page), /Number.*required/i);
     assert.match(page.url(), /edit=/);
-    assert.equal(await page.locator(`input[name="f${note.id}"]`).inputValue(), 'kept working value');
+    assert.equal(await baseField(note).inputValue(), 'kept working value');
     await returnToRecord(page, `f${number.id}`);
     await page.locator(`.view-switch a[href="/browse/${listLayout}"]`).click();
     await dialog(page);
@@ -147,31 +214,84 @@ async function run() {
     });
     await page.locator('#rm-new-record').click();
     await page.waitForURL((url) => url.searchParams.has('edit'));
-    await page.locator(`input[name="f${number.id}"]`).fill('INV-001');
-    await page.locator(`input[name="f${note.id}"]`).fill('first');
+    await baseField(number).fill('INV-001');
+    await baseField(note).fill('first');
     await page.locator(`.view-switch a[href="/browse/${formLayout}"]`).click();
     await page.waitForURL((url) => url.pathname === `/browse/${formLayout}` && !url.searchParams.has('edit'));
     assert.equal(commitRequests, 1, 'blur plus click performs one insert commit');
     assert.equal(await canonicalTotal(formLayout), 1);
 
+    // A trailing portal add row is passive until the first meaningful value.
+    // Focus-only must not open a related session or validate a blank record.
+    let portalOpenRequests = 0;
+    page.on('request', (req) => {
+      if (new URL(req.url()).pathname.endsWith(`/related/${portalId}/new/open`)) {
+        portalOpenRequests += 1;
+      }
+    });
+    const portalCode = page.locator(`.fm-portal-add input[name="f${requiredCode.id}"]`);
+    const portalNoteInput = page.locator(`.fm-portal-add input[name="f${portalNote.id}"]`);
+    const focusOutsidePortal = () => page.evaluate(() => {
+      const brand = document.querySelector('.brand');
+      brand.tabIndex = -1;
+      brand.focus();
+    });
+    await portalCode.focus();
+    await focusOutsidePortal();
+    await page.waitForTimeout(150);
+    assert.equal(portalOpenRequests, 0, 'focus-only portal row stays passive');
+    assert.equal(await page.locator('#app-dialog[open]').count(), 0);
+
+    // Editing any column activates the pending related record. Its complete
+    // terminal record is then validated, and Revert leaves no related row.
+    const openedPortal = page.waitForResponse((response) =>
+      new URL(response.url()).pathname.endsWith(`/related/${portalId}/new/open`)
+    );
+    await portalNoteInput.fill('started');
+    assert.equal((await openedPortal).status(), 200);
+    await focusOutsidePortal();
+    assert.match(await dialog(page), /Required Code.*required/i);
+    await returnToRecord(page, `f${requiredCode.id}`);
+    await focusOutsidePortal();
+    await dialog(page);
+    await page.locator('#app-dialog-ok').click();
+    await page.waitForFunction(() => !document.querySelector('#app-dialog')?.open);
+    await page.waitForFunction(
+      (name) => document.querySelector(`.fm-portal-add input[name="${name}"]`)?.value === '',
+      `f${portalNote.id}`
+    );
+    assert.equal(await page.locator('.fm-portal-row.rec-edit[data-related-id]').count(), 0);
+    assert.equal(await portalNoteInput.inputValue(), '');
+
+    // A valid first value creates one related row and refreshes the portal.
+    const reopenedPortal = page.waitForResponse((response) =>
+      new URL(response.url()).pathname.endsWith(`/related/${portalId}/new/open`)
+    );
+    await portalCode.fill('CODE-1');
+    assert.equal((await reopenedPortal).status(), 200);
+    const portalReload = page.waitForNavigation();
+    await focusOutsidePortal();
+    await portalReload;
+    assert.equal(await page.locator('.fm-portal-row.rec-edit[data-related-id]').count(), 1);
+
     // Existing-record validation retains the working copy. Revert restores the
     // exact canonical value and then executes the pending exit intent.
-    await page.locator(`input[name="f${number.id}"]`).fill('');
+    await baseField(number).fill('');
     await page.locator(`.view-switch a[href="/browse/${listLayout}"]`).click();
     assert.match(await dialog(page), /required/i);
-    assert.equal(await page.locator(`input[name="f${number.id}"]`).inputValue(), '');
+    assert.equal(await baseField(number).inputValue(), '');
     await returnToRecord(page, `f${number.id}`);
     await page.locator(`.view-switch a[href="/browse/${listLayout}"]`).click();
     await dialog(page);
     await page.locator('#app-dialog-ok').click();
     await page.waitForURL((url) => url.pathname === `/browse/${listLayout}`);
     await page.goto(`${base}/browse/${formLayout}`);
-    assert.equal(await page.locator(`input[name="f${number.id}"]`).inputValue(), 'INV-001');
+    assert.equal(await baseField(number).inputValue(), 'INV-001');
 
     // Layout selection, mode shortcut, reload, New, and ordinary links all use
     // the same validation gate. Sampling the non-anchor paths here protects the
     // coordinator wiring as well as its core anchor path above.
-    await page.locator(`input[name="f${number.id}"]`).fill('');
+    await baseField(number).fill('');
     await page.locator('[data-layout-select]').selectOption(String(otherLayout));
     assert.match(await dialog(page), /required/i);
     await returnToRecord(page, `f${number.id}`);
@@ -192,8 +312,8 @@ async function run() {
 
     // Correcting the invalid value allows one update and one replayed intent.
     commitRequests = 0;
-    await page.locator(`input[name="f${number.id}"]`).fill('INV-001');
-    await page.locator(`input[name="f${note.id}"]`).fill('updated once');
+    await baseField(number).fill('INV-001');
+    await baseField(note).fill('updated once');
     await page.locator(`.view-switch a[href="/browse/${listLayout}"]`).dblclick();
     await page.waitForURL((url) => url.pathname === `/browse/${listLayout}`);
     assert.equal(commitRequests, 1, 'double-click navigation performs one update commit');
@@ -201,7 +321,7 @@ async function run() {
     // Native close calls the same coordinator. Return cancels authorization;
     // after correction, one successful whole-record commit authorizes close.
     await page.goto(`${base}/browse/${formLayout}`);
-    await page.locator(`input[name="f${number.id}"]`).fill('');
+    await baseField(number).fill('');
     let closeAuthorizations = 0;
     page.on('request', (req) => {
       if (new URL(req.url()).pathname === '/app/close-authorized') closeAuthorizations += 1;
@@ -210,7 +330,7 @@ async function run() {
     assert.match(await dialog(page), /required/i);
     await returnToRecord(page, `f${number.id}`);
     assert.equal(closeAuthorizations, 0, 'Return to record cancels native close');
-    await page.locator(`input[name="f${number.id}"]`).fill('INV-001');
+    await baseField(number).fill('INV-001');
     const authorized = page.waitForResponse((response) =>
       new URL(response.url()).pathname === '/app/close-authorized'
     );

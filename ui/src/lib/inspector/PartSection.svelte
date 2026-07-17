@@ -15,6 +15,7 @@
   import { colorValue } from './values';
   import { PART_KINDS } from './part-kinds';
   import { reportPersistError } from './persist-ops';
+  import LayoutGridSection from './LayoutGridSection.svelte';
 
   let {
     doc,
@@ -170,4 +171,9 @@
       </div>
     {/if}
   </section>
+{/if}
+
+{#if selectedPart}
+  <div class="insp-div"></div>
+  <LayoutGridSection {doc} {layoutId} />
 {/if}

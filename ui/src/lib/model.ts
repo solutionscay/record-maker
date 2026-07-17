@@ -231,6 +231,10 @@ export interface DesignModel {
   total: number;
   /** Canvas width in px. */
   width: number;
+  /** One layout-owned grid shared continuously by every band (#193). */
+  gridSize: number;
+  showGrid: boolean;
+  snapToGrid: boolean;
   /** The layout's Browse view (`form` | `list` | `table`); gates summary bands. */
   view: string;
   /** The primary table's fields — what the Create zone's Field tool offers. */

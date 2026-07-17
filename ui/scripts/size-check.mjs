@@ -46,6 +46,14 @@ try {
 
   const sharedDoc = new EditorDoc();
   sharedDoc.hydrate(structuredClone(fixture));
+  const emptyHtml = render(Inspector, { props: { doc: sharedDoc, layoutId: '1' } }).body;
+  ok('empty canvas Inspector exposes the layout-owned grid',
+    emptyHtml.includes('Layout Grid') && inputFor(emptyHtml, 'Layout grid size in pixels').includes('value="1"'));
+  sharedDoc.selectPart(2);
+  const bandHtml = render(Inspector, { props: { doc: sharedDoc, layoutId: '1' } }).body;
+  ok('any selected band exposes the same Layout Grid section',
+    bandHtml.includes('>Band</span>') && bandHtml.includes('Layout Grid'));
+  sharedDoc.clearSelection();
   const sharedObjects = [sharedDoc.getObject(1), sharedDoc.getObject(3)];
   eq('matching dimensions resolve to a shared value', sharedDimension(sharedObjects, 'w'), { mixed: false, value: 72 });
   sharedDoc.selectOnly([1, 3]);

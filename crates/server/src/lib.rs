@@ -38,10 +38,10 @@ use routes::browse::{browse, design, index, layouts_page, schema_page};
 use routes::design::{
     create_design_object, create_design_part, create_object_group, delete_design_object,
     delete_design_objects, delete_design_part, delete_object_group, design_model, format_sample,
-    move_design_part, restore_design_objects, update_object_binding, update_object_binding_path,
-    update_object_content, update_object_geometry, update_object_part, update_object_props,
-    update_object_read_only, update_objects_geometry, update_objects_z, update_part_height,
-    update_part_kind, update_part_props,
+    move_design_part, restore_design_objects, update_layout_grid, update_object_binding,
+    update_object_binding_path, update_object_content, update_object_geometry, update_object_part,
+    update_object_props, update_object_read_only, update_objects_geometry, update_objects_z,
+    update_part_height, update_part_kind, update_part_props,
 };
 use routes::layouts::{
     create_layout, delete_layout, list_layouts, rename_layout, reorder_layouts, set_layout_enabled,
@@ -327,6 +327,7 @@ pub fn app(state: AppState) -> Router {
         .route("/design/:layout", get(design))
         .route("/design/format-sample", post(format_sample))
         .route("/design/:layout/model", get(design_model))
+        .route("/design/:layout/grid", post(update_layout_grid))
         .route("/design/:layout/object", post(create_design_object))
         .route(
             "/design/:layout/object/restore",

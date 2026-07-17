@@ -79,6 +79,11 @@ pub struct LayoutMeta {
     /// layouts are always stored `enabled = true`; the flag is only meaningful
     /// for the default trio.
     pub enabled: bool,
+    /// Layout-owned editor grid (#193). One positive integer step and two
+    /// independent UI switches span every band; Browse ignores these values.
+    pub grid_size: i64,
+    pub show_grid: bool,
+    pub snap_to_grid: bool,
 }
 
 /// The kind of a layout part (band). Determines where the band renders and how
@@ -373,7 +378,8 @@ pub enum RestoreResult {
 }
 
 /// Column list every `layout_meta_from_row` read must SELECT, in order.
-const LAYOUT_COLS: &str = "id, name, table_id, view, position, is_default, enabled";
+const LAYOUT_COLS: &str =
+    "id, name, table_id, view, position, is_default, enabled, grid_size, show_grid, snap_to_grid";
 
 fn layout_meta_from_row(r: &rusqlite::Row) -> rusqlite::Result<LayoutMeta> {
     Ok(LayoutMeta {
@@ -384,6 +390,9 @@ fn layout_meta_from_row(r: &rusqlite::Row) -> rusqlite::Result<LayoutMeta> {
         position: r.get(4)?,
         is_default: r.get(5)?,
         enabled: r.get(6)?,
+        grid_size: r.get(7)?,
+        show_grid: r.get(8)?,
+        snap_to_grid: r.get(9)?,
     })
 }
 
@@ -460,6 +469,29 @@ impl Solution {
         let n = self
             .app
             .execute("UPDATE meta_layout SET name=?1 WHERE id=?2", params![name, id])?;
+        if n == 0 {
+            return Ok(None);
+        }
+        self.layout_by_id(id)
+    }
+
+    /// Replace the one layout-wide editor grid (#193). The positive-size
+    /// invariant is also protected by the schema CHECK; this guard gives engine
+    /// callers a useful error before SQLite rejects the write.
+    pub fn set_layout_grid(
+        &self,
+        id: i64,
+        grid_size: i64,
+        show_grid: bool,
+        snap_to_grid: bool,
+    ) -> Result<Option<LayoutMeta>> {
+        if grid_size < 1 {
+            bail!("grid size must be at least 1");
+        }
+        let n = self.app.execute(
+            "UPDATE meta_layout SET grid_size=?1, show_grid=?2, snap_to_grid=?3 WHERE id=?4",
+            params![grid_size, show_grid, snap_to_grid, id],
+        )?;
         if n == 0 {
             return Ok(None);
         }
@@ -606,8 +638,9 @@ pub(crate) fn clone_layout(
     view: &str,
 ) -> Result<i64> {
     conn.execute(
-        "INSERT INTO meta_layout(name, table_id, view) VALUES (?1, ?2, ?3)",
-        params![name, table_id, view],
+        "INSERT INTO meta_layout(name, table_id, view, grid_size, show_grid, snap_to_grid) \
+         SELECT ?1, ?2, ?3, grid_size, show_grid, snap_to_grid FROM meta_layout WHERE id=?4",
+        params![name, table_id, view, src_layout_id],
     )?;
     let new_layout_id = conn.last_insert_rowid();
 
@@ -649,7 +682,7 @@ pub(crate) fn clone_layout(
 #[cfg(test)]
 mod tests {
     use crate::PartMeta;
-    use crate::layout::{NewObject, ObjectKind, PartKind, RestoreObject, RestoreResult};
+    use crate::layout::{clone_layout, NewObject, ObjectKind, PartKind, RestoreObject, RestoreResult};
     use crate::{FieldKind, NewField, Solution};
 
     fn body_part(s: &Solution, layout_id: i64) -> PartMeta {
@@ -844,6 +877,30 @@ mod tests {
         let custom = s.create_layout(tid, "Extra", "form").unwrap();
         assert!(s.set_layout_enabled(custom.id, false).is_err());
         assert!(s.set_layout_enabled(999_999, false).unwrap().is_none());
+    }
+
+    #[test]
+    fn layout_grid_defaults_updates_and_clones_as_layout_metadata() {
+        let mut s = Solution::open_in_memory().unwrap();
+        let tid = s.create_table("Contacts", &[]).unwrap();
+        let layouts = s.layouts_for_table(tid).unwrap();
+        assert!(layouts.iter().all(|layout| {
+            layout.grid_size == 1 && layout.show_grid && layout.snap_to_grid
+        }));
+
+        let form = layouts.iter().find(|layout| layout.view == "form").unwrap().id;
+        let changed = s.set_layout_grid(form, 6, false, true).unwrap().unwrap();
+        assert_eq!(changed.grid_size, 6);
+        assert!(!changed.show_grid);
+        assert!(changed.snap_to_grid);
+        assert!(s.set_layout_grid(form, 0, true, true).is_err());
+        assert!(s.set_layout_grid(999_999, 4, true, false).unwrap().is_none());
+
+        let clone = clone_layout(&s.app, form, "Grid copy", tid, "form").unwrap();
+        let clone = s.layout_by_id(clone).unwrap().unwrap();
+        assert_eq!(clone.grid_size, 6);
+        assert!(!clone.show_grid);
+        assert!(clone.snap_to_grid);
     }
 
     #[test]

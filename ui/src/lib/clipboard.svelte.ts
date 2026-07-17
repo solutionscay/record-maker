@@ -32,7 +32,7 @@ export interface ClipboardPayload {
 
 class LayoutClipboard {
   #payload = $state<ClipboardPayload | null>(null);
-  /** Cascade counter: 0 = fresh copy, +1 per paste; drives the n*GRID
+  /** Cascade counter: 0 = fresh copy, +1 per paste; drives the grid-aligned
    *  down-right offset so repeated Ctrl+V of the same clipboard stair-steps.
    *  Reset to 0 on every write(). */
   #pasteCount = $state(0);

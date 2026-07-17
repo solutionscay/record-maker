@@ -17,6 +17,7 @@
   import { setPartHeight as persistPartHeight } from './lib/persist';
   import { lerror, llog } from './lib/log';
   import LayoutPreview from './lib/LayoutPreview.svelte';
+  import { snapToGrid } from './lib/canvas-edit';
 
   let { doc, layoutId = '' }: { doc: EditorDoc; layoutId?: string } = $props();
 
@@ -48,6 +49,10 @@
       return band;
     });
   });
+  const layoutHeight = $derived(partBands.reduce((sum, band) => sum + band.part.height, 0));
+  // A literal dot every 1–3px becomes a solid tint. Keep snapping exact while
+  // drawing every tenth intersection for fine grids (#193).
+  const visibleGridSize = $derived(doc.gridSize < 4 ? doc.gridSize * 10 : doc.gridSize);
 
   function partLabel(kind: string): string {
     switch (kind) {
@@ -105,6 +110,10 @@
   // compensate for the CSS scale.
   $effect(() => {
     interaction?.setZoom(doc.zoom);
+  });
+
+  $effect(() => {
+    interaction?.setGrid(doc.gridSize, doc.snapToGrid);
   });
 
   $effect(() => {
@@ -271,7 +280,8 @@
     const move = (e: PointerEvent) => {
       const zoom = doc.zoom || 1;
       const modelY = (e.clientY - canvasRect.top) / zoom;
-      const height = Math.max(minHeight, Math.round(modelY - top));
+      const authored = modelY - top;
+      const height = Math.max(minHeight, snapToGrid(authored, doc.snapToGrid ? doc.gridSize : 0));
       doc.setPartHeight(id, height);
     };
     const up = () => {
@@ -307,6 +317,13 @@
     <div class="le-workspace" style={`transform: scale(${doc.zoom}); transform-origin: top left;`}>
       <div class="le-canvas-wrap">
         <LayoutPreview model={doc.renderModel} />
+        {#if doc.showGrid}
+          <div
+            class="le-layout-grid"
+            style={`width:${doc.renderModel.width}px;min-width:${DESIGN_PAGE_WIDTH}px;height:${layoutHeight}px;--le-grid-size:${visibleGridSize}px;`}
+            aria-hidden="true"
+          ></div>
+        {/if}
         <div class="le-part-overlays" style={`width: ${doc.renderModel.width}px; min-width: ${DESIGN_PAGE_WIDTH}px;`}>
           {#each partBands as band (band.part.id)}
             <button
@@ -399,6 +416,18 @@
     position: relative;
     width: 100%;
     margin: 0;
+  }
+  /* One paint-only grid spans the complete stacked layout, so its origin never
+     resets at a band boundary. It deliberately sits above band fills (otherwise
+     a coloured Body would hide the layout grid) but is pointer-transparent and
+     faint enough not to obscure authored objects. */
+  .le-layout-grid {
+    position: absolute;
+    inset: 0 auto auto 0;
+    pointer-events: none;
+    background-image: radial-gradient(circle, rgba(75, 91, 112, 0.34) 0.65px, transparent 0.8px);
+    background-position: 0 0;
+    background-size: var(--le-grid-size) var(--le-grid-size);
   }
   .le-part-overlays {
     position: absolute;

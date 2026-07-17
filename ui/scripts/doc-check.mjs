@@ -82,6 +82,10 @@ try {
     ok('hydrate: hydrated after', d.hydrated === true);
     ok('hydrate: history empty (no undo)', d.canUndo === false && d.canRedo === false);
     eq('hydrate: renderModel deep-equals fixture', d.renderModel, fixture);
+    ok('layout grid: hydrates the layout-owned defaults', d.gridSize === 1 && d.showGrid && d.snapToGrid);
+    d.setLayoutGrid(6, false, true);
+    ok('layout grid: updates the shared projection without object history',
+      d.renderModel.gridSize === 6 && !d.renderModel.showGrid && d.renderModel.snapToGrid && !d.canUndo);
 
     // #60 object kinds project through the store: a text label carries `content`
     // (no value), a value field carries its value (no content), a shape carries a
@@ -353,11 +357,11 @@ try {
 
   // 11. Pure interaction helpers (#46) — snap, paint-order ids, element mapping.
   {
-    const { snapToGrid, clampOrigin, objectIdsInPaintOrder, elementsToObjectIds, GRID } =
+    const { snapToGrid, clampOrigin, objectIdsInPaintOrder, elementsToObjectIds, DEFAULT_GRID_SIZE } =
       await vite.ssrLoadModule('/src/lib/canvas-edit.ts');
 
     ok('snap: rounds to the nearest grid line', snapToGrid(19, 8) === 16 && snapToGrid(20, 8) === 24);
-    ok('snap: default grid + grid<=0 just rounds', snapToGrid(11) === GRID * Math.round(11 / GRID) && snapToGrid(7.4, 0) === 7);
+    ok('snap: 1px default + grid<=0 both preserve whole-pixel flow', snapToGrid(11.4) === DEFAULT_GRID_SIZE * Math.round(11.4 / DEFAULT_GRID_SIZE) && snapToGrid(7.4, 0) === 7);
     ok('clampOrigin: never negative, rounds', clampOrigin(-3) === 0 && clampOrigin(4.6) === 5);
 
     // Paint order mirrors the fixture's (z,id) ordering: the z=0 objects by id

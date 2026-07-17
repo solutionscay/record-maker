@@ -39,6 +39,11 @@ struct DesignModel {
     rec: i64,
     total: i64,
     width: i64,
+    /// Layout-owned editor grid (#193). These settings affect Layout Mode only;
+    /// Browse continues to render the authored geometry without grid chrome.
+    grid_size: i64,
+    show_grid: bool,
+    snap_to_grid: bool,
     /// The layout's Browse view (`form` | `list` | `table`) — the client gates the
     /// summary part-kinds on it (a form allows only header/body/footer, Issue 3).
     view: String,
@@ -164,6 +169,9 @@ pub(crate) async fn design_model(
         rec,
         total,
         width,
+        grid_size: lay.grid_size,
+        show_grid: lay.show_grid,
+        snap_to_grid: lay.snap_to_grid,
         view: lay.view.clone(),
         fields: field_choices(&fields),
         related_routes: related_route_choices(&sol, &table),
@@ -177,6 +185,46 @@ pub(crate) async fn design_model(
         capabilities: kind_capabilities(),
     };
     axum::Json(model).into_response()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LayoutGridBody {
+    grid_size: i64,
+    show_grid: bool,
+    snap_to_grid: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LayoutGridView {
+    grid_size: i64,
+    show_grid: bool,
+    snap_to_grid: bool,
+}
+
+/// Persist the one grid shared by every band on this layout (#193). The body is
+/// deliberately layout-scoped rather than nested under `/part/:id`: selecting a
+/// band is only an Inspector entry point, never metadata ownership.
+pub(crate) async fn update_layout_grid(
+    State(st): State<AppState>,
+    Path(layout_id): Path<i64>,
+    Json(body): Json<LayoutGridBody>,
+) -> AppResult<Json<LayoutGridView>> {
+    if body.grid_size < 1 {
+        return Err(AppError::bad_request("grid size must be at least 1"));
+    }
+    let sol = st.sol.lock().unwrap();
+    let Some(layout) =
+        sol.set_layout_grid(layout_id, body.grid_size, body.show_grid, body.snap_to_grid)?
+    else {
+        return Err(AppError::not_found());
+    };
+    Ok(Json(LayoutGridView {
+        grid_size: layout.grid_size,
+        show_grid: layout.show_grid,
+        snap_to_grid: layout.snap_to_grid,
+    }))
 }
 
 /// One value + format spec for the inspector's "Sample" preview (#77/#78).

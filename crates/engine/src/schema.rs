@@ -74,6 +74,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0016_portal_row_count",
         include_str!("migrations/0016_portal_row_count.sql"),
     ),
+    (
+        "0017_layout_grid",
+        include_str!("migrations/0017_layout_grid.sql"),
+    ),
 ];
 
 /// Schema version this build targets (the number of migrations defined).
@@ -170,5 +174,30 @@ mod tests {
             "legacy 120px viewport retains five 24px rows"
         );
         assert_eq!(props["fill"], "#ffffff", "existing portal props survive");
+    }
+
+    #[test]
+    fn migration_0017_adds_layout_owned_grid_defaults() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for (_, sql) in &MIGRATIONS[..16] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 16).unwrap();
+        conn.execute_batch(
+            "INSERT INTO meta_table(id, name, phys_name) VALUES (1, 'T', 't');
+             INSERT INTO meta_layout(id, name, table_id, view) VALUES (1, 'Form', 1, 'form');",
+        )
+        .unwrap();
+
+        assert_eq!(migrate(&mut conn).unwrap(), target_version());
+        let settings: (i64, bool, bool) = conn
+            .query_row(
+                "SELECT grid_size, show_grid, snap_to_grid FROM meta_layout WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(settings, (1, true, true));
     }
 }

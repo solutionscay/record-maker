@@ -18,6 +18,7 @@
   import SizeSection from './inspector/SizeSection.svelte';
   import FormatSection from './inspector/FormatSection.svelte';
   import PartSection from './inspector/PartSection.svelte';
+  import LayoutGridSection from './inspector/LayoutGridSection.svelte';
   import { partKindLabel } from './inspector/part-kinds';
   import { reportPersistError } from './inspector/persist-ops';
   import { parseProps } from './object-props';
@@ -76,7 +77,7 @@
 
   // Header title/subtitle (design: "Field" · "Text · Name").
   let headerTitle = $derived(
-    hasMultipleSelection ? 'Multiple items selected' : selected ? (KIND_LABEL[selected.kind] ?? 'Object') : selectedPart ? 'Band' : 'Inspector',
+    hasMultipleSelection ? 'Multiple items selected' : selected ? (KIND_LABEL[selected.kind] ?? 'Object') : selectedPart ? 'Band' : 'Layout',
   );
   let headerSub = $derived(
     hasMultipleSelection
@@ -177,7 +178,7 @@
   {:else if selectedPart}
     <PartSection {doc} {layoutId} bind:busy />
   {:else}
-    <p class="insp-empty">Select an object or band to edit it.</p>
+    <LayoutGridSection {doc} {layoutId} />
   {/if}
 </div>
 

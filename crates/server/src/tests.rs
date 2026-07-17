@@ -3277,6 +3277,50 @@ async fn home_redirects_to_schema_when_nothing_browsable() {
     );
 }
 
+/// #193: grid settings are one layout resource, projected through the design
+/// model independently from whichever band happens to expose the Inspector UI.
+#[tokio::test]
+async fn design_layout_grid_updates_and_validates_layout_owned_settings() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    sol.create_table("Customers", &[]).unwrap();
+    let layout_id = sol.layouts().unwrap()[0].id;
+    let state = state_for(sol);
+
+    let (status, body) = post_json_body(
+        state.clone(),
+        &format!("/design/{layout_id}/grid"),
+        r#"{"gridSize":5,"showGrid":false,"snapToGrid":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let saved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(saved["gridSize"], 5);
+    assert_eq!(saved["showGrid"], false);
+    assert_eq!(saved["snapToGrid"], true);
+
+    let (status, model) = get_body(state.clone(), &format!("/design/{layout_id}/model")).await;
+    assert_eq!(status, StatusCode::OK);
+    let model: serde_json::Value = serde_json::from_str(&model).unwrap();
+    assert_eq!(model["gridSize"], 5);
+    assert_eq!(model["showGrid"], false);
+    assert_eq!(model["snapToGrid"], true);
+
+    let (status, _) = post_json_body(
+        state.clone(),
+        &format!("/design/{layout_id}/grid"),
+        r#"{"gridSize":0,"showGrid":true,"snapToGrid":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = post_json_body(
+        state,
+        "/design/999999/grid",
+        r#"{"gridSize":2,"showGrid":true,"snapToGrid":false}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 /// #48 create: placing a shape POSTs `{partId,kind,x,y,w,h,props}`, persists a
 /// `meta_object`, and echoes back its `ObjectView` (with the server-derived
 /// shape_style) so the store can add it without a re-hydrate.

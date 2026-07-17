@@ -52,11 +52,18 @@ fn stroke_width(v: &serde_json::Value, fallback: i64) -> i64 {
 
 /// Append the #191 box-border projection. Returns true when the placement is
 /// explicit, letting callers avoid also emitting the legacy uniform ring.
+///
+/// `inset_ring` selects how the all-edge ring is drawn. Field/portal borders paint
+/// on the `.fm-obj` element itself, so an outward `box-shadow` is never clipped
+/// (`inset_ring: false`). Shape rects paint on the inner `.fm-shape`, which the
+/// object's `overflow:hidden` clips — an outward ring is sliced off entirely — so
+/// they draw the ring inset, flush at the geometry edge (`inset_ring: true`).
 fn append_border_placement(
     s: &mut String,
     v: &serde_json::Value,
     fallback_color: &str,
     allow_middle: bool,
+    inset_ring: bool,
 ) -> bool {
     let Some(sides) = stroke_sides(v) else {
         return false;
@@ -65,13 +72,18 @@ fn append_border_placement(
     let width = stroke_width(v, 1);
 
     if sides.all_outer() {
-        // Keep the established all-edge renderer byte-for-byte. This makes an
-        // explicit All visually match the legacy absent-metadata fallback.
+        // Keep the established all-edge renderer byte-for-byte for the outward case.
+        // This makes an explicit All visually match the legacy absent-metadata
+        // fallback. Shapes draw the same ring inset so it isn't clipped.
         if v.get("stroke")
             .and_then(serde_json::Value::as_str)
             .is_some()
         {
-            s.push_str(&format!("box-shadow:0 0 0 {width}px {color};"));
+            if inset_ring {
+                s.push_str(&format!("border:0;box-shadow:inset 0 0 0 {width}px {color};"));
+            } else {
+                s.push_str(&format!("box-shadow:0 0 0 {width}px {color};"));
+            }
         }
     } else {
         // Suppress each kind's default uniform frame and expose edge widths to
@@ -148,17 +160,24 @@ pub(crate) fn shape_style(kind: ObjectKind, props: Option<&str>) -> String {
         s.push_str(&format!("background:{fill};"));
     }
     let explicit_placement = if matches!(kind, ObjectKind::Rect) {
-        append_border_placement(&mut s, &v, "#d3d8de", false)
+        // Shape rects paint on the inner `.fm-shape`, so their all-edge ring must be
+        // inset (an outward one is clipped by `.fm-obj { overflow:hidden }`).
+        append_border_placement(&mut s, &v, "#d3d8de", false, true)
     } else {
         false
     };
     if !explicit_placement {
         if let Some(stroke) = v.get("stroke").and_then(serde_json::Value::as_str) {
             let width = stroke_width(&v, 1);
-            // Render the stroke OUTSIDE the box (box-shadow ring) so a thicker stroke
-            // grows the object visually without eating into its stored geometry; the
-            // ring also follows `border-radius`, so ellipses stay round (#44 issue 2).
-            s.push_str(&format!("box-shadow:0 0 0 {width}px {stroke};"));
+            // Uniform stroke for a shape (an ellipse, or a rect with no per-side
+            // metadata). Render it INSIDE the box (inset ring): the shape paints on
+            // the inner `.fm-shape`, which the object's `overflow:hidden` clips, so an
+            // outward ring is sliced off — most visibly at an oval's four flush
+            // midpoints, and entirely for a box-filling rect. Inset also keeps the
+            // border within the object's stored geometry, like the #191 box borders,
+            // and still follows `border-radius`, so ellipses stay round (#44 issue 2).
+            // Drop the default `.fm-shape` frame so it can't peek outside the ring.
+            s.push_str(&format!("border:0;box-shadow:inset 0 0 0 {width}px {stroke};"));
         }
     }
     if let Some(radius) = v.get("radius").and_then(serde_json::Value::as_i64) {
@@ -181,9 +200,11 @@ pub(crate) fn object_style(kind: ObjectKind, props: Option<&str>) -> String {
     if let Some(fill) = v.get("fill").and_then(serde_json::Value::as_str) {
         s.push_str(&format!("background:{fill};"));
     }
+    // Fields and portals paint on the `.fm-obj` element itself, so their outward
+    // ring is never clipped — keep it outward (`inset_ring: false`).
     let explicit_placement = match kind {
-        ObjectKind::Field => append_border_placement(&mut s, &v, "#b9c2cc", false),
-        ObjectKind::Portal => append_border_placement(&mut s, &v, "#b9c2cc", true),
+        ObjectKind::Field => append_border_placement(&mut s, &v, "#b9c2cc", false, false),
+        ObjectKind::Portal => append_border_placement(&mut s, &v, "#b9c2cc", true, false),
         _ => false,
     };
     if !explicit_placement {
@@ -325,7 +346,9 @@ mod border_placement_tests {
                 ObjectKind::Ellipse,
                 Some(r##"{"stroke":"#123456","strokeWidth":2,"strokeSides":["top"]}"##,),
             ),
-            "box-shadow:0 0 0 2px #123456;"
+            // Uniform inset ring, ignoring the per-side metadata; the inset keeps it
+            // inside `.fm-obj`'s clip so the oval's edges aren't sliced off.
+            "border:0;box-shadow:inset 0 0 0 2px #123456;"
         );
         assert_eq!(
             shape_style(

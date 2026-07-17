@@ -3304,7 +3304,7 @@ async fn design_create_shape_object_persists_and_returns_view() {
     assert_eq!(status, StatusCode::OK);
     assert!(resp.contains(r#""kind":"rect""#) && resp.contains(r#""shape":true"#));
     assert!(
-        resp.contains(r#""shapeStyle":"background:#eef;box-shadow:0 0 0 1px #88a;""#),
+        resp.contains(r#""shapeStyle":"background:#eef;border:0;box-shadow:inset 0 0 0 1px #88a;""#),
         "derived style echoed\n{resp}"
     );
     assert!(
@@ -4525,7 +4525,7 @@ async fn design_model_endpoint_matches_committed_fixture() {
         r#""content":"Name""#,
         r#""content":"Note""#,
         r#""shape":true"#,
-        r#""shapeStyle":"background:#eef;box-shadow:0 0 0 1px #88a;border-radius:4px;""#,
+        r#""shapeStyle":"background:#eef;border:0;box-shadow:inset 0 0 0 1px #88a;border-radius:4px;""#,
         r#""z":5"#,
     ] {
         assert!(body.contains(needle), "model JSON missing {needle}\n{body}");

@@ -67,6 +67,54 @@ async function dragBy(page, object, dx, dy = 0) {
   await page.waitForTimeout(150);
 }
 
+async function fastDragAligned(page, objectCount, dx, label) {
+  const objects = page.locator('.fm-canvas .fm-obj');
+  const dragTarget = objects.first();
+  const fastBox = await dragTarget.boundingBox();
+  assert.ok(fastBox, `${label} has a fast-drag box`);
+  await page.mouse.move(fastBox.x + fastBox.width / 2, fastBox.y + fastBox.height / 2);
+  await page.mouse.down();
+  const sampledDrift = page.evaluate(({ count }) => new Promise((resolveDrift) => {
+    let max = 0;
+    let detail = null;
+    let frames = 0;
+    const sample = () => {
+      const objectElements = [...document.querySelectorAll('.fm-canvas .fm-obj')].slice(0, count);
+      const boundsElement = document.querySelector('.moveable-control-box[data-rm-drag-bounds]');
+      if (objectElements.length === count && boundsElement) {
+        const objectRects = objectElements.map((element) => element.getBoundingClientRect());
+        const objectLeft = Math.min(...objectRects.map((rect) => rect.left));
+        const objectTop = Math.min(...objectRects.map((rect) => rect.top));
+        const boundsRect = boundsElement.getBoundingClientRect();
+        const drift = Math.max(Math.abs(objectLeft - boundsRect.left), Math.abs(objectTop - boundsRect.top));
+        if (drift > max) {
+          max = drift;
+          detail = { frame: frames, objectLeft, objectTop, boundsLeft: boundsRect.left, boundsTop: boundsRect.top };
+        }
+      }
+      frames += 1;
+      if (frames < 30) requestAnimationFrame(() => setTimeout(sample, 0));
+      else resolveDrift({ max, detail });
+    };
+    requestAnimationFrame(() => setTimeout(sample, 0));
+  }), { count: objectCount });
+  await page.mouse.move(fastBox.x + fastBox.width / 2 + dx, fastBox.y + fastBox.height / 2, { steps: 80 });
+  const fastDrift = await sampledDrift;
+  const objectBoxes = await Promise.all(
+    Array.from({ length: objectCount }, (_, index) => objects.nth(index).boundingBox()),
+  );
+  const liveBoundsBox = await page.locator('.moveable-control-box[data-rm-drag-bounds]').boundingBox();
+  await page.mouse.up();
+  assert.ok(fastDrift.max <= 0.5, `${label} never splits across fast-drag frames (${JSON.stringify(fastDrift)})`);
+  assert.ok(objectBoxes.every(Boolean) && liveBoundsBox, `${label} and transform bounds render during fast drag`);
+  const liveLeft = Math.min(...objectBoxes.map((box) => box.x));
+  const liveTop = Math.min(...objectBoxes.map((box) => box.y));
+  assert.ok(
+    Math.abs(liveLeft - liveBoundsBox.x) <= 0.5 && Math.abs(liveTop - liveBoundsBox.y) <= 0.5,
+    `${label} finishes aligned: object ${liveLeft},${liveTop}; bounds ${liveBoundsBox.x},${liveBoundsBox.y}`,
+  );
+}
+
 let browser;
 try {
   await waitForServer();
@@ -178,6 +226,12 @@ try {
   await dragBy(page, object, 7);
   const groupAfter = [await objectX(object), await objectX(secondObject)];
   assert.equal(groupAfter[0] - groupBefore[0], groupAfter[1] - groupBefore[1], 'group members preserve their offset');
+  await fastDragAligned(page, 2, 211, 'group object and bounds');
+
+  await page.mouse.click(canvas.x + canvas.width - 10, canvas.y + canvas.height - 10);
+  await object.click();
+  await page.waitForTimeout(50);
+  await fastDragAligned(page, 1, 411, 'single object and bounds');
   assert.deepEqual(pageErrors, []);
 
   console.log('layout grid browser acceptance passed');

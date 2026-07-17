@@ -5,7 +5,7 @@
 
 import type { ToolKind } from '../doc.svelte';
 import type { ObjectView } from '../model';
-import { GRID, clampOrigin, snapToGrid } from '../canvas-edit';
+import { clampOrigin, snapToGrid } from '../canvas-edit';
 import { defaultBox, defaultProps, partAtY } from '../create';
 import { createObject } from '../persist';
 import { FIELD_DRAG_MIME, PORTAL_COLUMN_DRAG_MIME, type PortalColumnDrag } from '../dnd';
@@ -45,6 +45,15 @@ export class PlacementController {
 
   constructor(ctx: CanvasContext) {
     this.#ctx = ctx;
+  }
+
+  #snap(value: number): number {
+    const doc = this.#ctx.doc;
+    return snapToGrid(value, doc.snapToGrid ? doc.gridSize : 0);
+  }
+
+  #step(): number {
+    return this.#ctx.doc.snapToGrid ? this.#ctx.doc.gridSize : 1;
   }
 
   get isDrawing(): boolean {
@@ -145,10 +154,10 @@ export class PlacementController {
       w = 1;
       h = 1;
     } else if (drawing.tool === 'line') {
-      const sx = snapToGrid(drawing.startX);
-      const sy = snapToGrid(drawing.startY);
-      const ex = snapToGrid(endX);
-      const ey = snapToGrid(endY);
+      const sx = this.#snap(drawing.startX);
+      const sy = this.#snap(drawing.startY);
+      const ex = this.#snap(endX);
+      const ey = this.#snap(endY);
       x = Math.min(sx, ex);
       yGlobal = Math.min(sy, ey);
       w = Math.max(1, Math.abs(ex - sx));
@@ -164,10 +173,10 @@ export class PlacementController {
       h = Math.max(8, Math.abs(endY - drawing.startY));
     }
 
-    x = snapToGrid(x);
-    yGlobal = snapToGrid(yGlobal);
-    w = Math.max(1, snapToGrid(w));
-    h = Math.max(1, snapToGrid(h));
+    x = this.#snap(x);
+    yGlobal = this.#snap(yGlobal);
+    w = Math.max(1, this.#snap(w));
+    h = Math.max(1, this.#snap(h));
     const y = Math.min(drawing.partHeight - 1, Math.max(0, yGlobal - drawing.partTop));
     drawing.box = {
       x: clampOrigin(x),
@@ -256,8 +265,8 @@ export class PlacementController {
 
   #defaultPlacementBox(drawing: DrawPlacement): { x: number; y: number; w: number; h: number } {
     const size = defaultBox(drawing.tool);
-    const x = clampOrigin(snapToGrid(drawing.startX));
-    const y = clampOrigin(snapToGrid(drawing.startY - drawing.partTop));
+    const x = clampOrigin(this.#snap(drawing.startX));
+    const y = clampOrigin(this.#snap(drawing.startY - drawing.partTop));
     return {
       x,
       y,
@@ -295,8 +304,8 @@ export class PlacementController {
     const part = this.#ctx.doc.getPart(where.partId);
     if (!part) return null;
     const size = defaultBox('field');
-    const x = clampOrigin(snapToGrid(point.x));
-    const y = clampOrigin(snapToGrid(where.localY));
+    const x = clampOrigin(this.#snap(point.x));
+    const y = clampOrigin(this.#snap(where.localY));
     return {
       partId: where.partId,
       partTop: point.y - where.localY,
@@ -420,7 +429,7 @@ export class PlacementController {
     }
     const point = this.#ctx.canvasPoint(clientX, clientY);
     const size = defaultBox('field');
-    const baseX = point ? clampOrigin(snapToGrid(point.x)) : portal.x;
+    const baseX = point ? clampOrigin(this.#snap(point.x)) : portal.x;
     const y = portal.y;
     this.#ctx.placing = true;
     try {
@@ -464,7 +473,7 @@ export class PlacementController {
 
   async #createFieldObjectsAt(target: FieldPlacementTarget, fieldIds: number[]): Promise<ObjectView[]> {
     const { partId, partHeight, box } = target;
-    const rowStep = Math.max(32, box.h + GRID);
+    const rowStep = Math.max(32, box.h + this.#step());
     // The Field tool always places PRIMARY/base-table fields as top-level objects.
     // Portal columns are authored from the portal inspector's Columns picker (#168),
     // which POSTs the create route with `parentObjectId` directly — the canvas

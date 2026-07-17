@@ -223,6 +223,10 @@ export class EditorDoc {
   /** Canvas width (px). Server-derived (max object right edge + margin, #44); the
    * store keeps the hydrated value — recomputing it is the engine's job (#15). */
   #width = $state(0);
+  /** One layout-owned editor grid (#193), shared by every band. */
+  #gridSize = $state(1);
+  #showGrid = $state(true);
+  #snapToGrid = $state(true);
   /** The layout's Browse view (`form` | `list` | `table`). Gates summary part
    * kinds (a form allows only header/body/footer, Issue 3). Hydrated, never edited. */
   #view = $state('');
@@ -296,6 +300,9 @@ export class EditorDoc {
   hydrate(model: DesignModel): void {
     this.#layoutId = model.layoutId;
     this.#width = model.width;
+    this.#gridSize = Number.isInteger(model.gridSize) && model.gridSize >= 1 ? model.gridSize : 1;
+    this.#showGrid = model.showGrid ?? true;
+    this.#snapToGrid = model.snapToGrid ?? true;
     this.#view = model.view ?? '';
     this.#rec = model.rec;
     this.#total = model.total;
@@ -379,6 +386,27 @@ export class EditorDoc {
     return this.#width;
   }
 
+  get gridSize(): number {
+    return this.#gridSize;
+  }
+
+  get showGrid(): boolean {
+    return this.#showGrid;
+  }
+
+  get snapToGrid(): boolean {
+    return this.#snapToGrid;
+  }
+
+  /** Optimistically replace the layout grid from the Inspector (#193). Grid
+   * preferences are layout metadata, not object-geometry undo history. */
+  setLayoutGrid(gridSize: number, showGrid: boolean, snapToGrid: boolean): void {
+    this.#gridSize = Math.max(1, Math.round(gridSize || 1));
+    this.#showGrid = showGrid;
+    this.#snapToGrid = snapToGrid;
+    this.#version++;
+  }
+
   /** The layout's Browse view (`form` | `list` | `table`) — the UI gates summary
    * part kinds on it (Issue 3). Empty until hydrated. */
   get view(): string {
@@ -459,6 +487,9 @@ export class EditorDoc {
       rec: this.#rec,
       total: this.#total,
       width: this.#width,
+      gridSize: this.#gridSize,
+      showGrid: this.#showGrid,
+      snapToGrid: this.#snapToGrid,
       view: this.#view,
       fields: this.#fields,
       relatedRoutes: this.#relatedRoutes,

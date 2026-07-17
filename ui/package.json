@@ -13,6 +13,7 @@
     "test": "node scripts/doc-check.mjs && node scripts/border-placement-check.mjs",
     "test:position": "node scripts/position-check.mjs",
     "test:size": "node scripts/size-check.mjs",
+    "test:grid": "node scripts/grid-check.mjs",
     "test:border-placement": "node scripts/border-placement-check.mjs",
     "test:record-edit": "node scripts/record-edit-check.mjs",
     "monitor": "node scripts/monitor.mjs",

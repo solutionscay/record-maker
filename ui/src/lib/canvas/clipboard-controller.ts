@@ -9,7 +9,7 @@ import type { ObjectView } from '../model';
 import type { NewObjectRequest } from '../persist';
 import { createObject, deleteObject, setObjectReadOnly, setObjectsZ } from '../persist';
 import { deleteSelected as deleteSelectedAction, isDeleting } from '../actions';
-import { GRID, clampOrigin, snapToGrid } from '../canvas-edit';
+import { clampOrigin, snapToGrid } from '../canvas-edit';
 import { llog, lerror } from '../log';
 import { objectFootprintHeight, parseProps } from '../object-props';
 import type { CanvasContext } from './context';
@@ -19,6 +19,22 @@ export class ClipboardController {
 
   constructor(ctx: CanvasContext) {
     this.#ctx = ctx;
+  }
+
+  #gridStep(): number {
+    return this.#ctx.doc.snapToGrid ? this.#ctx.doc.gridSize : 1;
+  }
+
+  /** Keep clones visibly offset at fine grid sizes while making the offset an
+   * exact multiple of the active grid (#193). */
+  #cloneStep(): number {
+    const grid = this.#gridStep();
+    return Math.max(grid, snapToGrid(8, grid));
+  }
+
+  #snap(value: number): number {
+    const doc = this.#ctx.doc;
+    return snapToGrid(value, doc.snapToGrid ? doc.gridSize : 0);
   }
 
   /** Snapshot the current object selection into the session clipboard. Reads
@@ -84,7 +100,7 @@ export class ClipboardController {
 
     const step = clipboard.nextPasteStep(); // 1,2,3…
     const newIds = await this.#materializeClones(payload.objects, {
-      offset: { mode: 'cascade', desired: step * GRID }, // n * 8px down-right, before in-band capping
+      offset: { mode: 'cascade', desired: step * this.#cloneStep() },
       restack: true, // pasted group lands ON TOP, readOnly restored
       forcePointer: true, // a still-armed draw tool would clear moveable's target
       label: 'paste',
@@ -135,7 +151,7 @@ export class ClipboardController {
       }
     }
     const newIds = await this.#materializeClones(clips, {
-      offset: { mode: 'fixed', dx: GRID * 2, dy: GRID * 2 },
+      offset: { mode: 'fixed', dx: this.#cloneStep() * 2, dy: this.#cloneStep() * 2 },
       restack: false,
       forcePointer: false,
       label: 'duplicate',
@@ -189,8 +205,8 @@ export class ClipboardController {
       return {
         partId,
         kind: c.kind,
-        x: clampOrigin(snapToGrid(c.x + dx)),
-        y: clampOrigin(snapToGrid(c.y + dy)),
+        x: clampOrigin(this.#snap(c.x + dx)),
+        y: clampOrigin(this.#snap(c.y + dy)),
         w: c.w,
         h: c.h,
         rec: doc.rec,
@@ -316,7 +332,7 @@ export class ClipboardController {
    *  every object in a band shifts together, so relative layout is preserved
    *  exactly, and the delta is capped so the group's far edge stays in-band on
    *  BOTH axes (a per-object clamp would collapse offsets near an edge). Each
-   *  capped delta is floored to a whole GRID step: keeps the paste grid-aligned
+   *  capped delta is floored to a whole active-grid step: keeps the paste grid-aligned
    *  and guarantees the far edge never snaps a few px past the in-band cap. */
   #cloneOffsets(
     resolved: { c: ClipboardObject; partId: number; partH: number }[],
@@ -335,8 +351,9 @@ export class ClipboardController {
       e.maxY = Math.max(e.maxY, c.y + objectFootprintHeight(c));
       ext.set(partId, e);
     }
+    const grid = this.#gridStep();
     const capToGrid = (max: number) =>
-      Math.max(0, Math.floor(Math.min(policy.desired, max) / GRID) * GRID);
+      Math.max(0, Math.floor(Math.min(policy.desired, max) / grid) * grid);
     for (const [partId, e] of ext) {
       offset.set(partId, {
         dx: capToGrid(canvasWidth - e.maxX),

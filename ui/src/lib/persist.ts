@@ -17,6 +17,12 @@ export interface StyleResult {
   shapeStyle: string;
 }
 
+export interface LayoutGridSettings {
+  gridSize: number;
+  showGrid: boolean;
+  snapToGrid: boolean;
+}
+
 /** The object the Create zone places (#48). For a `field`, `fieldId` names which
  * field to bind (the server builds the binding + spawns the caption label). `rec`
  * is the record the canvas shows, so the returned object resolves its live value. */
@@ -60,6 +66,12 @@ function postJson<T>(url: string, body: unknown): Promise<T> {
  * object AND its spawned caption label (#60), other kinds return one. */
 export function createObject(layoutId: string, req: NewObjectRequest): Promise<ObjectView[]> {
   return postJson(`/design/${layoutId}/object`, req);
+}
+
+/** Persist the one editor grid owned by the layout (#193). Band selection is
+ * only an Inspector entry point; no part id participates in this endpoint. */
+export function setLayoutGrid(layoutId: string, settings: LayoutGridSettings): Promise<LayoutGridSettings> {
+  return postJson(`/design/${layoutId}/grid`, settings);
 }
 
 /** Append a band; returns its (object-less) part view plus the layout's

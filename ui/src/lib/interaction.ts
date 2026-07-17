@@ -25,6 +25,7 @@ import {
 import { clipboard } from './clipboard.svelte';
 import { runUndo, runRedo } from './history';
 import { llog } from './log';
+import { setObjectsGeometry } from './persist';
 import { CanvasContext } from './canvas/context';
 import { ClipboardController } from './canvas/clipboard-controller';
 import { HoverController } from './canvas/hover';
@@ -88,6 +89,11 @@ export class CanvasInteraction {
    * pointer conversion during placement divides by it. */
   setZoom(zoom: number): void {
     this.#transform.setZoom(zoom);
+  }
+
+  /** Update Moveable's live layout-owned snap grid (#193). */
+  setGrid(size: number, enabled: boolean): void {
+    this.#transform.setGrid(size, enabled);
   }
 
   /** Re-apply the editing object's server-derived text style to the open inline
@@ -177,6 +183,34 @@ export class CanvasInteraction {
       if (doc.selection.size === 0 || this.#ctx.placing) return;
       e.preventDefault();
       void this.#clipboard.duplicateSelected();
+      return;
+    }
+
+    // Arrow-key nudge uses the same layout-owned step as pointer snapping (#193).
+    // Snap-off still moves in whole pixels, matching the integer geometry contract.
+    if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+      if (inEditable || e.altKey || e.ctrlKey || e.metaKey || doc.selection.size === 0) return;
+      if (this.#ctx.gesturing || this.#placement.isDrawing || this.#ctx.placing) return;
+      e.preventDefault();
+      const unit = (doc.snapToGrid ? doc.gridSize : 1) * (e.shiftKey ? 10 : 1);
+      const requestedX = e.key === 'ArrowLeft' ? -unit : e.key === 'ArrowRight' ? unit : 0;
+      const requestedY = e.key === 'ArrowUp' ? -unit : e.key === 'ArrowDown' ? unit : 0;
+      const objects = [...doc.selection].map((id) => doc.getObject(id)).filter((o) => !!o);
+      const minX = Math.min(...objects.map((o) => o.x));
+      const minY = Math.min(...objects.map((o) => o.y));
+      const dx = Math.max(requestedX, -minX);
+      const dy = Math.max(requestedY, -minY);
+      if (dx === 0 && dy === 0) return;
+      for (const o of objects) doc.moveObject(o.id, dx, dy);
+      doc.mark();
+      this.#transform.refresh();
+      const items = objects
+        .map((o) => doc.getObject(o.id))
+        .filter((o) => !!o)
+        .map((o) => ({ id: o.id, x: o.x, y: o.y, w: o.w, h: o.h }));
+      void setObjectsGeometry(this.#ctx.layoutId, items).catch((error) => {
+        doc.setError(error instanceof Error ? error.message : String(error));
+      });
       return;
     }
 

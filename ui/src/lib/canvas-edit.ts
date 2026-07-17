@@ -6,16 +6,16 @@
 
 import type { DesignModel } from './model';
 
-/** Editor snap grid in px. Feeds both moveable's `snapGridWidth/Height` options
- * and the geometry we persist, so on-screen snapping and stored values agree. */
-export const GRID = 8;
+/** Default for migrated/new layout metadata (#193). Live interactions read the
+ * current EditorDoc setting rather than a client-only constant. */
+export const DEFAULT_GRID_SIZE = 1;
 
 /** Pixel distance within which moveable snaps to a grid line or sibling edge. */
 export const SNAP_THRESHOLD = 5;
 
 /** Snap a px value to the nearest grid line. `grid <= 0` disables snapping (the
  * value is still rounded to a whole px, since geometry is integer). */
-export function snapToGrid(v: number, grid: number = GRID): number {
+export function snapToGrid(v: number, grid: number = DEFAULT_GRID_SIZE): number {
   if (grid <= 0) return Math.round(v);
   return Math.round(v / grid) * grid;
 }

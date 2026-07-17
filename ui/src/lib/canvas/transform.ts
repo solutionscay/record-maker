@@ -4,8 +4,9 @@
 // target sync with the store selection. The vanilla cores are consumed directly.
 //
 // Single source of truth is the store: pointer gestures never write element
-// styles. moveable reports the new (already grid/edge-snapped) position/size and
-// we push it through the store's command surface (setObjectGeometry); Svelte then
+// styles. moveable reports the gesture position/size; this controller resolves
+// it against the layout grid and pushes it through the store's command surface
+// (setObjectGeometry); Svelte then
 // re-renders the object from the store. moveable derives its control box from the
 // gesture's cached start rect + pointer delta, so routing output back into the
 // store does NOT create a feedback loop. A whole gesture commits as ONE undo step
@@ -15,7 +16,7 @@ import Moveable from 'moveable';
 import Selecto from 'selecto';
 
 import type { ObjectDoc } from '../doc.svelte';
-import { GRID, SNAP_THRESHOLD, clampOrigin, objectIdsInPaintOrder, snapToGrid } from '../canvas-edit';
+import { SNAP_THRESHOLD, clampOrigin, objectIdsInPaintOrder, snapToGrid } from '../canvas-edit';
 import { partAtY } from '../create';
 import {
   setObjectPart,
@@ -46,6 +47,9 @@ export class TransformController {
    * bare empty-canvas click does NOT set this, so it still deselects as before.
    * 0 = disarmed; otherwise a `performance.now()` deadline the click must beat. */
   #suppressClickUntil = 0;
+  /** Geometry at pointer-down. Group dragging snaps one anchor and applies its
+   * delta to every member, preserving authored offsets between group members. */
+  #dragStarts = new Map<number, { x: number; y: number }>();
   #resizeStarts = new Map<
     number,
     {
@@ -73,8 +77,8 @@ export class TransformController {
       resizable: true,
       rotatable: false,
       snappable: true,
-      snapGridWidth: GRID,
-      snapGridHeight: GRID,
+      snapGridWidth: ctx.doc.gridSize,
+      snapGridHeight: ctx.doc.gridSize,
       snapThreshold: SNAP_THRESHOLD,
       isDisplaySnapDigit: false,
       elementGuidelines: [],
@@ -87,11 +91,15 @@ export class TransformController {
       llog('drag', 'dragStart', { id: this.#ctx.idForElement(e.target) });
       this.#begin();
       this.#selectFromTarget(e.target);
+      this.#captureDragStarts();
     });
     this.#moveable.on('drag', (e) => this.#applyMove(e.target, e.left, e.top));
     this.#moveable.on('dragEnd', () => this.#end('drag'));
-    this.#moveable.on('dragGroupStart', () => this.#begin());
-    this.#moveable.on('dragGroup', (e) => e.events.forEach((ev) => this.#applyMove(ev.target, ev.left, ev.top)));
+    this.#moveable.on('dragGroupStart', () => {
+      this.#begin();
+      this.#captureDragStarts();
+    });
+    this.#moveable.on('dragGroup', (e) => this.#applyGroupMove(e.events));
     this.#moveable.on('dragGroupEnd', () => this.#end('drag'));
 
     // ── resize (single + group) — e.drag carries the new left/top for top/left handles ──
@@ -318,6 +326,18 @@ export class TransformController {
     this.#moveable.setState({ zoom: z });
   }
 
+  /** Apply the current layout grid without rebuilding the interaction layer.
+   * Moveable supplies live snap feedback while the absolute geometry and manual
+   * resize paths below resolve against the same EditorDoc values. */
+  setGrid(size: number, enabled: boolean): void {
+    const grid = Math.max(1, Math.round(size || 1));
+    this.#moveable.setState({
+      snappable: enabled,
+      snapGridWidth: grid,
+      snapGridHeight: grid,
+    });
+  }
+
   /** Post-delete canvas chrome reset (the shared command layer's cleanup): force
    * moveable to re-derive its (now empty) target. */
   forceClearTarget(): void {
@@ -481,6 +501,7 @@ export class TransformController {
   #begin(): void {
     this.#ctx.gesturing = true;
     this.#moved = false;
+    this.#dragStarts.clear();
     this.#resizeStarts.clear();
     this.#ctx.gestureIdentity = this.#ctx.identitySnapshot();
   }
@@ -500,6 +521,7 @@ export class TransformController {
       void this.#persistDirtyLineProps();
     }
     this.#targetKey = ''; // force a re-sync after the gesture
+    this.#dragStarts.clear();
     this.#resizeStarts.clear();
     this.#ctx.gestureIdentity = null;
     this.#scheduleRectUpdate();
@@ -523,6 +545,22 @@ export class TransformController {
     if (id !== undefined && !this.#ctx.doc.isSelected(id)) this.#ctx.doc.selectOnly([id]);
   }
 
+  #captureDragStarts(): void {
+    for (const id of this.#ctx.doc.selection) {
+      const o = this.#ctx.doc.getObject(id);
+      if (o) this.#dragStarts.set(id, { x: o.x, y: o.y });
+    }
+  }
+
+  #snappedMovePosition(left: number, top: number): { x: number; y: number } {
+    const grid = this.#ctx.doc.snapToGrid ? this.#ctx.doc.gridSize : 0;
+    return {
+      x: clampOrigin(snapToGrid(left, grid)),
+      // y is deliberately not clamped until drop so objects can cross bands.
+      y: snapToGrid(top, grid),
+    };
+  }
+
   #applyMove(target: HTMLElement | SVGElement, left: number, top: number): void {
     const identity = this.#ctx.currentIdentity();
     const id = this.#ctx.idForElement(target, identity);
@@ -532,13 +570,47 @@ export class TransformController {
       });
       return;
     }
+    const next = this.#snappedMovePosition(left, top);
+    const current = this.#ctx.doc.getObject(id);
+    if (current && current.x === next.x && current.y === next.y) return;
     this.#moved = true;
     // y is left UNCLAMPED during a drag so the object can travel above its own band
     // (a negative part-relative y renders over the band above) — cross-band drags
     // are settled to a real band + local y on drop (#settleBands). x stays ≥ 0.
-    this.#ctx.doc.setObjectGeometry(id, { x: clampOrigin(left), y: Math.round(top) });
+    this.#ctx.doc.setObjectGeometry(id, next);
     this.#scheduleRectUpdate();
-    llog('drag', 'apply move', { id, x: clampOrigin(left), y: Math.round(top) });
+    llog('drag', 'apply move', { id, ...next });
+  }
+
+  #applyGroupMove(events: Array<{ target: HTMLElement | SVGElement; left: number; top: number }>): void {
+    const identity = this.#ctx.currentIdentity();
+    const anchorEvent = events.find((event) => {
+      const id = this.#ctx.idForElement(event.target, identity);
+      return id !== undefined && this.#dragStarts.has(id);
+    });
+    if (!anchorEvent) return;
+    const anchorId = this.#ctx.idForElement(anchorEvent.target, identity);
+    const anchorStart = anchorId === undefined ? undefined : this.#dragStarts.get(anchorId);
+    if (!anchorStart) return;
+
+    const anchorNext = this.#snappedMovePosition(anchorEvent.left, anchorEvent.top);
+    const dx = anchorNext.x - anchorStart.x;
+    const dy = anchorNext.y - anchorStart.y;
+    let changed = false;
+    for (const event of events) {
+      const id = this.#ctx.idForElement(event.target, identity);
+      const start = id === undefined ? undefined : this.#dragStarts.get(id);
+      if (id === undefined || !start) continue;
+      const next = { x: clampOrigin(start.x + dx), y: start.y + dy };
+      const current = this.#ctx.doc.getObject(id);
+      if (current && current.x === next.x && current.y === next.y) continue;
+      this.#ctx.doc.setObjectGeometry(id, next);
+      changed = true;
+    }
+    if (!changed) return;
+    this.#moved = true;
+    this.#scheduleRectUpdate();
+    llog('drag', 'apply group move', { anchorId, dx, dy, ids: [...this.#dragStarts.keys()] });
   }
 
   /** Settle every moved object onto a real band after a drag: read its absolute
@@ -620,15 +692,15 @@ export class TransformController {
       let w = start.w;
       let h = start.h;
       if (dirX >= 0) {
-        w = snapToGrid(start.w + dx);
+        w = snapToGrid(start.w + dx, this.#ctx.doc.snapToGrid ? this.#ctx.doc.gridSize : 0);
       } else {
-        x = snapToGrid(start.x + dx);
+        x = snapToGrid(start.x + dx, this.#ctx.doc.snapToGrid ? this.#ctx.doc.gridSize : 0);
         w = start.w - (x - start.x);
       }
       if (dirY >= 0) {
-        h = snapToGrid(start.h + dy);
+        h = snapToGrid(start.h + dy, this.#ctx.doc.snapToGrid ? this.#ctx.doc.gridSize : 0);
       } else {
-        y = snapToGrid(start.y + dy);
+        y = snapToGrid(start.y + dy, this.#ctx.doc.snapToGrid ? this.#ctx.doc.gridSize : 0);
         h = start.h - (y - start.y);
       }
       w = Math.max(1, Math.round(w));

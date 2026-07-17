@@ -317,10 +317,10 @@
        `.fm-field` border + fill here, per-column `object_style`/`text_style`
        overrides layered inline (which win). `.fm-finput` (editable cell) reuses the
        same left/width and supplies its own padding. */
-    .fm-portal-cell { position: absolute; top: 0; bottom: 0; box-sizing: border-box;
+    .fm-portal-cell { position: absolute; top: 0; box-sizing: border-box;
                      padding: 0 .45rem; overflow: hidden; white-space: nowrap;
                      text-overflow: ellipsis; min-width: 0;
-                     line-height: calc(var(--fm-portal-row-h, 1.6rem) - 2px);
+                     line-height: calc(var(--fm-portal-cell-h, var(--fm-portal-row-h, 1.6rem)) - 2px);
                      border: 1px solid #b9c2cc; background: #fff; }
     /* An editable cell IS the field box (it has no separate `.fm-field` wrapper to
        draw the border), so it keeps the box border/fill rather than going
@@ -1266,7 +1266,7 @@
       var dest = k === 'l' ? 'design' : 'browse';
       if (MODE === dest) return; // already in that mode
       navigateWithSchemaGuard('/' + dest + '/' + LID);
-    });
+    }, true);
     // Show the platform-correct modifier symbol in keyboard hints.
     if (/Mac|iPhone|iPad/.test(navigator.platform)) {
       document.querySelectorAll('.kbd-mod').forEach(function (k) { k.textContent = '⌘'; });

@@ -58,6 +58,8 @@ fn field_obj(field_id: i64, value: &str, read_only: bool) -> ObjectView {
         portal_column_editable: Vec::new(),
         portal_column_lefts: Vec::new(),
         portal_column_widths: Vec::new(),
+        portal_column_tops: Vec::new(),
+        portal_column_heights: Vec::new(),
         portal_column_styles: Vec::new(),
         portal_rows: Vec::new(),
         portal_can_create: false,
@@ -182,9 +184,9 @@ fn portal_object_renders_related_rows_in_form_view() {
         "customer.Total",
         "Total",
         20,
-        20,
+        10,
         100,
-        24,
+        12,
         Some(portal_id),
         false,
     )
@@ -237,6 +239,8 @@ fn portal_object_renders_related_rows_in_form_view() {
         portal.portal_columns,
         vec!["Total".to_string(), "CustomerId".to_string()]
     );
+    assert_eq!(portal.portal_column_tops, vec![0, 10]);
+    assert_eq!(portal.portal_column_heights, vec![12, 24]);
     // One row per related invoice, each addressable by its terminal id, carrying
     // only the authored columns' values (Total first).
     assert_eq!(portal.portal_rows.len(), 2);
@@ -300,6 +304,14 @@ fn portal_object_renders_related_rows_in_form_view() {
         html.contains(r#"class="fm-text">Total</span>"#)
             && html.contains(r#"class="fm-text">CustomerId</span>"#),
         "authored label objects supply the portal headings"
+    );
+    assert!(
+        html.contains(r#"left:10px;top:0px;width:100px;height:12px;--fm-portal-cell-h:12px;"#),
+        "a short portal field retains its authored top and height in every repeated row\n{html}"
+    );
+    assert!(
+        html.contains("navigateWithSchemaGuard('/' + dest + '/' + LID);\n    }, true);"),
+        "the mode-switch listener captures shortcuts before portal editors stop bubbling them"
     );
 }
 
@@ -522,10 +534,11 @@ async fn multi_hop_portal_round_trips_many_to_many_and_scopes_mutations() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    // The cell is placed at its column's authored portal-relative geometry
-    // (x 20 − portal x 10 = left 10; width 120), matching its heading label 1:1.
+    // The cell is placed at its full authored portal-relative geometry
+    // (x/y 20 − portal x/y 10 = left/top 10; width 120; height 24), matching
+    // its Layout field instead of stretching vertically to the row.
     assert!(
-        html.contains(r#"<span class="fm-portal-cell" style="left:10px;width:120px;">Lead</span>"#),
+        html.contains(r#"<span class="fm-portal-cell" style="left:10px;top:10px;width:120px;height:24px;--fm-portal-cell-h:24px;">Lead</span>"#),
         "join field renders read-only at authored geometry"
     );
     assert!(

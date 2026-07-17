@@ -91,6 +91,10 @@ export interface ObjectView {
    * canvas (which never resolves a portal). */
   portalColumnLefts?: number[];
   portalColumnWidths?: number[];
+  /** Portal (#192): authored vertical geometry for each repeated field, parallel
+   * to `portalColumns`. Top is row-relative; height remains the field's own h. */
+  portalColumnTops?: number[];
+  portalColumnHeights?: number[];
   /** Portal (#169): each authored column's box+text inline style (fill/border/radius
    * + colour/font/align), parallel to `portalColumns`, so a Browse value cell renders
    * the same field-box appearance the designer authored in Layout. Omitted for

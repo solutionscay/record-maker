@@ -435,6 +435,14 @@ pub(crate) struct ObjectView {
     pub(crate) portal_column_lefts: Vec<i64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) portal_column_widths: Vec<i64>,
+    /// Portal (#192): each authored column's portal-row-relative top offset and
+    /// own height, parallel to [`Self::portal_columns`]. Keeping these separate
+    /// from the portal row height prevents a short field from being stretched to
+    /// fill its reusable row in Browse.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) portal_column_tops: Vec<i64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) portal_column_heights: Vec<i64>,
     /// Portal (#169): each authored column's box+text inline style, parallel to
     /// [`Self::portal_columns`], so a Browse value cell renders the same field-box
     /// appearance (fill/border/radius + colour/font/align) the designer authored in
@@ -847,6 +855,11 @@ struct PortalResolved {
     /// equal flex widths. One geometry source for both, exactly as Layout renders it.
     column_lefts: Vec<i64>,
     column_widths: Vec<i64>,
+    /// #192: authored y/h inside each repeated row. The top is relative to the
+    /// portal origin just as `column_lefts` is; height is the child field's own
+    /// box height rather than the portal row height.
+    column_tops: Vec<i64>,
+    column_heights: Vec<i64>,
     /// #169: each authored column's box+text inline style (`object_style` fill/
     /// border/radius + `text_style` colour/font/align), parallel to `columns`. A
     /// Browse value cell renders the SAME field-box appearance the designer authored
@@ -905,6 +918,8 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
     let mut column_editable: Vec<bool> = Vec::new();
     let mut column_lefts: Vec<i64> = Vec::new();
     let mut column_widths: Vec<i64> = Vec::new();
+    let mut column_tops: Vec<i64> = Vec::new();
+    let mut column_heights: Vec<i64> = Vec::new();
     let mut column_styles: Vec<String> = Vec::new();
     for child in &children {
         if !child.kind.is_field() {
@@ -951,6 +966,8 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         // doc on `PortalResolved::column_lefts`).
         column_lefts.push(child.x - o.x);
         column_widths.push(child.w);
+        column_tops.push(child.y - o.y);
+        column_heights.push(child.h);
         // The authored field-box + text appearance, so the Browse cell mirrors the
         // Layout field (fill/border/radius + colour/font/align) on top of the default
         // `.fm-field` look supplied by CSS.
@@ -1037,6 +1054,8 @@ fn resolve_portal(o: &ObjectMeta, ctx: &PortalCtx) -> PortalResolved {
         column_editable,
         column_lefts,
         column_widths,
+        column_tops,
+        column_heights,
         column_styles,
         rows,
         can_create,
@@ -1182,6 +1201,8 @@ fn prepared_object_view(
         column_editable: portal_column_editable,
         column_lefts: portal_column_lefts,
         column_widths: portal_column_widths,
+        column_tops: portal_column_tops,
+        column_heights: portal_column_heights,
         column_styles: portal_column_styles,
         rows: portal_rows,
         can_create: portal_can_create,
@@ -1235,6 +1256,8 @@ fn prepared_object_view(
         portal_column_editable,
         portal_column_lefts,
         portal_column_widths,
+        portal_column_tops,
+        portal_column_heights,
         portal_column_styles,
         portal_rows,
         portal_can_create,

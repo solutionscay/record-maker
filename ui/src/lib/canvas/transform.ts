@@ -38,6 +38,14 @@ export class TransformController {
    * persist so a plain click (select, no movement) doesn't POST or push undo. */
   #moved = false;
   #rectFrame: number | null = null;
+  /** Latest pointer geometry awaiting the next display frame. Moveable batches
+   * its own control-box paint to frames; matching that cadence prevents the
+   * Svelte object from advancing one or more raw pointer events ahead (#194). */
+  #moveFrame: number | null = null;
+  #pendingMoves = new Map<
+    number,
+    { target: HTMLElement | SVGElement; next: { x: number; y: number } }
+  >();
   /** Object ids moveable currently targets, and a cheap key to dedupe setState. */
   #targetIds = new Set<number>();
   #targetKey = '';
@@ -499,6 +507,7 @@ export class TransformController {
   // ── gesture lifecycle ──
 
   #begin(): void {
+    this.#clearPendingMoves();
     this.#ctx.gesturing = true;
     this.#moved = false;
     this.#dragStarts.clear();
@@ -509,11 +518,15 @@ export class TransformController {
   /** End a gesture: if it actually changed geometry, seal one undo step and
    * persist the moved/resized group; a no-move click does neither. Then re-target. */
   #end(kind: 'drag' | 'resize' = 'drag'): void {
+    // Pointer-up can arrive before the last requested display frame. Commit that
+    // final authored position before band settlement, undo sealing, or persist.
+    this.#flushMoves();
     this.#ctx.gesturing = false;
     // A drag may have carried objects across band boundaries; settle them onto a
     // real band (reparenting) BEFORE the undo mark so it's one step. Resize never
     // crosses bands, so it skips this.
     const reparented = kind === 'drag' && this.#moved ? this.#settleBands() : new Set<number>();
+    this.#clearBoundsCorrection();
     llog(kind, `${kind}End`, { moved: this.#moved, selection: [...this.#ctx.doc.selection], reparented: [...reparented] });
     if (this.#moved) {
       this.#ctx.doc.mark();
@@ -561,6 +574,81 @@ export class TransformController {
     };
   }
 
+  #queueMove(id: number, target: HTMLElement | SVGElement, next: { x: number; y: number }): void {
+    const pending = this.#pendingMoves.get(id)?.next;
+    const current = this.#ctx.doc.getObject(id);
+    if (
+      (pending && pending.x === next.x && pending.y === next.y) ||
+      (!pending && current && current.x === next.x && current.y === next.y)
+    ) return;
+    this.#pendingMoves.set(id, { target, next });
+    this.#moved = true;
+    if (this.#moveFrame !== null) return;
+    this.#moveFrame = requestAnimationFrame(() => {
+      this.#moveFrame = null;
+      this.#flushMoves();
+    });
+  }
+
+  #flushMoves(): void {
+    if (this.#moveFrame !== null) {
+      cancelAnimationFrame(this.#moveFrame);
+      this.#moveFrame = null;
+    }
+    if (this.#pendingMoves.size === 0) return;
+    const moved: Array<{ id: number; x: number; y: number; target: HTMLElement | SVGElement }> = [];
+    for (const [id, { target, next }] of this.#pendingMoves) {
+      this.#ctx.doc.setObjectGeometry(id, next);
+      // Commit the same geometry synchronously to this frame. Svelte remains the
+      // source of truth and subsequently writes these identical values.
+      target.style.left = `${next.x}px`;
+      target.style.top = `${next.y}px`;
+      moved.push({ id, ...next, target });
+    }
+    this.#pendingMoves.clear();
+    // Measure only after every target shares the frame's authored geometry.
+    const controlBox = this.#activeControlBox();
+    this.#clearBoundsCorrection();
+    this.#moveable.updateRect();
+    const targetRects = moved.map(({ target }) => target.getBoundingClientRect());
+    const targetLeft = Math.min(...targetRects.map((rect) => rect.left));
+    const targetTop = Math.min(...targetRects.map((rect) => rect.top));
+    const controlRect = controlBox.getBoundingClientRect();
+    const transform = new DOMMatrixReadOnly(getComputedStyle(controlBox).transform);
+    const host = this.#ctx.stage.ownerDocument.documentElement;
+    host.style.setProperty('--le-drag-bounds-x', `${transform.m41 + targetLeft - controlRect.left}px`);
+    host.style.setProperty('--le-drag-bounds-y', `${transform.m42 + targetTop - controlRect.top}px`);
+    host.classList.add('syncing-drag-bounds');
+    controlBox.toggleAttribute('data-rm-drag-bounds', true);
+    this.#ctx.hover.paint();
+    llog('drag', 'flush move frame', { moved: moved.map(({ id, x, y }) => ({ id, x, y })) });
+  }
+
+  #clearPendingMoves(): void {
+    if (this.#moveFrame !== null) cancelAnimationFrame(this.#moveFrame);
+    this.#moveFrame = null;
+    this.#pendingMoves.clear();
+    this.#clearBoundsCorrection();
+  }
+
+  #clearBoundsCorrection(): void {
+    const host = this.#ctx.stage.ownerDocument.documentElement;
+    host.classList.remove('syncing-drag-bounds');
+    host.style.removeProperty('--le-drag-bounds-x');
+    host.style.removeProperty('--le-drag-bounds-y');
+    this.#ctx.stage.querySelectorAll('[data-rm-drag-bounds]').forEach((box) => {
+      box.removeAttribute('data-rm-drag-bounds');
+    });
+  }
+
+  /** Array targets make Moveable create wrapper managers. The painted child is
+   * the control box that actually owns direction lines, not always the public
+   * empty wrapper returned by the top-level manager. */
+  #activeControlBox(): HTMLElement {
+    const boxes = [...this.#ctx.stage.querySelectorAll<HTMLElement>('.moveable-control-box')];
+    return boxes.findLast((box) => box.querySelector('.moveable-line')) ?? this.#moveable.getControlBoxElement();
+  }
+
   #applyMove(target: HTMLElement | SVGElement, left: number, top: number): void {
     const identity = this.#ctx.currentIdentity();
     const id = this.#ctx.idForElement(target, identity);
@@ -571,15 +659,10 @@ export class TransformController {
       return;
     }
     const next = this.#snappedMovePosition(left, top);
-    const current = this.#ctx.doc.getObject(id);
-    if (current && current.x === next.x && current.y === next.y) return;
-    this.#moved = true;
     // y is left UNCLAMPED during a drag so the object can travel above its own band
     // (a negative part-relative y renders over the band above) — cross-band drags
     // are settled to a real band + local y on drop (#settleBands). x stays ≥ 0.
-    this.#ctx.doc.setObjectGeometry(id, next);
-    this.#scheduleRectUpdate();
-    llog('drag', 'apply move', { id, ...next });
+    this.#queueMove(id, target, next);
   }
 
   #applyGroupMove(events: Array<{ target: HTMLElement | SVGElement; left: number; top: number }>): void {
@@ -596,21 +679,14 @@ export class TransformController {
     const anchorNext = this.#snappedMovePosition(anchorEvent.left, anchorEvent.top);
     const dx = anchorNext.x - anchorStart.x;
     const dy = anchorNext.y - anchorStart.y;
-    let changed = false;
     for (const event of events) {
       const id = this.#ctx.idForElement(event.target, identity);
       const start = id === undefined ? undefined : this.#dragStarts.get(id);
       if (id === undefined || !start) continue;
       const next = { x: clampOrigin(start.x + dx), y: start.y + dy };
-      const current = this.#ctx.doc.getObject(id);
-      if (current && current.x === next.x && current.y === next.y) continue;
-      this.#ctx.doc.setObjectGeometry(id, next);
-      changed = true;
+      this.#queueMove(id, event.target, next);
     }
-    if (!changed) return;
-    this.#moved = true;
-    this.#scheduleRectUpdate();
-    llog('drag', 'apply group move', { anchorId, dx, dy, ids: [...this.#dragStarts.keys()] });
+    llog('drag', 'queue group move', { anchorId, dx, dy, ids: [...this.#dragStarts.keys()] });
   }
 
   /** Settle every moved object onto a real band after a drag: read its absolute
@@ -851,6 +927,7 @@ export class TransformController {
 
   destroy(): void {
     window.removeEventListener('pointerup', this.#onObjectClickUp);
+    this.#clearPendingMoves();
     if (this.#rectFrame !== null) cancelAnimationFrame(this.#rectFrame);
     this.#moveable.destroy();
     this.#selecto.destroy();

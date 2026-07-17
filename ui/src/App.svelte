@@ -634,6 +634,12 @@
     cursor: move;
     user-select: none;
   }
+  /* #194: pin Moveable's frame-coalesced bounds to the same authored transform
+     as the object. The variables live on `html`, outside both Svelte and
+     Moveable's independently rewritten style attributes. */
+  :global(html.syncing-drag-bounds .le-stage .moveable-control-box[data-rm-drag-bounds]) {
+    transform: translate3d(var(--le-drag-bounds-x), var(--le-drag-bounds-y), 0) !important;
+  }
   .le-stage :global(.fm-obj:has(.fm-line)) {
     overflow: visible;
     pointer-events: auto;

@@ -1,5 +1,5 @@
-// #193 browser acceptance: the layout-owned grid renders across every band and
-// drives live pointer snapping at configurable 1px/coarser steps.
+// #193/#194/#195 browser acceptance: layout-owned snapping plus frame-sampled
+// object/bounds alignment and pointer-to-style commit latency under burst drag.
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -74,10 +74,31 @@ async function fastDragAligned(page, objectCount, dx, label) {
   assert.ok(fastBox, `${label} has a fast-drag box`);
   await page.mouse.move(fastBox.x + fastBox.width / 2, fastBox.y + fastBox.height / 2);
   await page.mouse.down();
-  const sampledDrift = page.evaluate(({ count }) => new Promise((resolveDrift) => {
-    let max = 0;
-    let detail = null;
+  const sampledDrift = page.evaluate(({ count, pointerX, grabOffsetX }) => new Promise((resolveDrift) => {
+    let maxBounds = 0;
+    let boundsDetail = null;
+    let maxCursor = 0;
+    let cursorDetail = null;
     let frames = 0;
+    let latestPointerX = pointerX;
+    let latestPointerAt = performance.now();
+    let pointerSequence = 0;
+    let sampledSequence = -1;
+    let committedSequence = -1;
+    const commitLatencies = [];
+    const observedObject = document.querySelector('.fm-canvas .fm-obj');
+    const observer = new MutationObserver(() => {
+      if (pointerSequence === committedSequence) return;
+      committedSequence = pointerSequence;
+      commitLatencies.push(performance.now() - latestPointerAt);
+    });
+    if (observedObject) observer.observe(observedObject, { attributes: true, attributeFilter: ['style'] });
+    const onPointerMove = (event) => {
+      latestPointerX = event.clientX;
+      latestPointerAt = performance.now();
+      pointerSequence += 1;
+    };
+    window.addEventListener('pointermove', onPointerMove, { capture: true });
     const sample = () => {
       const objectElements = [...document.querySelectorAll('.fm-canvas .fm-obj')].slice(0, count);
       const boundsElement = document.querySelector('.moveable-control-box[data-rm-drag-bounds]');
@@ -87,17 +108,40 @@ async function fastDragAligned(page, objectCount, dx, label) {
         const objectTop = Math.min(...objectRects.map((rect) => rect.top));
         const boundsRect = boundsElement.getBoundingClientRect();
         const drift = Math.max(Math.abs(objectLeft - boundsRect.left), Math.abs(objectTop - boundsRect.top));
-        if (drift > max) {
-          max = drift;
-          detail = { frame: frames, objectLeft, objectTop, boundsLeft: boundsRect.left, boundsTop: boundsRect.top };
+        if (drift > maxBounds) {
+          maxBounds = drift;
+          boundsDetail = { frame: frames, objectLeft, objectTop, boundsLeft: boundsRect.left, boundsTop: boundsRect.top };
+        }
+        if (pointerSequence !== sampledSequence) {
+          sampledSequence = pointerSequence;
+          const expectedLeft = latestPointerX - grabOffsetX;
+          const cursorLag = expectedLeft - objectLeft;
+          if (Math.abs(cursorLag) > Math.abs(maxCursor)) {
+            maxCursor = cursorLag;
+            cursorDetail = { frame: frames, latestPointerX, expectedLeft, objectLeft, cursorLag };
+          }
         }
       }
       frames += 1;
       if (frames < 30) requestAnimationFrame(() => setTimeout(sample, 0));
-      else resolveDrift({ max, detail });
+      else {
+        window.removeEventListener('pointermove', onPointerMove, { capture: true });
+        observer.disconnect();
+        const sortedLatencies = commitLatencies.toSorted((a, b) => a - b);
+        resolveDrift({
+          maxBounds,
+          boundsDetail,
+          maxCursor,
+          cursorDetail,
+          commitSamples: sortedLatencies.length,
+          commitMedianMs: sortedLatencies[Math.floor(sortedLatencies.length / 2)] ?? 0,
+          commitP95Ms: sortedLatencies[Math.floor(sortedLatencies.length * 0.95)] ?? 0,
+          commitMaxMs: sortedLatencies.at(-1) ?? 0,
+        });
+      }
     };
     requestAnimationFrame(() => setTimeout(sample, 0));
-  }), { count: objectCount });
+  }), { count: objectCount, pointerX: fastBox.x + fastBox.width / 2, grabOffsetX: fastBox.width / 2 });
   await page.mouse.move(fastBox.x + fastBox.width / 2 + dx, fastBox.y + fastBox.height / 2, { steps: 80 });
   const fastDrift = await sampledDrift;
   const objectBoxes = await Promise.all(
@@ -105,7 +149,8 @@ async function fastDragAligned(page, objectCount, dx, label) {
   );
   const liveBoundsBox = await page.locator('.moveable-control-box[data-rm-drag-bounds]').boundingBox();
   await page.mouse.up();
-  assert.ok(fastDrift.max <= 0.5, `${label} never splits across fast-drag frames (${JSON.stringify(fastDrift)})`);
+  assert.ok(fastDrift.maxBounds <= 0.5, `${label} never splits across fast-drag frames (${JSON.stringify(fastDrift)})`);
+  assert.ok(Math.abs(fastDrift.maxCursor) <= 1.01, `${label} stays within whole-pixel cursor geometry (${JSON.stringify(fastDrift)})`);
   assert.ok(objectBoxes.every(Boolean) && liveBoundsBox, `${label} and transform bounds render during fast drag`);
   const liveLeft = Math.min(...objectBoxes.map((box) => box.x));
   const liveTop = Math.min(...objectBoxes.map((box) => box.y));
@@ -113,6 +158,7 @@ async function fastDragAligned(page, objectCount, dx, label) {
     Math.abs(liveLeft - liveBoundsBox.x) <= 0.5 && Math.abs(liveTop - liveBoundsBox.y) <= 0.5,
     `${label} finishes aligned: object ${liveLeft},${liveTop}; bounds ${liveBoundsBox.x},${liveBoundsBox.y}`,
   );
+  console.log(`${label} latency: ${JSON.stringify(fastDrift)}`);
 }
 
 let browser;

@@ -648,6 +648,12 @@ pub(crate) struct FieldView {
 pub(crate) struct TableColumn {
     pub(crate) field: FieldMeta,
     pub(crate) format: Option<serde_json::Value>,
+    /// Server-derived field-box appearance (fill, border placement, stroke, and
+    /// radius), shared with Form/List and the Layout canvas.
+    pub(crate) object_style: String,
+    /// Server-derived typography/alignment. Value-dependent format colour is
+    /// appended after this in `table_cell`, so the conditional colour wins.
+    pub(crate) text_style: String,
     /// The placed object's per-object editability (#40/#43) — carried through so
     /// Table Browse cells honor it exactly like Form/List (a manually-placed
     /// primary key, #156, stays read-only in every view).
@@ -1788,6 +1794,8 @@ pub(crate) fn table_body_columns(
                 TableColumn {
                     field: fields[idx].clone(),
                     format,
+                    object_style: object_style(o.kind, o.props.as_deref()),
+                    text_style: text_style(o.kind, o.props.as_deref()),
                     read_only: o.read_only,
                 },
             ));

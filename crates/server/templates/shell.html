@@ -367,6 +367,14 @@
     td:has(.cell-input) { padding: 0; }
     .cell-input { width: 100%; box-sizing: border-box; border: 1px solid transparent;
                   background: transparent; font: inherit; padding: .4rem .6rem; }
+    /* A Table input is the field box, so #191 partial-edge variables must become
+       native input borders just as they do for portal cells (inputs cannot host
+       the layout object's pseudo-element border overlay). */
+    .cell-input[style*="--fm-stroke-"] {
+      border-style: solid !important;
+      border-color: var(--fm-stroke-color) !important;
+      border-width: var(--fm-stroke-top, 0px) var(--fm-stroke-right, 0px) var(--fm-stroke-bottom, 0px) var(--fm-stroke-left, 0px) !important;
+    }
     .cell-input:focus { outline: none; border-color: #f0c36d; }
     /* A read-only Table cell (#43) — same "select to copy" cue as .fm-finput. */
     .cell-input:read-only { background: rgba(0,0,0,.025); cursor: text; }

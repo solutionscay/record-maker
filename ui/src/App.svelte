@@ -465,6 +465,22 @@
     width: 100% !important;
     pointer-events: none;
   }
+
+  :global(.le-smart-guide) {
+    position: absolute;
+    z-index: 20;
+    pointer-events: none;
+    background: #0b84ff;
+    box-shadow: 0 0 0 1px color-mix(in srgb, white 65%, transparent);
+  }
+
+  :global(.le-smart-guide-x) {
+    width: 1px;
+  }
+
+  :global(.le-smart-guide-y) {
+    height: 1px;
+  }
   .le-part-label {
     position: absolute;
     left: calc(-1 * var(--le-part-gutter));

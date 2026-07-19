@@ -568,6 +568,24 @@ try {
       draw: { x: 10, yGlobal: 20, w: 30, h: 40, line: { angle: 53.13, length: 50 } },
       props: { stroke: '#888888', strokeWidth: 2, angle: 53.13, length: 50 },
     });
+
+    const { resolveMoveGuides, resolveResizeGuides, unionGuideBoxes } =
+      await vite.ssrLoadModule('/src/lib/canvas/smart-guides.ts');
+    const candidates = [{ id: 2, box: { x: 300, y: 80, w: 100, h: 40 } }];
+    eq('smart guides: move geometry and chrome share one resolution',
+      resolveMoveGuides({ x: 196, y: 38, w: 100, h: 40 }, candidates, 5), {
+        box: { x: 200, y: 40, w: 100, h: 40 },
+        guides: [{ axis: 'x', position: 300 }, { axis: 'y', position: 80 }],
+      });
+    eq('smart guides: resize constrains only active edges',
+      resolveResizeGuides({ x: 100, y: 20, w: 196, h: 58 }, [1, 1], candidates, 5), {
+        box: { x: 100, y: 20, w: 200, h: 60 },
+        guides: [{ axis: 'x', position: 300 }, { axis: 'y', position: 80 }],
+      });
+    eq('smart guides: group union is deterministic', unionGuideBoxes([
+      { x: 10, y: 30, w: 20, h: 10 },
+      { x: 50, y: 10, w: 15, h: 25 },
+    ]), { x: 10, y: 10, w: 55, h: 30 });
   }
 } finally {
   await vite.close();

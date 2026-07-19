@@ -28,12 +28,28 @@ import type { CanvasContext, IdentitySnapshot } from './context';
 import { GestureLifecycle, type GestureCancelReason } from './gesture-lifecycle';
 import { objectBehavior } from './object-behavior';
 import { classifyPress, type GestureIntent } from './press-intent';
+import {
+  resolveMoveGuides,
+  resolveResizeGuides,
+  unionGuideBoxes,
+  type ActiveGuide,
+  type GuideBox,
+  type GuideCandidate,
+} from './smart-guides';
 
 type PendingObjectClick = {
   id: number;
   clientX: number;
   clientY: number;
   selectionBefore?: number[];
+};
+
+type ResizeProposal = {
+  id: number;
+  target: HTMLElement | SVGElement;
+  box: GuideBox;
+  partTop: number;
+  direction: number[];
 };
 
 export class TransformController {
@@ -101,6 +117,9 @@ export class TransformController {
   #selectionBeforeGesture: number[] | null = null;
   #activeSelectionSnapshot: number[] = [];
   #selectionGesture = false;
+  #guideCandidates: GuideCandidate[] = [];
+  #dragUnionStart: GuideBox | null = null;
+  #guideElements: HTMLElement[] = [];
 
   constructor(ctx: CanvasContext) {
     this.#ctx = ctx;
@@ -170,9 +189,7 @@ export class TransformController {
       this.#begin(e.inputEvent);
       e.events.forEach((ev) => this.#captureResizeStart(ev.target, ev.direction, ev.inputEvent));
     });
-    this.#moveable.on('resizeGroup', (e) =>
-      e.events.forEach((ev) => this.#applyResize(ev.target, ev.width, ev.height, ev.drag.left, ev.drag.top, ev.inputEvent)),
-    );
+    this.#moveable.on('resizeGroup', (e) => this.#applyResizeGroup(e.events));
     this.#moveable.on('resizeGroupEnd', () => this.#end('resize'));
 
     // ── rotate (line objects only) ──────────────────────────────────────────
@@ -427,11 +444,11 @@ export class TransformController {
     const targets = ids
       .map((id) => this.#ctx.elementForId(id, identity))
       .filter((el): el is HTMLElement => !!el);
-    const guidelines = identity.painted.filter((el) => !targets.includes(el));
     const persistedGroup = this.#persistedGroupIdFor(ids) !== null;
     this.#moveable.setState({
       target: targets.length > 0 ? targets : (fallback ?? []),
-      elementGuidelines: guidelines,
+      // Sibling chrome is rendered only from the authoritative numeric resolver.
+      elementGuidelines: [],
       rotatable: this.#canRotate(ids),
       hideChildMoveableDefaultLines: persistedGroup,
     });
@@ -586,6 +603,7 @@ export class TransformController {
     // start for one physical pointer. They share one transaction/lifecycle.
     if (this.#ctx.gesturing && this.#lifecycle.active) return;
     this.#clearPendingMoves();
+    this.#clearSmartGuides();
     this.#stopDragPointerFeedback();
     this.#historyCheckpoint = this.#ctx.doc.beginGestureTransaction();
     this.#activeSelectionSnapshot = this.#selectionBeforeGesture ?? [...this.#ctx.doc.selection];
@@ -647,6 +665,7 @@ export class TransformController {
     const reparented = kind === 'drag' && this.#moved ? this.#settleBands(affectedIds) : new Set<number>();
     this.#clearMoveFeedback();
     this.#clearBoundsCorrection();
+    this.#clearSmartGuides();
     llog(kind, `${kind}End`, { moved: this.#moved, selection: [...this.#ctx.doc.selection], reparented: [...reparented] });
     if (this.#moved) {
       if (this.#historyCheckpoint) this.#ctx.doc.commitGestureTransaction(this.#historyCheckpoint);
@@ -710,6 +729,7 @@ export class TransformController {
     window.removeEventListener('pointerup', this.#onObjectClickUp);
     this.#ctx.gestureIdentity = null;
     this.#clearBoundsCorrection();
+    this.#clearSmartGuides();
     this.#scheduleRectUpdate();
     this.updateTarget();
     llog('drag', 'gesture cancelled', { reason });
@@ -737,6 +757,7 @@ export class TransformController {
       const o = this.#ctx.doc.getObject(id);
       if (o) this.#dragStarts.set(id, { x: o.x, y: o.y });
     }
+    this.#captureGuideFrame(new Set(this.#dragStarts.keys()));
   }
 
   /** Moveable remains responsible for gesture ownership and transform bounds,
@@ -781,8 +802,12 @@ export class TransformController {
       anchorStart.x + (event.clientX - pointer.clientX) / zoom,
       anchorStart.y + (event.clientY - pointer.clientY) / zoom,
     );
-    const dx = this.#clampDragDeltaX(anchorNext.x - anchorStart.x);
-    const dy = anchorNext.y - anchorStart.y;
+    const resolved = this.#resolveDragDelta(
+      this.#clampDragDeltaX(anchorNext.x - anchorStart.x),
+      anchorNext.y - anchorStart.y,
+    );
+    const dx = resolved.dx;
+    const dy = resolved.dy;
     this.#queueDragDelta(dx, dy);
   };
 
@@ -791,6 +816,75 @@ export class TransformController {
   #clampDragDeltaX(dx: number): number {
     const minX = Math.min(...[...this.#dragStarts.values()].map((start) => start.x));
     return Number.isFinite(minX) ? Math.max(dx, -minX) : dx;
+  }
+
+  #absoluteBox(id: number): GuideBox | null {
+    const object = this.#ctx.doc.getObject(id);
+    if (!object) return null;
+    const partTop = this.#ctx.partTop(object.partId);
+    if (partTop === null) return null;
+    return { x: object.x, y: partTop + object.y, w: object.w, h: object.h };
+  }
+
+  #captureGuideFrame(excludedIds: Set<number>): void {
+    const activeBoxes = [...this.#ctx.doc.selection]
+      .map((id) => this.#absoluteBox(id))
+      .filter((box): box is GuideBox => !!box);
+    this.#dragUnionStart = unionGuideBoxes(activeBoxes);
+    this.#guideCandidates = this.#ctx.currentIdentity().ids
+      .filter((id) => Number.isFinite(id) && !excludedIds.has(id))
+      .map((id) => {
+        const box = this.#absoluteBox(id);
+        return box ? { id, box } : null;
+      })
+      .filter((candidate): candidate is GuideCandidate => !!candidate);
+  }
+
+  #resolveDragDelta(dx: number, dy: number): { dx: number; dy: number } {
+    const start = this.#dragUnionStart;
+    if (!start || this.#guideCandidates.length === 0) {
+      this.#clearSmartGuides();
+      return { dx, dy };
+    }
+    const resolved = resolveMoveGuides(
+      { ...start, x: start.x + dx, y: start.y + dy },
+      this.#guideCandidates,
+      SNAP_THRESHOLD / (this.#ctx.zoom || 1),
+    );
+    const next = {
+      dx: this.#clampDragDeltaX(dx + resolved.box.x - (start.x + dx)),
+      dy: dy + resolved.box.y - (start.y + dy),
+    };
+    this.#paintSmartGuides(resolved.guides);
+    return next;
+  }
+
+  #paintSmartGuides(guides: ActiveGuide[]): void {
+    this.#clearSmartGuides();
+    const overlay = this.#ctx.partOverlay();
+    if (!overlay) return;
+    const height = this.#ctx.doc.renderModel.parts.reduce((sum, part) => sum + part.height, 0);
+    const width = Math.max(this.#ctx.doc.renderModel.width, 760);
+    for (const guide of guides) {
+      const element = document.createElement('div');
+      element.className = `le-smart-guide le-smart-guide-${guide.axis}`;
+      if (guide.axis === 'x') {
+        element.style.left = `${guide.position}px`;
+        element.style.top = '0';
+        element.style.height = `${height}px`;
+      } else {
+        element.style.left = '0';
+        element.style.top = `${guide.position}px`;
+        element.style.width = `${width}px`;
+      }
+      overlay.append(element);
+      this.#guideElements.push(element);
+    }
+  }
+
+  #clearSmartGuides(): void {
+    for (const guide of this.#guideElements) guide.remove();
+    this.#guideElements = [];
   }
 
   #queueDragDelta(dx: number, dy: number, paintFeedback = true): void {
@@ -961,8 +1055,11 @@ export class TransformController {
     // are settled to a real band + local y on drop (#settleBands). x stays ≥ 0.
     const start = this.#dragStarts.get(id);
     if (!start) return;
-    const dx = this.#clampDragDeltaX(next.x - start.x);
-    this.#queueDragDelta(dx, next.y - start.y, paintFeedback);
+    const resolved = this.#resolveDragDelta(
+      this.#clampDragDeltaX(next.x - start.x),
+      next.y - start.y,
+    );
+    this.#queueDragDelta(resolved.dx, resolved.dy, paintFeedback);
   }
 
   #applyGroupMove(
@@ -980,8 +1077,12 @@ export class TransformController {
     if (!anchorStart) return;
 
     const anchorNext = this.#snappedMovePosition(anchorEvent.left, anchorEvent.top);
-    const dx = this.#clampDragDeltaX(anchorNext.x - anchorStart.x);
-    const dy = anchorNext.y - anchorStart.y;
+    const resolved = this.#resolveDragDelta(
+      this.#clampDragDeltaX(anchorNext.x - anchorStart.x),
+      anchorNext.y - anchorStart.y,
+    );
+    const dx = resolved.dx;
+    const dy = resolved.dy;
     this.#queueDragDelta(dx, dy, paintFeedback);
     llog('drag', 'queue group move', { anchorId, dx, dy, ids: [...this.#dragStarts.keys()] });
   }
@@ -1071,6 +1172,7 @@ export class TransformController {
       clientX: pointer.clientX,
       clientY: pointer.clientY,
     });
+    this.#captureGuideFrame(new Set(this.#ctx.doc.selection));
   }
 
   #applyResize(
@@ -1081,6 +1183,71 @@ export class TransformController {
     top: number,
     inputEvent?: Event,
   ): void {
+    const proposal = this.#resizeProposal(target, width, height, left, top, inputEvent);
+    if (!proposal) return;
+    const resolved = resolveResizeGuides(
+      proposal.box,
+      proposal.direction,
+      this.#guideCandidates,
+      SNAP_THRESHOLD / (this.#ctx.zoom || 1),
+    );
+    this.#paintSmartGuides(resolved.guides);
+    this.#applyResizeProposal({ ...proposal, box: resolved.box });
+  }
+
+  #applyResizeGroup(events: Array<{
+    target: HTMLElement | SVGElement;
+    width: number;
+    height: number;
+    drag: { left: number; top: number };
+    inputEvent?: Event;
+  }>): void {
+    const proposals = events
+      .map((event) => this.#resizeProposal(
+        event.target,
+        event.width,
+        event.height,
+        event.drag.left,
+        event.drag.top,
+        event.inputEvent,
+      ))
+      .filter((proposal): proposal is ResizeProposal => !!proposal);
+    const union = unionGuideBoxes(proposals.map((proposal) => proposal.box));
+    if (!union || proposals.length === 0) return;
+    const direction = proposals[0].direction;
+    const resolved = resolveResizeGuides(
+      union,
+      direction,
+      this.#guideCandidates,
+      SNAP_THRESHOLD / (this.#ctx.zoom || 1),
+    );
+    this.#paintSmartGuides(resolved.guides);
+    const dirX = Math.sign(direction[0] ?? 0);
+    const dirY = Math.sign(direction[1] ?? 0);
+    const scaleX = union.w > 0 ? resolved.box.w / union.w : 1;
+    const scaleY = union.h > 0 ? resolved.box.h / union.h : 1;
+    for (const proposal of proposals) {
+      const box = { ...proposal.box };
+      if (dirX !== 0) {
+        box.x = resolved.box.x + (proposal.box.x - union.x) * scaleX;
+        box.w = proposal.box.w * scaleX;
+      }
+      if (dirY !== 0) {
+        box.y = resolved.box.y + (proposal.box.y - union.y) * scaleY;
+        box.h = proposal.box.h * scaleY;
+      }
+      this.#applyResizeProposal({ ...proposal, box });
+    }
+  }
+
+  #resizeProposal(
+    target: HTMLElement | SVGElement,
+    width: number,
+    height: number,
+    left: number,
+    top: number,
+    inputEvent?: Event,
+  ): ResizeProposal | null {
     const identity = this.#ctx.currentIdentity();
     const id = this.#ctx.idForElement(target, identity);
     if (id === undefined) {
@@ -1088,20 +1255,27 @@ export class TransformController {
         painted: identity.painted.length,
         paintOrderIds: identity.ids,
       });
-      return;
+      return null;
     }
-    this.#moved = true;
     const pointer = inputEvent as PointerEvent | MouseEvent | undefined;
     const start = this.#resizeStarts.get(id);
+    const object = this.#ctx.doc.getObject(id);
+    if (!object) return null;
+    const partTop = this.#ctx.partTop(object.partId);
+    if (partTop === null) return null;
+    let x: number;
+    let y: number;
+    let w: number;
+    let h: number;
     if (pointer && start) {
       const dx = (pointer.clientX - start.clientX) / (this.#ctx.zoom || 1);
       const dy = (pointer.clientY - start.clientY) / (this.#ctx.zoom || 1);
       const dirX = Math.sign(start.direction[0] ?? 1);
       const dirY = Math.sign(start.direction[1] ?? 1);
-      let x = start.x;
-      let y = start.y;
-      let w = start.w;
-      let h = start.h;
+      x = start.x;
+      y = start.y;
+      w = start.w;
+      h = start.h;
       if (dirX >= 0) {
         w = snapToGrid(start.w + dx, this.#ctx.doc.snapToGrid ? this.#ctx.doc.gridSize : 0);
       } else {
@@ -1118,27 +1292,28 @@ export class TransformController {
       h = Math.max(1, Math.round(h));
       x = clampOrigin(x);
       y = clampOrigin(y);
-      this.#ctx.doc.setObjectGeometry(id, { x, y, w, h });
-      this.#syncObjectToBox(id);
-      this.#scheduleRectUpdate();
       llog('resize', 'apply resize from pointer', { id, w, h, x, y, dx: Math.round(dx), dy: Math.round(dy) });
-      return;
+    } else {
+      x = clampOrigin(left);
+      y = clampOrigin(top);
+      w = Math.max(1, Math.round(width));
+      h = Math.max(1, Math.round(height));
     }
-    this.#ctx.doc.setObjectGeometry(id, {
-      x: clampOrigin(left),
-      y: clampOrigin(top),
-      w: Math.max(1, Math.round(width)),
-      h: Math.max(1, Math.round(height)),
-    });
-    this.#syncObjectToBox(id);
+    return { id, target, box: { x, y: partTop + y, w, h }, partTop, direction: start?.direction ?? [1, 1] };
+  }
+
+  #applyResizeProposal(proposal: ResizeProposal): void {
+    const geometry = {
+      x: clampOrigin(Math.round(proposal.box.x)),
+      y: clampOrigin(Math.round(proposal.box.y - proposal.partTop)),
+      w: Math.max(1, Math.round(proposal.box.w)),
+      h: Math.max(1, Math.round(proposal.box.h)),
+    };
+    this.#moved = true;
+    this.#ctx.doc.setObjectGeometry(proposal.id, geometry);
+    this.#syncObjectToBox(proposal.id);
     this.#scheduleRectUpdate();
-    llog('resize', 'apply resize', {
-      id,
-      w: Math.max(1, Math.round(width)),
-      h: Math.max(1, Math.round(height)),
-      x: clampOrigin(left),
-      y: clampOrigin(top),
-    });
+    llog('resize', 'apply resolved resize', { id: proposal.id, ...geometry });
   }
 
   #applyObjectRotate(angle: number): void {
@@ -1267,6 +1442,7 @@ export class TransformController {
 
   destroy(): void {
     this.#lifecycle.destroy();
+    this.#clearSmartGuides();
     window.removeEventListener('pointerup', this.#onObjectClickUp);
     window.removeEventListener('pointerdown', this.#onPointerDown, { capture: true });
     window.removeEventListener('pointermove', this.#onDragPointerMove, { capture: true });

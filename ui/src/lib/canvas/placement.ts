@@ -11,6 +11,7 @@ import { createObject } from '../persist';
 import { FIELD_DRAG_MIME, PORTAL_COLUMN_DRAG_MIME, type PortalColumnDrag } from '../dnd';
 import { llog, lerror } from '../log';
 import type { CanvasContext } from './context';
+import { GestureLifecycle, type GestureCancelReason } from './gesture-lifecycle';
 import { objectBehavior } from './object-behavior';
 
 type DrawTool = Exclude<ToolKind, 'pointer'>;
@@ -35,6 +36,7 @@ interface DrawPlacement {
 
 export class PlacementController {
   readonly #ctx: CanvasContext;
+  readonly #lifecycle = new GestureLifecycle('draw-placement');
   /** Active draw-to-create gesture while a non-pointer tool is armed. */
   #drawing: DrawPlacement | null = null;
   #drawPreview: HTMLElement | null = null;
@@ -63,7 +65,7 @@ export class PlacementController {
   /** Start a draw-to-create gesture. Release persists the final box; a very short
    * click falls back to the tool's default size, but creation still waits for
    * pointer-up so objects are not dropped on press. */
-  startDraw(input: MouseEvent | PointerEvent): void {
+  startDraw(input: MouseEvent | PointerEvent, pointerId?: number): void {
     const doc = this.#ctx.doc;
     const tool = doc.activeTool;
     if (tool === 'pointer' || this.#ctx.placing || this.#drawing) {
@@ -111,10 +113,15 @@ export class PlacementController {
     this.#drawPreview.className = `le-draw-preview le-draw-${tool}`;
     this.#ctx.partOverlay()?.append(this.#drawPreview);
     this.#updateDraw(input);
+    this.#ctx.gesturing = true;
+    this.#lifecycle.begin({
+      inputEvent: input,
+      pointerId,
+      captureTarget: this.#ctx.stage,
+      onCancel: (reason) => this.#cancelDraw(reason),
+    });
     window.addEventListener('pointermove', this.#onDrawMove);
     window.addEventListener('pointerup', this.#onDrawUp, { once: true });
-    window.addEventListener('mousemove', this.#onDrawMove);
-    window.addEventListener('mouseup', this.#onDrawUp, { once: true });
     llog('place', 'draw start', {
       tool,
       partId: where.partId,
@@ -125,11 +132,14 @@ export class PlacementController {
   }
 
   #onDrawMove = (e: PointerEvent | MouseEvent): void => {
+    if (e instanceof PointerEvent && !this.#lifecycle.owns(e)) return;
     this.#updateDraw(e);
   };
 
   #onDrawUp = (e: PointerEvent | MouseEvent): void => {
+    if (e instanceof PointerEvent && !this.#lifecycle.owns(e)) return;
     this.#updateDraw(e);
+    this.#lifecycle.commit();
     void this.#finishDraw();
   };
 
@@ -200,13 +210,7 @@ export class PlacementController {
   async #finishDraw(): Promise<void> {
     const drawing = this.#drawing;
     if (!drawing || this.#ctx.placing) return;
-    window.removeEventListener('pointermove', this.#onDrawMove);
-    window.removeEventListener('pointerup', this.#onDrawUp);
-    window.removeEventListener('mousemove', this.#onDrawMove);
-    window.removeEventListener('mouseup', this.#onDrawUp);
-    this.#drawPreview?.remove();
-    this.#drawPreview = null;
-    this.#drawing = null;
+    this.#clearDrawGesture();
 
     const { tool, partId } = drawing;
     const finalBox = drawing.dragged ? drawing.box : this.#defaultPlacementBox(drawing);
@@ -259,6 +263,21 @@ export class PlacementController {
       this.#ctx.placing = false;
       if (this.#ctx.doc.activeTool !== 'pointer') this.#ctx.doc.setTool('pointer');
     }
+  }
+
+  #cancelDraw(reason: GestureCancelReason): void {
+    if (!this.#drawing) return;
+    this.#clearDrawGesture();
+    llog('place', 'draw cancelled', { reason });
+  }
+
+  #clearDrawGesture(): void {
+    window.removeEventListener('pointermove', this.#onDrawMove);
+    window.removeEventListener('pointerup', this.#onDrawUp);
+    this.#drawPreview?.remove();
+    this.#drawPreview = null;
+    this.#drawing = null;
+    this.#ctx.gesturing = false;
   }
 
   #defaultPlacementBox(drawing: DrawPlacement): { x: number; y: number; w: number; h: number } {
@@ -506,11 +525,8 @@ export class PlacementController {
   }
 
   destroy(): void {
-    window.removeEventListener('pointermove', this.#onDrawMove);
-    window.removeEventListener('pointerup', this.#onDrawUp);
-    window.removeEventListener('mousemove', this.#onDrawMove);
-    window.removeEventListener('mouseup', this.#onDrawUp);
-    this.#drawPreview?.remove();
+    this.#lifecycle.destroy();
+    this.#clearDrawGesture();
     this.#dropPreview?.remove();
   }
 }

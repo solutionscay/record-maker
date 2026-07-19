@@ -14,7 +14,7 @@
 import Moveable from 'moveable';
 import Selecto from 'selecto';
 
-import type { ObjectDoc } from '../doc.svelte';
+import type { GestureHistoryCheckpoint, ObjectDoc } from '../doc.svelte';
 import { SNAP_THRESHOLD, clampOrigin, objectIdsInPaintOrder, snapToGrid } from '../canvas-edit';
 import { partAtY } from '../create';
 import {
@@ -25,6 +25,7 @@ import {
 import { llog, lerror } from '../log';
 import { parseProps } from '../object-props';
 import type { CanvasContext, IdentitySnapshot } from './context';
+import { GestureLifecycle, type GestureCancelReason } from './gesture-lifecycle';
 import { objectBehavior } from './object-behavior';
 import { classifyPress, type GestureIntent } from './press-intent';
 
@@ -39,6 +40,7 @@ export class TransformController {
   readonly #ctx: CanvasContext;
   readonly #moveable: Moveable;
   readonly #selecto: Selecto;
+  readonly #lifecycle = new GestureLifecycle('object-transform');
 
   /** Whether the active gesture actually moved/resized something — gates mark +
    * persist so a plain click (select, no movement) doesn't POST or push undo. */
@@ -95,6 +97,10 @@ export class TransformController {
   #dirtyBehaviorProps = new Set<number>();
   #pendingObjectClick: PendingObjectClick | null = null;
   #pressIntent: GestureIntent | null = null;
+  #historyCheckpoint: GestureHistoryCheckpoint | null = null;
+  #selectionBeforeGesture: number[] | null = null;
+  #activeSelectionSnapshot: number[] = [];
+  #selectionGesture = false;
 
   constructor(ctx: CanvasContext) {
     this.#ctx = ctx;
@@ -123,7 +129,7 @@ export class TransformController {
     this.#moveable.on('dragStart', (e) => {
       const id = this.#ctx.idForElement(e.target);
       llog('drag', 'dragStart', { id });
-      this.#begin();
+      this.#begin(e.inputEvent);
       this.#selectFromTarget(e.target);
       this.#captureDragStarts();
       if (id !== undefined) this.#startDragPointerFeedback(id, e.inputEvent);
@@ -137,7 +143,7 @@ export class TransformController {
     });
     this.#moveable.on('dragEnd', () => this.#end('drag'));
     this.#moveable.on('dragGroupStart', (e) => {
-      this.#begin();
+      this.#begin(e.inputEvent);
       this.#captureDragStarts();
       const anchorId = this.#dragStarts.keys().next().value;
       if (anchorId !== undefined) this.#startDragPointerFeedback(anchorId, e.inputEvent);
@@ -154,14 +160,14 @@ export class TransformController {
     // ── resize (single + group) — e.drag carries the new left/top for top/left handles ──
     this.#moveable.on('resizeStart', (e) => {
       llog('resize', 'resizeStart', { id: this.#ctx.idForElement(e.target) });
-      this.#begin();
+      this.#begin(e.inputEvent);
       this.#selectFromTarget(e.target);
       this.#captureResizeStart(e.target, e.direction, e.inputEvent);
     });
     this.#moveable.on('resize', (e) => this.#applyResize(e.target, e.width, e.height, e.drag.left, e.drag.top, e.inputEvent));
     this.#moveable.on('resizeEnd', () => this.#end('resize'));
     this.#moveable.on('resizeGroupStart', (e) => {
-      this.#begin();
+      this.#begin(e.inputEvent);
       e.events.forEach((ev) => this.#captureResizeStart(ev.target, ev.direction, ev.inputEvent));
     });
     this.#moveable.on('resizeGroup', (e) =>
@@ -175,7 +181,7 @@ export class TransformController {
       const o = id === undefined ? undefined : this.#ctx.doc.getObject(id);
       const start = o ? objectBehavior(o.kind).rotationStart(o) : null;
       if (id === undefined || !o || !start) return false;
-      this.#begin();
+      this.#begin(e.inputEvent);
       this.#selectFromTarget(e.target);
       this.#rotatingObjectId = id;
       this.#rotateStartMeasure = start.measure;
@@ -206,6 +212,13 @@ export class TransformController {
     // the control box appear and populates `#targetIds` before the next pointer
     // stream, so a press on any selected object drags the whole group.
     this.#selecto.on('selectEnd', (e) => {
+      if (this.#selectionGesture) {
+        this.#selectionGesture = false;
+        this.#ctx.gesturing = false;
+        this.#ctx.gestureIdentity = null;
+        this.#activeSelectionSnapshot = [];
+        this.#lifecycle.commit();
+      }
       const intent = this.#pressIntent;
       this.#pressIntent = null;
       const selectedIds = this.#ctx.elementsToIds(e.selected);
@@ -288,12 +301,13 @@ export class TransformController {
           });
           return;
         }
-        this.#ctx.placement.startDraw(input);
+        this.#ctx.placement.startDraw(input, this.#pressedPointer?.pointerId);
         return;
       }
 
       if (intent.kind === 'toggle' && objEl) {
         const selectionBefore = [...this.#ctx.doc.selection];
+        this.#selectionBeforeGesture = selectionBefore;
         const dragSelection = this.#ctx.doc.isSelected(intent.id)
           ? selectionBefore
           : [...selectionBefore, intent.id];
@@ -312,6 +326,7 @@ export class TransformController {
 
       if (intent.kind === 'containment-marquee') {
         llog('select', 'control-drag containment marquee');
+        this.#beginSelectionGesture(input);
         return;
       }
 
@@ -323,6 +338,7 @@ export class TransformController {
 
       if (intent.kind === 'marquee') {
         llog('select', 'press on empty canvas → marquee');
+        this.#beginSelectionGesture(input);
         return; // empty canvas → selecto runs its marquee
       }
 
@@ -336,6 +352,7 @@ export class TransformController {
       // no longer pre-targets objects, so this preserves click-drag in one move
       // without showing resize handles on mere hover.
       llog('drag', 'press on un-targeted object → select + start drag', { id: intent.id });
+      this.#selectionBeforeGesture = [...this.#ctx.doc.selection];
       this.#armObjectClick(intent.id, input);
       this.#ctx.doc.selectOnly([intent.id]);
       const ids = [...this.#ctx.doc.selection];
@@ -564,19 +581,60 @@ export class TransformController {
 
   // ── gesture lifecycle ──
 
-  #begin(): void {
+  #begin(inputEvent?: Event): void {
+    // Moveable can emit an individual start immediately followed by the group
+    // start for one physical pointer. They share one transaction/lifecycle.
+    if (this.#ctx.gesturing && this.#lifecycle.active) return;
     this.#clearPendingMoves();
     this.#stopDragPointerFeedback();
+    this.#historyCheckpoint = this.#ctx.doc.beginGestureTransaction();
+    this.#activeSelectionSnapshot = this.#selectionBeforeGesture ?? [...this.#ctx.doc.selection];
+    this.#selectionBeforeGesture = null;
     this.#ctx.gesturing = true;
     this.#moved = false;
     this.#dragStarts.clear();
     this.#resizeStarts.clear();
     this.#ctx.gestureIdentity = this.#ctx.identitySnapshot();
+    this.#lifecycle.begin({
+      inputEvent,
+      pointerId: this.#pressedPointer?.pointerId,
+      captureTarget: inputEvent?.target instanceof Element ? inputEvent.target : null,
+      onCancel: (reason) => this.#cancelTransformGesture(reason),
+    });
+  }
+
+  #beginSelectionGesture(inputEvent: Event): void {
+    this.#selectionGesture = true;
+    this.#activeSelectionSnapshot = [...this.#ctx.doc.selection];
+    this.#ctx.gesturing = true;
+    this.#ctx.gestureIdentity = this.#ctx.identitySnapshot();
+    this.#lifecycle.begin({
+      inputEvent,
+      pointerId: this.#pressedPointer?.pointerId,
+      captureTarget: this.#ctx.stage,
+      onCancel: (reason) => this.#cancelSelectionGesture(reason),
+    });
+  }
+
+  #cancelSelectionGesture(reason: GestureCancelReason): void {
+    if (!this.#selectionGesture) return;
+    this.#selectionGesture = false;
+    this.#ctx.gesturing = false;
+    this.#stopSelectoGesture();
+    this.#ctx.doc.selectOnly(this.#activeSelectionSnapshot);
+    this.#activeSelectionSnapshot = [];
+    this.#pressIntent = null;
+    this.#selecto.hitRate = 0;
+    this.#ctx.gestureIdentity = null;
+    this.updateTarget();
+    llog('select', 'marquee cancelled', { reason });
   }
 
   /** End a gesture: if it actually changed geometry, seal one undo step and
    * persist the moved/resized group; a no-move click does neither. Then re-target. */
   #end(kind: 'drag' | 'resize' = 'drag'): void {
+    if (!this.#ctx.gesturing) return;
+    this.#lifecycle.commit();
     this.#stopDragPointerFeedback();
     // Pointer-up can arrive before the last requested display frame. Commit that
     // final authored position before band settlement, undo sealing, or persist.
@@ -591,10 +649,12 @@ export class TransformController {
     this.#clearBoundsCorrection();
     llog(kind, `${kind}End`, { moved: this.#moved, selection: [...this.#ctx.doc.selection], reparented: [...reparented] });
     if (this.#moved) {
-      this.#ctx.doc.mark();
+      if (this.#historyCheckpoint) this.#ctx.doc.commitGestureTransaction(this.#historyCheckpoint);
       void this.#persistObjects(affectedIds, reparented);
       void this.#persistDirtyBehaviorProps();
     }
+    this.#historyCheckpoint = null;
+    this.#activeSelectionSnapshot = [];
     this.#dragStarts.clear();
     this.#resizeStarts.clear();
     this.#ctx.gestureIdentity = null;
@@ -610,6 +670,57 @@ export class TransformController {
         this.updateTarget();
       });
     }
+  }
+
+  #cancelTransformGesture(reason: GestureCancelReason): void {
+    if (!this.#ctx.gesturing) return;
+    // Make any Moveable/Selecto end event caused by stopDrag/stop a no-op.
+    this.#ctx.gesturing = false;
+    this.#moveable.stopDrag();
+    this.#stopDragPointerFeedback();
+    this.#clearPendingMoves();
+    if (this.#historyCheckpoint) {
+      this.#ctx.doc.cancelGestureTransaction(this.#historyCheckpoint);
+      this.#historyCheckpoint = null;
+    }
+    for (const id of this.#dirtyBehaviorProps) {
+      const object = this.#ctx.doc.getObject(id);
+      if (object) this.#setBehaviorShapeStyle(id, parseProps(object.props));
+    }
+    this.#dirtyBehaviorProps.clear();
+    for (const id of new Set([...this.#dragStarts.keys(), ...this.#resizeStarts.keys()])) {
+      const object = this.#ctx.doc.getObject(id);
+      const element = this.#ctx.elementForId(id);
+      if (object && element) {
+        element.style.left = `${object.x}px`;
+        element.style.top = `${object.y}px`;
+        element.style.width = `${object.w}px`;
+        element.style.height = `${object.h}px`;
+      }
+    }
+    this.#ctx.doc.selectOnly(this.#activeSelectionSnapshot);
+    this.#activeSelectionSnapshot = [];
+    this.#dragStarts.clear();
+    this.#resizeStarts.clear();
+    this.#rotatingObjectId = null;
+    this.#rotateStartMeasure = 0;
+    this.#moved = false;
+    this.#pressIntent = null;
+    this.#pendingObjectClick = null;
+    window.removeEventListener('pointerup', this.#onObjectClickUp);
+    this.#ctx.gestureIdentity = null;
+    this.#clearBoundsCorrection();
+    this.#scheduleRectUpdate();
+    this.updateTarget();
+    llog('drag', 'gesture cancelled', { reason });
+  }
+
+  #stopSelectoGesture(): void {
+    // Selecto does not expose its Gesto stop method, but its documented instance
+    // `destroy()` uses this same internal object. Stopping delivery here leaves
+    // the reusable Selecto instance and its selection state intact.
+    const selecto = this.#selecto as unknown as { gesto?: { stop(): void } };
+    selecto.gesto?.stop();
   }
 
   /** Make the dragged/resized single target the selection (if it wasn't already). */
@@ -1049,6 +1160,8 @@ export class TransformController {
   }
 
   #endObjectRotate(): void {
+    if (!this.#ctx.gesturing) return;
+    this.#lifecycle.commit();
     const id = this.#rotatingObjectId;
     const moved = this.#moved;
     this.#ctx.gesturing = false;
@@ -1056,10 +1169,12 @@ export class TransformController {
     this.#rotateStartMeasure = 0;
     this.#ctx.gestureIdentity = null;
     if (id !== null && moved) {
-      this.#ctx.doc.mark();
+      if (this.#historyCheckpoint) this.#ctx.doc.commitGestureTransaction(this.#historyCheckpoint);
       void this.#persistObjects([id]);
       void this.#persistDirtyBehaviorProps();
     }
+    this.#historyCheckpoint = null;
+    this.#activeSelectionSnapshot = [];
     this.#scheduleRectUpdate();
     this.updateTarget();
   }
@@ -1151,6 +1266,7 @@ export class TransformController {
   }
 
   destroy(): void {
+    this.#lifecycle.destroy();
     window.removeEventListener('pointerup', this.#onObjectClickUp);
     window.removeEventListener('pointerdown', this.#onPointerDown, { capture: true });
     window.removeEventListener('pointermove', this.#onDragPointerMove, { capture: true });

@@ -203,6 +203,13 @@ export type Diff =
  * `mark()` seals the open group into a step — an atomic stopping point. */
 export type Step = Diff[];
 
+/** Opaque snapshot of the redo branch at the start of a direct-manipulation
+ * transaction. Gesture edits stay in `#pending`; commit seals them once, while
+ * cancel reverts them and restores the pre-gesture redo branch. */
+export interface GestureHistoryCheckpoint {
+  readonly future: Step[];
+}
+
 /** Absolute geometry to set on an object; any omitted side is left unchanged.
  * A resize handle may move x/y while changing w/h, so all four are optional. */
 export type Geometry = Partial<Pick<ObjectDoc, 'x' | 'y' | 'w' | 'h'>>;
@@ -833,6 +840,27 @@ export class EditorDoc {
     if (this.#pending.length === 0) return;
     this.#past.push(this.#pending.slice());
     this.#pending = [];
+  }
+
+  /** Start an isolated gesture transaction. Any earlier open edits become their
+   * own undo step so cancellation can safely revert only this gesture. */
+  beginGestureTransaction(): GestureHistoryCheckpoint {
+    this.mark();
+    return { future: this.#future.map((step) => step.slice()) };
+  }
+
+  /** Seal the current gesture as one undo step. */
+  commitGestureTransaction(_checkpoint: GestureHistoryCheckpoint): void {
+    this.mark();
+  }
+
+  /** Revert every unsealed gesture diff without creating undo/redo history. */
+  cancelGestureTransaction(checkpoint: GestureHistoryCheckpoint): Step {
+    const step = this.#pending.slice();
+    for (let i = step.length - 1; i >= 0; i--) this.#set(step[i], step[i].before);
+    this.#pending = [];
+    this.#future = checkpoint.future.map((futureStep) => futureStep.slice());
+    return step;
   }
 
   get canUndo(): boolean {

@@ -560,13 +560,14 @@ export class TransformController {
     // A drag may have carried objects across band boundaries; settle them onto a
     // real band (reparenting) BEFORE the undo mark so it's one step. Resize never
     // crosses bands, so it skips this.
-    const reparented = kind === 'drag' && this.#moved ? this.#settleBands() : new Set<number>();
+    const affectedIds = kind === 'drag' ? [...this.#dragStarts.keys()] : [...this.#ctx.doc.selection];
+    const reparented = kind === 'drag' && this.#moved ? this.#settleBands(affectedIds) : new Set<number>();
     this.#clearMoveFeedback();
     this.#clearBoundsCorrection();
     llog(kind, `${kind}End`, { moved: this.#moved, selection: [...this.#ctx.doc.selection], reparented: [...reparented] });
     if (this.#moved) {
       this.#ctx.doc.mark();
-      void this.#persistSelection(reparented);
+      void this.#persistObjects(affectedIds, reparented);
       void this.#persistDirtyLineProps();
     }
     this.#targetKey = ''; // force a re-sync after the gesture
@@ -595,7 +596,10 @@ export class TransformController {
   }
 
   #captureDragStarts(): void {
-    for (const id of this.#ctx.doc.selection) {
+    // Portal children join the effective movement set without joining the visible
+    // selection. This keeps the portal's own Moveable handles while its authored
+    // fields and header labels travel by the same delta (#203).
+    for (const id of this.#ctx.doc.movementObjectIds()) {
       const o = this.#ctx.doc.getObject(id);
       if (o) this.#dragStarts.set(id, { x: o.x, y: o.y });
     }
@@ -643,14 +647,25 @@ export class TransformController {
       anchorStart.x + (event.clientX - pointer.clientX) / zoom,
       anchorStart.y + (event.clientY - pointer.clientY) / zoom,
     );
-    const dx = anchorNext.x - anchorStart.x;
+    const dx = this.#clampDragDeltaX(anchorNext.x - anchorStart.x);
     const dy = anchorNext.y - anchorStart.y;
+    this.#queueDragDelta(dx, dy);
+  };
+
+  /** Constrain the common delta at the canvas origin instead of clamping each
+   * member separately, which would collapse offsets within a portal/group. */
+  #clampDragDeltaX(dx: number): number {
+    const minX = Math.min(...[...this.#dragStarts.values()].map((start) => start.x));
+    return Number.isFinite(minX) ? Math.max(dx, -minX) : dx;
+  }
+
+  #queueDragDelta(dx: number, dy: number, paintFeedback = true): void {
     for (const [id, start] of this.#dragStarts) {
       const target = this.#ctx.elementForId(id);
       if (!target) continue;
-      this.#queueMove(id, target, { x: clampOrigin(start.x + dx), y: start.y + dy });
+      this.#queueMove(id, target, { x: start.x + dx, y: start.y + dy }, paintFeedback);
     }
-  };
+  }
 
   #snappedMovePosition(left: number, top: number): { x: number; y: number } {
     const grid = this.#ctx.doc.snapToGrid ? this.#ctx.doc.gridSize : 0;
@@ -708,7 +723,9 @@ export class TransformController {
     const controlBox = this.#activeControlBox();
     this.#clearBoundsCorrection();
     this.#moveable.updateRect();
-    const targetRects = moved.map(({ target }) => target.getBoundingClientRect());
+    const selectedMoved = moved.filter(({ id }) => this.#ctx.doc.isSelected(id));
+    const targetRects = (selectedMoved.length > 0 ? selectedMoved : moved)
+      .map(({ target }) => target.getBoundingClientRect());
     const targetLeft = Math.min(...targetRects.map((rect) => rect.left));
     const targetTop = Math.min(...targetRects.map((rect) => rect.top));
     const controlRect = controlBox.getBoundingClientRect();
@@ -761,7 +778,11 @@ export class TransformController {
     if (this.#moveFeedback.size === 0) return;
     const controlBox = this.#activeControlBox();
     this.#clearBoundsCorrection();
-    const targetRects = [...this.#moveFeedback.keys()].map((target) => target.getBoundingClientRect());
+    const selectedTargets = [...this.#ctx.doc.selection]
+      .map((id) => this.#ctx.elementForId(id))
+      .filter((target): target is HTMLElement => !!target && this.#moveFeedback.has(target));
+    const targetRects = (selectedTargets.length > 0 ? selectedTargets : [...this.#moveFeedback.keys()])
+      .map((target) => target.getBoundingClientRect());
     const targetLeft = Math.min(...targetRects.map((rect) => rect.left));
     const targetTop = Math.min(...targetRects.map((rect) => rect.top));
     const controlRect = controlBox.getBoundingClientRect();
@@ -804,7 +825,10 @@ export class TransformController {
     // y is left UNCLAMPED during a drag so the object can travel above its own band
     // (a negative part-relative y renders over the band above) — cross-band drags
     // are settled to a real band + local y on drop (#settleBands). x stays ≥ 0.
-    this.#queueMove(id, target, next, paintFeedback);
+    const start = this.#dragStarts.get(id);
+    if (!start) return;
+    const dx = this.#clampDragDeltaX(next.x - start.x);
+    this.#queueDragDelta(dx, next.y - start.y, paintFeedback);
   }
 
   #applyGroupMove(
@@ -822,15 +846,9 @@ export class TransformController {
     if (!anchorStart) return;
 
     const anchorNext = this.#snappedMovePosition(anchorEvent.left, anchorEvent.top);
-    const dx = anchorNext.x - anchorStart.x;
+    const dx = this.#clampDragDeltaX(anchorNext.x - anchorStart.x);
     const dy = anchorNext.y - anchorStart.y;
-    for (const event of events) {
-      const id = this.#ctx.idForElement(event.target, identity);
-      const start = id === undefined ? undefined : this.#dragStarts.get(id);
-      if (id === undefined || !start) continue;
-      const next = { x: clampOrigin(start.x + dx), y: start.y + dy };
-      this.#queueMove(id, event.target, next, paintFeedback);
-    }
+    this.#queueDragDelta(dx, dy, paintFeedback);
     llog('drag', 'queue group move', { anchorId, dx, dy, ids: [...this.#dragStarts.keys()] });
   }
 
@@ -839,28 +857,66 @@ export class TransformController {
    * rewrite the object to that band with a clamped local y. Objects that crossed a
    * boundary are reparented (partId change); the returned set drives which ones
    * persist via the reparent endpoint vs the bulk geometry commit. */
-  #settleBands(): Set<number> {
+  #settleBands(ids: Iterable<number>): Set<number> {
     const reparented = new Set<number>();
     const model = this.#ctx.doc.renderModel;
     const totalHeight = model.parts.reduce((sum, p) => sum + p.height, 0);
     if (totalHeight <= 0) return reparented;
-    for (const id of this.#ctx.doc.selection) {
+    const moving = new Set(ids);
+    const before = new Map<number, Readonly<ObjectDoc>>();
+    for (const id of moving) {
       const o = this.#ctx.doc.getObject(id);
-      if (!o) continue;
+      if (o) before.set(id, { ...o });
+    }
+    const destinations = new Map<number, { partId: number; x: number; y: number }>();
+
+    const independentDestination = (o: Readonly<ObjectDoc>) => {
       const curTop = this.#ctx.partTop(o.partId);
-      if (curTop === null) continue;
+      if (curTop === null) return null;
       const absY = Math.min(totalHeight - 1, Math.max(0, curTop + o.y));
       const where = partAtY(model, absY);
-      if (!where) continue;
-      const x = clampOrigin(o.x);
-      const y = clampOrigin(where.localY);
-      if (where.partId !== o.partId) {
-        this.#ctx.doc.setProp(id, 'partId', where.partId);
-        this.#ctx.doc.setObjectGeometry(id, { x, y });
+      return where ? { partId: where.partId, x: clampOrigin(o.x), y: clampOrigin(where.localY) } : null;
+    };
+
+    // Settle selected roots first. An owned child follows its moving portal's
+    // destination even when its label sits above the portal's first row, so the
+    // ownership group cannot split across bands.
+    for (const [id, o] of before) {
+      const movingParent = o.parentObjectId !== null && moving.has(o.parentObjectId)
+        ? before.get(o.parentObjectId)
+        : undefined;
+      if (movingParent?.kind === 'portal') continue;
+      const destination = independentDestination(o);
+      if (destination) destinations.set(id, destination);
+    }
+    for (const [id, o] of before) {
+      if (destinations.has(id)) continue;
+      const parent = o.parentObjectId === null ? undefined : before.get(o.parentObjectId);
+      const parentDestination = parent ? destinations.get(parent.id) : undefined;
+      if (parent?.kind === 'portal' && parentDestination) {
+        destinations.set(id, {
+          partId: parentDestination.partId,
+          x: clampOrigin(parentDestination.x + o.x - parent.x),
+          y: clampOrigin(parentDestination.y + o.y - parent.y),
+        });
+      } else {
+        const destination = independentDestination(o);
+        if (destination) destinations.set(id, destination);
+      }
+    }
+
+    for (const [id, destination] of destinations) {
+      const o = before.get(id);
+      if (!o) continue;
+      if (destination.partId !== o.partId) {
+        this.#ctx.doc.setProp(id, 'partId', destination.partId);
         reparented.add(id);
-        llog('drag', 'settle: reparent object to band', { id, partId: where.partId, x, y });
-      } else if (x !== o.x || y !== o.y) {
-        this.#ctx.doc.setObjectGeometry(id, { x, y });
+      }
+      if (destination.x !== o.x || destination.y !== o.y) {
+        this.#ctx.doc.setObjectGeometry(id, { x: destination.x, y: destination.y });
+      }
+      if (destination.partId !== o.partId) {
+        llog('drag', 'settle: reparent object to band', { id, ...destination });
       }
     }
     return reparented;
@@ -977,7 +1033,7 @@ export class TransformController {
     this.#ctx.gestureIdentity = null;
     if (id !== null && moved) {
       this.#ctx.doc.mark();
-      void this.#persistSelection();
+      void this.#persistObjects([id]);
       void this.#persistDirtyLineProps();
     }
     this.#targetKey = '';
@@ -1038,8 +1094,8 @@ export class TransformController {
 
   // ── persistence (#46 bulk axum contract) ──
 
-  async #persistSelection(reparented: Set<number> = new Set()): Promise<void> {
-    const objs = [...this.#ctx.doc.selection]
+  async #persistObjects(ids: Iterable<number>, reparented: Set<number> = new Set()): Promise<void> {
+    const objs = [...new Set(ids)]
       .map((id) => this.#ctx.doc.getObject(id))
       .filter((o): o is NonNullable<Readonly<ObjectDoc>> => !!o);
     if (objs.length === 0) return;

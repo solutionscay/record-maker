@@ -195,7 +195,10 @@ export class CanvasInteraction {
       const unit = (doc.snapToGrid ? doc.gridSize : 1) * (e.shiftKey ? 10 : 1);
       const requestedX = e.key === 'ArrowLeft' ? -unit : e.key === 'ArrowRight' ? unit : 0;
       const requestedY = e.key === 'ArrowUp' ? -unit : e.key === 'ArrowDown' ? unit : 0;
-      const objects = [...doc.selection].map((id) => doc.getObject(id)).filter((o) => !!o);
+      // Portal-owned fields and headers join the effective nudge set without
+      // changing the visible selection (#203). movementObjectIds de-duplicates a
+      // child that was also explicitly selected with its portal.
+      const objects = doc.movementObjectIds().map((id) => doc.getObject(id)).filter((o) => !!o);
       const minX = Math.min(...objects.map((o) => o.x));
       const minY = Math.min(...objects.map((o) => o.y));
       const dx = Math.max(requestedX, -minX);

@@ -343,6 +343,52 @@ try {
       !body.includes('z-index:0;background:#abc123'));
   }
 
+  // 9c. #203 portal movement expands to owned columns without changing selection.
+  {
+    const model = fresh();
+    const body = model.parts[1];
+    const baseObject = {
+      field: false, shape: false, fieldId: null, z: 0, readOnly: false,
+      binding: '', content: '', props: '', objectStyle: '', textStyle: '',
+      label: '', value: '', shapeStyle: '',
+    };
+    body.objects.push(
+      { ...baseObject, id: 203, kind: 'portal', x: 40, y: 56, w: 240, h: 24, binding: 'orders', portalRowHeight: 24, portalRowCount: 5 },
+      { ...baseObject, id: 204, parentObjectId: 203, kind: 'text', x: 48, y: 32, w: 96, h: 24, content: 'Amount' },
+      { ...baseObject, id: 205, parentObjectId: 203, kind: 'field', field: true, fieldId: 9, x: 48, y: 56, w: 96, h: 24, binding: 'orders.Amount' },
+      { ...baseObject, id: 206, kind: 'text', x: 8, y: 8, w: 40, h: 24, content: 'Outside' },
+    );
+    const d = new EditorDoc();
+    d.hydrate(model);
+    d.selectOnly([203]);
+    eq('portal movement: portal expands to both owned objects', d.movementObjectIds(), [203, 204, 205]);
+    ok('portal movement: expansion does not alter visible selection', d.selection.size === 1 && d.isSelected(203));
+
+    d.selectOnly([203, 205]);
+    eq('portal movement: explicitly selected child is de-duplicated', d.movementObjectIds(), [203, 204, 205]);
+
+    d.selectOnly([203]);
+    const before = new Map([203, 204, 205, 206].map((id) => [id, geom(obj(d.renderModel, id))]));
+    for (const id of d.movementObjectIds()) d.moveObject(id, 17, 11);
+    d.mark();
+    for (const id of [203, 204, 205]) {
+      const moved = obj(d.renderModel, id);
+      ok(`portal movement: object ${id} receives the common delta`,
+        moved.x === before.get(id).x + 17 && moved.y === before.get(id).y + 11);
+    }
+    eq('portal movement: unrelated object stays fixed', geom(obj(d.renderModel, 206)), before.get(206));
+    ok('portal movement: portal remains the only visible selection', d.selection.size === 1 && d.isSelected(203));
+    d.undo();
+    for (const id of [203, 204, 205]) {
+      eq(`portal movement: undo restores object ${id}`, geom(obj(d.renderModel, id)), before.get(id));
+    }
+
+    const childBeforeResize = geom(obj(d.renderModel, 205));
+    d.resizeObject(203, { w: 300, h: 30 });
+    d.mark();
+    eq('portal movement: resizing the portal leaves its child geometry alone', geom(obj(d.renderModel, 205)), childBeforeResize);
+  }
+
   // 10. Full loop: store.renderModel → <LayoutPreview> SSR === committed golden.
   {
     const mod = await vite.ssrLoadModule('/src/lib/LayoutPreview.svelte');

@@ -55,7 +55,8 @@ export interface ObjectDoc {
    * this object is one of that portal's authored columns (a child field/label
    * positioned row-relative), else `null`. Set at create by parent-aware placement
    * and carried verbatim through snapshots/restores; it is NOT an editable prop
-   * (no diff targets it) — containment moves/cascades with the portal, server-side. */
+   * (no diff targets it) — the editor uses it to move children with their portal,
+   * and the database uses it for delete cascading. */
   parentObjectId: number | null;
   kind: string;
   x: number;
@@ -438,6 +439,23 @@ export class EditorDoc {
     const ids: number[] = [];
     for (const o of this.#objects.values()) if (o.parentObjectId === parentId) ids.push(o.id);
     return ids;
+  }
+
+  /** Expand a user movement selection with the objects owned by any selected
+   * portal (#203). The returned set is movement-only session state: it does not
+   * alter the visible selection or make portal children resize with their frame.
+   * A Set prevents a child from moving twice when it and its portal are selected. */
+  movementObjectIds(ids: Iterable<number> = this.#selection): number[] {
+    const moving = new Set<number>();
+    for (const id of ids) {
+      const o = this.#objects.get(id);
+      if (!o) continue;
+      moving.add(id);
+      if (o.kind === 'portal') {
+        for (const childId of this.childObjectIds(id)) moving.add(childId);
+      }
+    }
+    return [...moving];
   }
 
   /** The server-resolved render projection for one object (session scope):

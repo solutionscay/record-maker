@@ -55,11 +55,11 @@ async function objectX(object) {
   return object.evaluate((element) => Number.parseFloat(element.style.left));
 }
 
-async function dragBy(page, object, dx, dy = 0) {
+async function dragBy(page, object, dx, dy = 0, grabY = 0.5) {
   const box = await object.boundingBox();
   assert.ok(box, 'object has a drag box');
   const x = box.x + box.width / 2;
-  const y = box.y + box.height / 2;
+  const y = box.y + box.height * grabY;
   await page.mouse.move(x, y);
   await page.mouse.down();
   await page.mouse.move(x + dx, y + dy, { steps: 5 });
@@ -189,9 +189,52 @@ try {
     notes: '',
     fields: [{ name: 'Name', kind: 'text' }],
   });
+  const portalRows = await postJson('/schema/tables', {
+    name: 'Grid Portal Rows',
+    notes: '',
+    fields: [
+      { name: 'Amount', kind: 'number' },
+      { name: 'Parent Id', kind: 'text' },
+    ],
+  });
+  const baseFields = await request(`/schema/tables/${table.id}/fields`);
+  const relatedFields = await request(`/schema/tables/${portalRows.id}/fields`);
+  const relationship = await postJson('/schema/relationships', {
+    name: 'grid_rows',
+    fromTable: portalRows.id,
+    toTable: table.id,
+    fromField: relatedFields.find((field) => field.name === 'Parent Id').id,
+    toField: baseFields.find((field) => field.options?.system).id,
+  });
+  assert.ok(relationship.id, 'portal acceptance relationship exists');
   const layouts = await request('/layouts/all');
   const layout = layouts.find((candidate) => candidate.tableId === table.id && candidate.view === 'form');
   assert.ok(layout, 'generated Form layout exists');
+  const initialModel = await request(`/design/${layout.id}/model`);
+  const headerPart = initialModel.parts.find((part) => part.kind === 'header');
+  const bodyPart = initialModel.parts.find((part) => part.kind === 'body');
+  const createdPortal = await postJson(`/design/${layout.id}/object`, {
+    partId: bodyPart.id,
+    kind: 'portal',
+    x: 340,
+    y: 48,
+    w: 280,
+    h: 24,
+    binding: 'grid_rows',
+  });
+  const portalId = createdPortal[0].id;
+  const createdColumn = await postJson(`/design/${layout.id}/object`, {
+    partId: bodyPart.id,
+    kind: 'field',
+    x: 360,
+    y: 48,
+    w: 80,
+    h: 24,
+    fieldId: relatedFields.find((field) => field.name === 'Amount').id,
+    createLabel: true,
+    parentObjectId: portalId,
+  });
+  const portalChildIds = createdColumn.map((object) => object.id);
 
   browser = await playwright.chromium.launch({
     headless: true,
@@ -204,6 +247,10 @@ try {
   await page.locator('.fm-canvas').waitFor();
 
   const model = await request(`/design/${layout.id}/model`);
+  const portalModelObjects = model.parts.flatMap((part) => part.objects);
+  assert.ok(portalChildIds.every((id) =>
+    portalModelObjects.find((object) => object.id === id)?.parentObjectId === portalId),
+  'portal acceptance children retain explicit ownership in the design model');
   assert.deepEqual(
     { gridSize: model.gridSize, showGrid: model.showGrid, snapToGrid: model.snapToGrid },
     { gridSize: 1, showGrid: true, snapToGrid: true },
@@ -298,6 +345,54 @@ try {
   await object.click();
   await page.waitForTimeout(50);
   await fastDragAligned(page, 1, 411, 'single object and bounds');
+
+  // #203: a portal's owned header + field move implicitly while the portal stays
+  // the sole visible selection. Pointer drag, keyboard nudge, cross-band settle,
+  // and reload persistence all operate on the same expanded movement set.
+  const portal = page.locator(`[data-object-id="${portalId}"]`);
+  const portalChildren = portalChildIds.map((id) => page.locator(`[data-object-id="${id}"]`));
+  const beforePortalDrag = await Promise.all([portal, ...portalChildren].map((locator) => locator.boundingBox()));
+  await dragBy(page, portal, 17, 9);
+  const afterPortalDrag = await Promise.all([portal, ...portalChildren].map((locator) => locator.boundingBox()));
+  const portalDx = afterPortalDrag[0].x - beforePortalDrag[0].x;
+  const portalDy = afterPortalDrag[0].y - beforePortalDrag[0].y;
+  assert.ok(afterPortalDrag.slice(1).every((box, index) =>
+    Math.abs((box.x - beforePortalDrag[index + 1].x) - portalDx) <= 0.5 &&
+    Math.abs((box.y - beforePortalDrag[index + 1].y) - portalDy) <= 0.5),
+  `portal pointer drag applies one common delta to owned children: ${JSON.stringify({ beforePortalDrag, afterPortalDrag, portalDx, portalDy })}`);
+
+  const beforeNudge = await Promise.all([portal, ...portalChildren].map(objectX));
+  const nudgeSaved = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === `/design/${layout.id}/geometry` && response.request().method() === 'POST');
+  await page.keyboard.press('ArrowRight');
+  assert.equal((await nudgeSaved).status(), 200);
+  const afterNudge = await Promise.all([portal, ...portalChildren].map(objectX));
+  assert.ok(afterNudge.every((x, index) => x === beforeNudge[index] + 1), 'portal keyboard nudge moves owned children once');
+
+  const beforeBandDrag = await Promise.all([portal, ...portalChildren].map((locator) => locator.boundingBox()));
+  const portalBox = beforeBandDrag[0];
+  const destinationBox = await page.locator(`[data-part-id="${headerPart.id}"]`).boundingBox();
+  // Land the portal top at 25px: its 24px-high header remains inside the band,
+  // and the interior grab point remains inside the canvas.
+  await dragBy(page, portal, 0, destinationBox.y + 25 - portalBox.y, 0.35);
+  const afterBandDrag = await Promise.all([portal, ...portalChildren].map((locator) => locator.boundingBox()));
+  const bandDx = afterBandDrag[0].x - beforeBandDrag[0].x;
+  const bandDy = afterBandDrag[0].y - beforeBandDrag[0].y;
+  assert.ok(afterBandDrag.slice(1).every((box, index) =>
+    Math.abs((box.x - beforeBandDrag[index + 1].x) - bandDx) <= 0.5 &&
+    Math.abs((box.y - beforeBandDrag[index + 1].y) - bandDy) <= 0.5),
+  `cross-band portal drag preserves child offsets: ${JSON.stringify({ beforeBandDrag, afterBandDrag, bandDx, bandDy, portalBox, destinationBox })}`);
+  const settledPartIds = await Promise.all([portal, ...portalChildren].map((locator) =>
+    locator.evaluate((element) => Number(element.closest('.fm-part')?.getAttribute('data-part-id')))));
+  assert.ok(settledPartIds.every((partId) => partId === headerPart.id),
+    `portal and children settle into the same destination band: ${JSON.stringify({ settledPartIds, destinationPart: headerPart.id, portalBox, destinationBox, afterBandDrag })}`);
+
+  await page.waitForTimeout(300);
+  await page.reload();
+  await page.locator('.fm-canvas').waitFor();
+  assert.ok(await Promise.all([portal, ...portalChildren].map((locator) =>
+    locator.evaluate((element, partId) => Number(element.closest('.fm-part')?.getAttribute('data-part-id')) === partId, headerPart.id)))
+    .then((values) => values.every(Boolean)), 'portal child movement persists across reload');
   assert.deepEqual(pageErrors, []);
 
   console.log('layout grid browser acceptance passed');

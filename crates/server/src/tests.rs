@@ -2705,6 +2705,89 @@ async fn table_view_grid_uses_only_placed_body_fields() {
     );
 }
 
+/// #117: the Layout inspector's Table Columns manager persists presentation
+/// state in each placed body field's props. Browse must honor both visibility and
+/// explicit order without changing the field objects' geometry.
+#[tokio::test]
+async fn table_view_grid_honors_layout_column_visibility_and_order() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    sol.create_table(
+        "Customers",
+        &[
+            NewField {
+                name: "Name".into(),
+                kind: FieldKind::Text,
+            },
+            NewField {
+                name: "Email".into(),
+                kind: FieldKind::Text,
+            },
+            NewField {
+                name: "City".into(),
+                kind: FieldKind::Text,
+            },
+        ],
+    )
+    .unwrap();
+    let table = sol.table_by_name("Customers").unwrap().unwrap();
+    let fields = sol.fields(table.id).unwrap();
+    sol.insert_record(
+        &table,
+        &[
+            (&fields[0], "Ada".into()),
+            (&fields[1], "ada@example.com".into()),
+            (&fields[2], "London".into()),
+        ],
+    )
+    .unwrap();
+    let table_layout = sol
+        .layouts_for_table(table.id)
+        .unwrap()
+        .into_iter()
+        .find(|layout| layout.view == "table")
+        .unwrap()
+        .id;
+    let body = body_part(&sol, table_layout);
+    let objects = sol.objects(body.id).unwrap();
+    let object_id = |field: &str| {
+        objects
+            .iter()
+            .find(|object| object.binding.as_deref() == Some(&format!("Customers.{field}")))
+            .unwrap()
+            .id
+    };
+
+    // Reverse the first two fields and hide the third. Their x/y geometry stays
+    // untouched, proving this order belongs to the Table layout presentation.
+    sol.set_object_props(
+        table_layout,
+        object_id("Name"),
+        r#"{"tableColumn":{"visible":true,"order":1}}"#,
+    )
+    .unwrap();
+    sol.set_object_props(
+        table_layout,
+        object_id("Email"),
+        r#"{"tableColumn":{"visible":true,"order":0}}"#,
+    )
+    .unwrap();
+    sol.set_object_props(
+        table_layout,
+        object_id("City"),
+        r#"{"tableColumn":{"visible":false,"order":2}}"#,
+    )
+    .unwrap();
+
+    let (status, html) = get_body(state_for(sol), &format!("/browse/{table_layout}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let email = html.find("<th>Email</th>").expect("Email header");
+    let name = html.find("<th>Name</th>").expect("Name header");
+    assert!(email < name, "explicit Table column order\n{html}");
+    assert!(!html.contains("<th>City</th>"), "hidden Table column\n{html}");
+    assert!(html.contains("ada@example.com") && html.contains("Ada"));
+    assert!(!html.contains("London"), "hidden value must not leak\n{html}");
+}
+
 /// #57 Layout-mode chrome: the view toggle stays (switching which view you
 /// DESIGN, via /design/ siblings) and the pagination control is repurposed to
 /// step layouts; record actions are Browse-only.
@@ -3319,6 +3402,48 @@ async fn design_layout_grid_updates_and_validates_layout_owned_settings() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// #117: Layout tools identify a valid base-table binding even before the first
+/// record exists. Values are blank, but field identity is record-independent.
+#[tokio::test]
+async fn design_model_empty_table_keeps_field_identity() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    sol.create_table(
+        "Customers",
+        &[NewField {
+            name: "Name".into(),
+            kind: FieldKind::Text,
+        }],
+    )
+    .unwrap();
+    let table = sol.table_by_name("Customers").unwrap().unwrap();
+    let field_id = sol.fields(table.id).unwrap()[0].id;
+    let table_layout = sol
+        .layouts_for_table(table.id)
+        .unwrap()
+        .into_iter()
+        .find(|layout| layout.view == "table")
+        .unwrap()
+        .id;
+
+    let (status, body) = get_body(
+        state_for(sol),
+        &format!("/design/{table_layout}/model"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let model: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let field = model["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|part| part["objects"].as_array().unwrap())
+        .find(|object| object["binding"] == "Customers.Name")
+        .expect("placed Name field");
+    assert_eq!(field["fieldId"], field_id);
+    assert_eq!(field["label"], "Name");
+    assert_eq!(field["value"], "");
 }
 
 /// #48 create: placing a shape POSTs `{partId,kind,x,y,w,h,props}`, persists a

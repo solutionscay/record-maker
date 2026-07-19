@@ -152,10 +152,13 @@ pub(crate) async fn design_model(
             .unwrap()
         {
             Some(cells) => by_name_map(&fields, cells),
-            None => HashMap::new(),
+            None => by_name_map(&fields, vec![String::new(); fields.len()]),
         }
     } else {
-        HashMap::new()
+        // An empty table still has fully resolvable field identity — only the
+        // live values are blank. This keeps Layout tools such as Table Columns
+        // usable before the first record exists (#117).
+        by_name_map(&fields, vec![String::new(); fields.len()])
     };
     // One parts+objects fetch feeds both the rendered parts and the width.
     let parts_objects = layout_parts_with_objects(&sol, layout_id);

@@ -19,6 +19,7 @@
   import FormatSection from './inspector/FormatSection.svelte';
   import PartSection from './inspector/PartSection.svelte';
   import LayoutGridSection from './inspector/LayoutGridSection.svelte';
+  import TableColumnsSection from './inspector/TableColumnsSection.svelte';
   import { partKindLabel } from './inspector/part-kinds';
   import { reportPersistError } from './inspector/persist-ops';
   import { parseProps } from './object-props';
@@ -178,6 +179,10 @@
   {:else if selectedPart}
     <PartSection {doc} {layoutId} bind:busy />
   {:else}
+    {#if doc.view === 'table'}
+      <TableColumnsSection {doc} {layoutId} />
+      <div class="insp-div"></div>
+    {/if}
     <LayoutGridSection {doc} {layoutId} />
   {/if}
 </div>

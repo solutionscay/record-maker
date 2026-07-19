@@ -763,14 +763,14 @@ pub(crate) fn by_name_for_rec(
     let total = sol.record_count(table).unwrap();
     let rec = clamp_rec_n(rec, total);
     if rec < 1 {
-        return HashMap::new();
+        return by_name_map(fields, vec![String::new(); fields.len()]);
     }
     let Some(id) = sol.record_id_at(table, rec).unwrap() else {
-        return HashMap::new();
+        return by_name_map(fields, vec![String::new(); fields.len()]);
     };
     match sol.get_record(table, fields, id).unwrap() {
         Some(cells) => by_name_map(fields, cells),
-        None => HashMap::new(),
+        None => by_name_map(fields, vec![String::new(); fields.len()]),
     }
 }
 
@@ -1765,8 +1765,22 @@ pub(crate) fn table_body_columns(
             let Some(&idx) = by_name.get(&seg) else {
                 continue;
             };
-            let format = parse_props(o.props.as_deref()).and_then(|v| v.get("format").cloned());
+            let props = parse_props(o.props.as_deref());
+            let table_column = props.as_ref().and_then(|v| v.get("tableColumn"));
+            if table_column
+                .and_then(|v| v.get("visible"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+            {
+                continue;
+            }
+            let order = table_column
+                .and_then(|v| v.get("order"))
+                .and_then(serde_json::Value::as_i64)
+                .filter(|n| *n >= 0);
+            let format = props.and_then(|v| v.get("format").cloned());
             candidates.push((
+                order,
                 o.x,
                 o.y,
                 o.z,
@@ -1779,12 +1793,19 @@ pub(crate) fn table_body_columns(
             ));
         }
     }
-    candidates.sort_by_key(|(x, y, z, id, _)| (*x, *y, *z, *id));
+    candidates.sort_by(|a, b| match (a.0, b.0) {
+        (Some(left), Some(right)) => left
+            .cmp(&right)
+            .then_with(|| (a.1, a.2, a.3, a.4).cmp(&(b.1, b.2, b.3, b.4))),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => (a.1, a.2, a.3, a.4).cmp(&(b.1, b.2, b.3, b.4)),
+    });
 
     let mut seen = HashSet::new();
     candidates
         .into_iter()
-        .filter_map(|(_, _, _, _, column)| {
+        .filter_map(|(_, _, _, _, _, column)| {
             if seen.insert(column.field.id) {
                 Some(column)
             } else {

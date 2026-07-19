@@ -389,6 +389,35 @@ try {
     eq('portal movement: resizing the portal leaves its child geometry alone', geom(obj(d.renderModel, 205)), childBeforeResize);
   }
 
+  // 9d. #117 Table column projection: explicit order wins over geometry, hidden
+  // fields move to Available, and LayoutPreview suppresses the hidden field
+  // object while leaving unrelated authored objects alone.
+  {
+    const { projectTableColumns, withTableColumnSettings } =
+      await vite.ssrLoadModule('/src/lib/table-columns.ts');
+    const model = fresh();
+    model.view = 'table';
+    const name = obj(model, 2);
+    const email = obj(model, 4);
+    email.props = JSON.stringify(withTableColumnSettings(email.props, { visible: true, order: 0 }));
+    name.props = JSON.stringify(withTableColumnSettings(name.props, { visible: true, order: 1 }));
+
+    let projected = projectTableColumns(model);
+    eq('table columns: explicit order drives Visible', projected.visible.map((row) => row.field.name), ['Email', 'Name']);
+    eq('table columns: unplaced schema fields are Available', projected.available.map((row) => row.field.name), ['ID']);
+
+    name.props = JSON.stringify(withTableColumnSettings(name.props, { visible: false }));
+    projected = projectTableColumns(model);
+    eq('table columns: hidden field leaves Visible', projected.visible.map((row) => row.field.name), ['Email']);
+    eq('table columns: hidden field joins Available in schema order', projected.available.map((row) => row.field.name), ['ID', 'Name']);
+
+    const mod = await vite.ssrLoadModule('/src/lib/LayoutPreview.svelte');
+    const { render } = await vite.ssrLoadModule('svelte/server');
+    const { body } = render(mod.default, { props: { model } });
+    ok('table columns: hidden field object is absent from Table canvas', !body.includes('data-object-id="2"'));
+    ok('table columns: independent caption object remains inspectable', body.includes('data-object-id="1"'));
+  }
+
   // 10. Full loop: store.renderModel → <LayoutPreview> SSR === committed golden.
   {
     const mod = await vite.ssrLoadModule('/src/lib/LayoutPreview.svelte');

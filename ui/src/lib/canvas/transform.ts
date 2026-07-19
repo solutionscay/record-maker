@@ -23,10 +23,17 @@ import {
   setObjectsGeometry,
 } from '../persist';
 import { llog, lerror } from '../log';
-import { lineGeometryForAngle, lineLength, linePropsForBox, lineShapeStyle, normalizeAngle, numberProp, parseProps } from '../object-props';
-import type { CanvasContext } from './context';
+import { parseProps } from '../object-props';
+import type { CanvasContext, IdentitySnapshot } from './context';
+import { objectBehavior } from './object-behavior';
+import { classifyPress, type GestureIntent } from './press-intent';
 
-type PendingObjectClick = { id: number; clientX: number; clientY: number };
+type PendingObjectClick = {
+  id: number;
+  clientX: number;
+  clientY: number;
+  selectionBefore?: number[];
+};
 
 export class TransformController {
   readonly #ctx: CanvasContext;
@@ -59,9 +66,9 @@ export class TransformController {
     anchorId: number;
   } | null = null;
   #pressedPointer: { pointerId: number; clientX: number; clientY: number } | null = null;
-  /** Object ids moveable currently targets, and a cheap key to dedupe setState. */
+  /** Object ids moveable currently targets. Target reconciliation is cheap and
+   * always derives from current selection/identity instead of sentinel keys. */
   #targetIds = new Set<number>();
-  #targetKey = '';
   /** One-shot: swallow the native `click` the browser fires right after Selecto
    * commits selection. Without it, `onClick` can run its empty-canvas deselect
    * path and wipe the marquee or modifier-click selection that just landed. A
@@ -83,10 +90,11 @@ export class TransformController {
       clientY: number;
     }
   >();
-  #rotatingLineId: number | null = null;
-  #rotateStartLength = 0;
-  #dirtyLineProps = new Set<number>();
+  #rotatingObjectId: number | null = null;
+  #rotateStartMeasure = 0;
+  #dirtyBehaviorProps = new Set<number>();
   #pendingObjectClick: PendingObjectClick | null = null;
+  #pressIntent: GestureIntent | null = null;
 
   constructor(ctx: CanvasContext) {
     this.#ctx = ctx;
@@ -165,18 +173,17 @@ export class TransformController {
     this.#moveable.on('rotateStart', (e) => {
       const id = this.#ctx.idForElement(e.target);
       const o = id === undefined ? undefined : this.#ctx.doc.getObject(id);
-      if (id === undefined || !o || o.kind !== 'line') return false;
+      const start = o ? objectBehavior(o.kind).rotationStart(o) : null;
+      if (id === undefined || !o || !start) return false;
       this.#begin();
       this.#selectFromTarget(e.target);
-      const props = parseProps(o.props);
-      const angle = numberProp(props.angle, 0);
-      this.#rotatingLineId = id;
-      this.#rotateStartLength = lineLength(o, props);
-      e.set(angle);
-      llog('rotate', 'rotateStart', { id, angle, length: this.#rotateStartLength });
+      this.#rotatingObjectId = id;
+      this.#rotateStartMeasure = start.measure;
+      e.set(start.angle);
+      llog('rotate', 'rotateStart', { id, angle: start.angle, measure: start.measure });
     });
-    this.#moveable.on('rotate', (e) => this.#applyLineRotate(e.beforeRotation));
-    this.#moveable.on('rotateEnd', () => this.#endLineRotate());
+    this.#moveable.on('rotate', (e) => this.#applyObjectRotate(e.beforeRotation));
+    this.#moveable.on('rotateEnd', () => this.#endObjectRotate());
 
     // ── marquee multi-select ──
     this.#selecto = new Selecto({
@@ -199,6 +206,8 @@ export class TransformController {
     // the control box appear and populates `#targetIds` before the next pointer
     // stream, so a press on any selected object drags the whole group.
     this.#selecto.on('selectEnd', (e) => {
+      const intent = this.#pressIntent;
+      this.#pressIntent = null;
       const selectedIds = this.#ctx.elementsToIds(e.selected);
       const clickedObjEl =
         e.isClick && e.inputEvent
@@ -208,7 +217,7 @@ export class TransformController {
       const clickedId = clickedObjEl ? this.#ctx.idForElement(clickedObjEl) : undefined;
       // `hitRate === 100` is set by dragStart only for a Control-drag marquee (the
       // single source of that mode); reset it now that the gesture has ended.
-      const containmentMarquee = this.#selecto.hitRate === 100;
+      const containmentMarquee = intent?.kind === 'containment-marquee';
       this.#selecto.hitRate = 0;
       if (containmentMarquee && e.isClick) {
         if (clickedId !== undefined) {
@@ -219,7 +228,7 @@ export class TransformController {
           return;
         }
       }
-      if (e.isClick && clickedId !== undefined && (e.inputEvent?.shiftKey || e.inputEvent?.metaKey)) {
+      if (intent?.kind === 'toggle') {
         this.updateTarget();
         this.#swallowNextClick();
         return;
@@ -241,10 +250,29 @@ export class TransformController {
     // Decide, at press time, who owns the gesture:
     this.#selecto.on('dragStart', (e) => {
       const input = e.inputEvent;
-      const containmentMarquee = input.ctrlKey && !input.metaKey && !input.shiftKey;
-      this.#selecto.hitRate = containmentMarquee ? 100 : 0;
-      // A non-pointer tool is armed → this press PLACES an object, not selects.
-      if (this.#ctx.doc.activeTool !== 'pointer') {
+      const target = input.target as Element | null;
+      const identity = this.#ctx.identitySnapshot();
+      // Moveable's group overlay can be the event target instead of the real object.
+      const objEl =
+        (target?.closest('.fm-obj') as HTMLElement | null) ??
+        this.#ctx.objectElementAt(input.clientX, input.clientY);
+      const id = objEl ? this.#ctx.idForElement(objEl, identity) : undefined;
+      const intent = classifyPress({
+        activeTool: this.#ctx.doc.activeTool,
+        ctrlKey: input.ctrlKey,
+        metaKey: input.metaKey,
+        shiftKey: input.shiftKey,
+        objectId: id ?? null,
+        objectIsTargeted: id !== undefined && this.#targetIds.has(id),
+        moveableChrome: !!target && this.#moveable.isMoveableElement(target),
+      });
+      this.#pressIntent = intent;
+      this.#selecto.hitRate = intent.kind === 'containment-marquee' ? 100 : 0;
+      if (objEl && id === undefined) {
+        llog('target', 'press on object but id UNRESOLVED', { painted: identity.painted.length });
+      }
+
+      if (intent.kind === 'place') {
         llog('place', 'press while tool armed', {
           tool: this.#ctx.doc.activeTool,
           clientX: input.clientX,
@@ -263,65 +291,54 @@ export class TransformController {
         this.#ctx.placement.startDraw(input);
         return;
       }
-      const target = input.target as Element | null;
-      const identity = this.#ctx.identitySnapshot();
-      // Moveable's group overlay can be the event target instead of the real object.
-      const objEl =
-        (target?.closest('.fm-obj') as HTMLElement | null) ??
-        (this.#targetIds.size > 1 ? this.#ctx.objectElementAt(input.clientX, input.clientY) : null);
-      const id = objEl ? this.#ctx.idForElement(objEl, identity) : undefined;
-      if (objEl && id === undefined) {
-        llog('target', 'press on object but id UNRESOLVED', { painted: identity.painted.length });
-      }
-      // Modifier toggles must run before the moveable-control-box guard because
-      // group-selection presses can arrive through Moveable's transparent overlay.
-      // Control-drag is the containment marquee (handled below / on selectEnd), so
-      // only Shift and Meta toggle membership at press time.
-      if (objEl && id !== undefined && (input.shiftKey || input.metaKey)) {
-        llog('select', 'toggle membership', { id });
-        this.#ctx.doc.toggle(id);
+
+      if (intent.kind === 'toggle' && objEl) {
+        const selectionBefore = [...this.#ctx.doc.selection];
+        const dragSelection = this.#ctx.doc.isSelected(intent.id)
+          ? selectionBefore
+          : [...selectionBefore, intent.id];
+        llog('select', 'pending modifier click or drag', {
+          id: intent.id,
+          selected: this.#ctx.doc.isSelected(intent.id),
+          dragSelection,
+        });
+        this.#armObjectClick(intent.id, input, selectionBefore);
+        this.#ctx.doc.selectOnly(dragSelection);
+        this.#setMoveableTargets([...this.#ctx.doc.selection], identity, objEl);
+        this.#moveable.dragStart(input, objEl);
         e.stop();
-        this.updateTarget();
-        // `updateTarget()` may detach the pressed overlay before the browser's
-        // trailing native click fires, so swallow exactly that next click.
-        this.#swallowNextClick();
         return;
       }
-      if (containmentMarquee) {
+
+      if (intent.kind === 'containment-marquee') {
         llog('select', 'control-drag containment marquee');
         return;
       }
-      // moveable's own control box (a resize handle / the drag area) → its gesture.
-      if (target && this.#moveable.isMoveableElement(target)) {
+
+      if (intent.kind === 'drag' && intent.id === null) {
         llog('drag', 'press on moveable control box → moveable owns gesture');
         e.stop();
         return;
       }
-      if (!objEl) {
+
+      if (intent.kind === 'marquee') {
         llog('select', 'press on empty canvas → marquee');
         return; // empty canvas → selecto runs its marquee
       }
-      if (id === undefined) {
-        return;
-      }
-      // Already selected/targeted: let Moveable handle this same pointer stream.
-      if (this.#targetIds.has(id)) {
-        llog('drag', 'press on targeted object → moveable drags it', { id });
+
+      if (intent.kind !== 'drag' || intent.id === null || !objEl) return;
+      if (!intent.select) {
+        llog('drag', 'press on targeted object → moveable drags it', { id: intent.id });
         e.stop();
         return;
       }
       // Select and hand the current pointer event to Moveable immediately. Hover
       // no longer pre-targets objects, so this preserves click-drag in one move
       // without showing resize handles on mere hover.
-      llog('drag', 'press on un-targeted object → select + start drag', { id });
-      this.#armObjectClick(id, input);
-      this.#ctx.doc.selectOnly([id]);
+      llog('drag', 'press on un-targeted object → select + start drag', { id: intent.id });
+      this.#armObjectClick(intent.id, input);
+      this.#ctx.doc.selectOnly([intent.id]);
       const ids = [...this.#ctx.doc.selection];
-      const persistedGroup = this.#persistedGroupIdFor(ids) !== null;
-      this.#targetKey = this.#targetKeyFor(ids);
-      this.#targetIds = new Set(ids);
-      const targets = ids.map((objectId) => this.#ctx.elementForId(objectId)).filter((el): el is HTMLElement => !!el);
-      const guidelines = identity.painted.filter((el) => !targets.includes(el));
       // Set the target, then start the drag SYNCHRONOUSLY on this same pointerdown.
       // moveable.dragStart() flushes the just-set target (its internal `$_timer`
       // guard forceUpdates before triggering) and only fires if `objEl` matches the
@@ -329,11 +346,7 @@ export class TransformController {
       // old code ran dragStart inside setState's async callback, a frame late and
       // past the live pointer stream, so the first press only selected and the user
       // had to press again to drag.
-      this.#moveable.setState({
-        target: targets.length > 0 ? targets : objEl,
-        elementGuidelines: guidelines,
-        hideChildMoveableDefaultLines: persistedGroup,
-      });
+      this.#setMoveableTargets(ids, identity, objEl);
       this.#moveable.dragStart(input, objEl);
       e.stop();
     });
@@ -350,7 +363,7 @@ export class TransformController {
     // The render model (and thus the canvas DOM) may have changed — drop the
     // cached paint-order snapshot so the next lookup re-reads the fresh DOM.
     this.#ctx.invalidateIdentity();
-    this.updateTarget(true);
+    this.updateTarget();
     // Geometry-only changes (align/distribute/resize-match, undo/redo of same)
     // keep the same selected ids but move the DOM boxes underneath moveable.
     // Whenever a target is live, re-measure from the updated DOM so the controls
@@ -382,20 +395,40 @@ export class TransformController {
   /** Post-delete canvas chrome reset (the shared command layer's cleanup): force
    * moveable to re-derive its (now empty) target. */
   forceClearTarget(): void {
-    this.#targetKey = '__force_empty__';
     this.updateTarget();
+  }
+
+  /** Apply one selection-derived Moveable target. The optional fallback keeps
+   * same-pointer select-and-drag attached while Svelte catches up with a newly
+   * selected object. */
+  #setMoveableTargets(
+    ids: number[],
+    identity: IdentitySnapshot = this.#ctx.currentIdentity(),
+    fallback?: HTMLElement,
+  ): { targets: HTMLElement[]; persistedGroup: boolean } {
+    this.#targetIds = new Set(ids);
+    const targets = ids
+      .map((id) => this.#ctx.elementForId(id, identity))
+      .filter((el): el is HTMLElement => !!el);
+    const guidelines = identity.painted.filter((el) => !targets.includes(el));
+    const persistedGroup = this.#persistedGroupIdFor(ids) !== null;
+    this.#moveable.setState({
+      target: targets.length > 0 ? targets : (fallback ?? []),
+      elementGuidelines: guidelines,
+      rotatable: this.#canRotate(ids),
+      hideChildMoveableDefaultLines: persistedGroup,
+    });
+    return { targets, persistedGroup };
   }
 
   /** Choose moveable's target from the real selection only. Hover uses a separate
    * lightweight outline, so resize handles never appear on unselected objects. */
-  updateTarget(force = false): void {
+  updateTarget(): void {
     if (this.#ctx.gesturing) return;
     this.#ctx.gestureIdentity = null;
     // A placement tool is armed → the canvas is a drawing surface, not a select/
     // drag surface: drop moveable's target so a press places instead of grabs.
     if (this.#ctx.doc.activeTool !== 'pointer') {
-      if (this.#targetKey === '') return;
-      this.#targetKey = '';
       this.#targetIds = new Set();
       this.#moveable.setState(
         { target: null, elementGuidelines: [], rotatable: false, hideChildMoveableDefaultLines: false },
@@ -406,11 +439,8 @@ export class TransformController {
     }
     const sel = [...this.#ctx.doc.selection];
     const ids = sel.length > 0 ? sel : [];
-    const key = this.#targetKeyFor(ids);
-    if (key === this.#targetKey && (!force || ids.length === 0)) return;
-    this.#targetKey = key;
-    this.#targetIds = new Set(ids);
     if (ids.length === 0) {
+      this.#targetIds = new Set();
       this.#moveable.setState(
         { target: null, elementGuidelines: [], rotatable: false, hideChildMoveableDefaultLines: false },
         () => this.#moveable.forceUpdate(),
@@ -423,15 +453,7 @@ export class TransformController {
       this.#ctx.hover.paint();
       return;
     }
-    const targets = ids.map((id) => this.#ctx.elementForId(id)).filter((el): el is HTMLElement => !!el);
-    const guidelines = this.#ctx.paintedElements().filter((el) => !targets.includes(el));
-    const persistedGroup = this.#persistedGroupIdFor(ids) !== null;
-    this.#moveable.setState({
-      target: targets,
-      elementGuidelines: guidelines,
-      rotatable: this.#canRotate(ids),
-      hideChildMoveableDefaultLines: persistedGroup,
-    });
+    const { targets, persistedGroup } = this.#setMoveableTargets(ids);
     // THE key line for "resize does nothing": if `chosenIds` has an id but
     // `resolvedEls` is fewer, moveable has no element to attach handles to — the
     // store id didn't map to a painted `.fm-obj` (stale paint order / DOM not yet
@@ -473,8 +495,7 @@ export class TransformController {
       if (id !== undefined) {
         if (e.shiftKey || e.metaKey) this.#ctx.doc.toggle(id);
         else this.#ctx.doc.selectOnly([id]);
-        this.#targetKey = '';
-        this.updateTarget(true);
+        this.updateTarget();
       }
       return;
     }
@@ -513,8 +534,8 @@ export class TransformController {
     return until !== 0 && performance.now() <= until;
   }
 
-  #armObjectClick(id: number, input: MouseEvent | PointerEvent): void {
-    this.#pendingObjectClick = { id, clientX: input.clientX, clientY: input.clientY };
+  #armObjectClick(id: number, input: MouseEvent | PointerEvent, selectionBefore?: number[]): void {
+    this.#pendingObjectClick = { id, clientX: input.clientX, clientY: input.clientY, selectionBefore };
     window.removeEventListener('pointerup', this.#onObjectClickUp);
     window.addEventListener('pointerup', this.#onObjectClickUp, { once: true });
   }
@@ -528,9 +549,13 @@ export class TransformController {
     if (Math.hypot(dx, dy) > 3 || this.#moved) return;
 
     const commit = () => {
-      this.#ctx.doc.selectOnly([pending.id]);
-      this.#targetKey = '';
-      this.updateTarget(true);
+      if (pending.selectionBefore) {
+        this.#ctx.doc.selectOnly(pending.selectionBefore);
+        this.#ctx.doc.toggle(pending.id);
+      } else {
+        this.#ctx.doc.selectOnly([pending.id]);
+      }
+      this.updateTarget();
       this.#swallowNextClick();
     };
     if (this.#ctx.gesturing) requestAnimationFrame(commit);
@@ -568,9 +593,8 @@ export class TransformController {
     if (this.#moved) {
       this.#ctx.doc.mark();
       void this.#persistObjects(affectedIds, reparented);
-      void this.#persistDirtyLineProps();
+      void this.#persistDirtyBehaviorProps();
     }
-    this.#targetKey = ''; // force a re-sync after the gesture
     this.#dragStarts.clear();
     this.#resizeStarts.clear();
     this.#ctx.gestureIdentity = null;
@@ -583,7 +607,6 @@ export class TransformController {
     // cleared) so moveable's handles follow the MOVED object, not its old index.
     if (reparented.size > 0) {
       requestAnimationFrame(() => {
-        this.#targetKey = '';
         this.updateTarget();
       });
     }
@@ -985,7 +1008,7 @@ export class TransformController {
       x = clampOrigin(x);
       y = clampOrigin(y);
       this.#ctx.doc.setObjectGeometry(id, { x, y, w, h });
-      this.#syncLineToBox(id);
+      this.#syncObjectToBox(id);
       this.#scheduleRectUpdate();
       llog('resize', 'apply resize from pointer', { id, w, h, x, y, dx: Math.round(dx), dy: Math.round(dy) });
       return;
@@ -996,7 +1019,7 @@ export class TransformController {
       w: Math.max(1, Math.round(width)),
       h: Math.max(1, Math.round(height)),
     });
-    this.#syncLineToBox(id);
+    this.#syncObjectToBox(id);
     this.#scheduleRectUpdate();
     llog('resize', 'apply resize', {
       id,
@@ -1007,41 +1030,41 @@ export class TransformController {
     });
   }
 
-  #applyLineRotate(angle: number): void {
-    const id = this.#rotatingLineId;
+  #applyObjectRotate(angle: number): void {
+    const id = this.#rotatingObjectId;
     const o = id === null ? undefined : this.#ctx.doc.getObject(id);
-    if (id === null || !o || o.kind !== 'line') return;
-    const nextAngle = normalizeAngle(angle);
-    const length = this.#rotateStartLength || lineLength(o, parseProps(o.props));
-    const geom = lineGeometryForAngle(o, nextAngle, length);
-    const props = { ...parseProps(o.props), angle: nextAngle, length };
-    const propsJson = JSON.stringify(props);
+    const frame = o ? objectBehavior(o.kind).onRotate(o, angle, this.#rotateStartMeasure) : null;
+    if (id === null || !o || !frame) return;
     this.#moved = true;
-    this.#ctx.doc.setObjectGeometry(id, { x: clampOrigin(geom.x), y: clampOrigin(geom.y), w: geom.w, h: geom.h });
-    this.#ctx.doc.setObjectProps(id, propsJson);
-    this.#setLineShapeStyle(id, props);
-    this.#dirtyLineProps.add(id);
+    this.#ctx.doc.setObjectGeometry(id, {
+      x: clampOrigin(frame.geometry.x),
+      y: clampOrigin(frame.geometry.y),
+      w: frame.geometry.w,
+      h: frame.geometry.h,
+    });
+    this.#ctx.doc.setObjectProps(id, JSON.stringify(frame.props));
+    this.#setBehaviorShapeStyle(id, frame.props);
+    this.#dirtyBehaviorProps.add(id);
     this.#scheduleRectUpdate();
   }
 
-  #endLineRotate(): void {
-    const id = this.#rotatingLineId;
+  #endObjectRotate(): void {
+    const id = this.#rotatingObjectId;
     const moved = this.#moved;
     this.#ctx.gesturing = false;
-    this.#rotatingLineId = null;
-    this.#rotateStartLength = 0;
+    this.#rotatingObjectId = null;
+    this.#rotateStartMeasure = 0;
     this.#ctx.gestureIdentity = null;
     if (id !== null && moved) {
       this.#ctx.doc.mark();
       void this.#persistObjects([id]);
-      void this.#persistDirtyLineProps();
+      void this.#persistDirtyBehaviorProps();
     }
-    this.#targetKey = '';
     this.#scheduleRectUpdate();
     this.updateTarget();
   }
 
-  async #persistLineProps(id: number): Promise<void> {
+  async #persistBehaviorProps(id: number): Promise<void> {
     const o = this.#ctx.doc.getObject(id);
     if (!o) return;
     const props = parseProps(o.props);
@@ -1049,47 +1072,48 @@ export class TransformController {
       const styles = await persistObjectProps(this.#ctx.layoutId, id, props);
       this.#ctx.doc.setObjectStyles(id, styles);
     } catch (e) {
-      lerror('persist', 'failed to persist line rotation', e);
+      lerror('persist', 'failed to persist object behavior props', e);
       this.#ctx.reportError(e);
     }
   }
 
-  async #persistDirtyLineProps(): Promise<void> {
-    const ids = [...this.#dirtyLineProps];
-    this.#dirtyLineProps.clear();
-    await Promise.all(ids.map((id) => this.#persistLineProps(id)));
+  async #persistDirtyBehaviorProps(): Promise<void> {
+    const ids = [...this.#dirtyBehaviorProps];
+    this.#dirtyBehaviorProps.clear();
+    await Promise.all(ids.map((id) => this.#persistBehaviorProps(id)));
   }
 
   #canRotate(ids: number[]): boolean {
     if (ids.length !== 1) return false;
-    return this.#ctx.doc.getObject(ids[0])?.kind === 'line';
+    const object = this.#ctx.doc.getObject(ids[0]);
+    return !!object && objectBehavior(object.kind).rotatable;
   }
 
   #persistedGroupIdFor(ids: number[]): number | null {
     return this.#ctx.doc.groupIdForSelection(ids);
   }
 
-  #targetKeyFor(ids: number[]): string {
-    return `${ids.slice().sort((a, b) => a - b).join(',')}|group:${this.#persistedGroupIdFor(ids) ?? ''}`;
-  }
-
-  #setLineShapeStyle(id: number, props: Record<string, unknown>): void {
+  #setBehaviorShapeStyle(id: number, props: Record<string, unknown>): void {
     const view = this.#ctx.objectView(id);
     if (!view) return;
+    const shapeStyle = objectBehavior(view.kind).shapeStyle(props);
+    if (shapeStyle === null) return;
     this.#ctx.doc.setObjectStyles(id, {
       objectStyle: view.objectStyle,
       textStyle: view.textStyle,
-      shapeStyle: lineShapeStyle(props),
+      shapeStyle,
     });
   }
 
-  #syncLineToBox(id: number): void {
+  #syncObjectToBox(id: number): void {
     const o = this.#ctx.doc.getObject(id);
-    if (!o || o.kind !== 'line') return;
-    const next = linePropsForBox(o, parseProps(o.props));
+    if (!o) return;
+    const behavior = objectBehavior(o.kind);
+    const next = behavior.syncGeometry(o);
+    if (!next) return;
     this.#ctx.doc.setObjectProps(id, JSON.stringify(next));
-    this.#setLineShapeStyle(id, next);
-    this.#dirtyLineProps.add(id);
+    this.#setBehaviorShapeStyle(id, next);
+    if (behavior.persistAfterResize) this.#dirtyBehaviorProps.add(id);
   }
 
   // ── persistence (#46 bulk axum contract) ──

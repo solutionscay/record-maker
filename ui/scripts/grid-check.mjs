@@ -67,6 +67,31 @@ async function dragBy(page, object, dx, dy = 0, grabY = 0.5) {
   await page.waitForTimeout(150);
 }
 
+async function shiftDragBy(page, object, dx, dy = 0) {
+  const box = await object.boundingBox();
+  assert.ok(box, 'modifier-drag object has a drag box');
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(x, y);
+  await page.keyboard.down('Shift');
+  await page.mouse.down();
+  await page.mouse.move(x + dx, y + dy, { steps: 5 });
+  await page.mouse.up();
+  await page.keyboard.up('Shift');
+  await page.waitForTimeout(150);
+}
+
+async function shiftClick(page, object) {
+  const box = await object.boundingBox();
+  assert.ok(box, 'modifier-click object has a click box');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.keyboard.down('Shift');
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.keyboard.up('Shift');
+  await page.waitForTimeout(100);
+}
+
 async function fastDragAligned(page, objectCount, dx, label) {
   const objects = page.locator('.fm-canvas .fm-obj');
   const dragTarget = objects.first();
@@ -223,6 +248,15 @@ try {
     binding: 'grid_rows',
   });
   const portalId = createdPortal[0].id;
+  const createdModifierTarget = await postJson(`/design/${layout.id}/object`, {
+    partId: bodyPart.id,
+    kind: 'rect',
+    x: 660,
+    y: 96,
+    w: 60,
+    h: 40,
+  });
+  const modifierTargetId = createdModifierTarget[0].id;
   const createdColumn = await postJson(`/design/${layout.id}/object`, {
     partId: bodyPart.id,
     kind: 'field',
@@ -330,11 +364,50 @@ try {
   await dragBy(page, object, 3);
   assert.equal(await objectX(object), fineBefore + 3, '1px grid is effectively free-flowing');
 
+  // #99/#205: modifier presses stay pending until the movement threshold. A
+  // Shift-press on an unselected object immediately hands the live stream to
+  // Moveable and drags the expanded selection. A stationary Shift-click still
+  // toggles, while Shift-dragging an already selected object preserves the
+  // group instead of removing it at pointer-down.
+  const modifierTarget = page.locator(`[data-object-id="${modifierTargetId}"]`);
+  await object.click();
+  const addDragBefore = [await objectX(object), await objectX(modifierTarget)];
+  await shiftDragBy(page, modifierTarget, 11);
+  const addDragAfter = [await objectX(object), await objectX(modifierTarget)];
+  assert.deepEqual(
+    addDragAfter.map((x, index) => x - addDragBefore[index]),
+    [11, 11],
+    'Shift-select and drag expands and moves the selection in one pointer gesture',
+  );
+
+  await shiftClick(page, object);
+  const toggledBefore = [await objectX(object), await objectX(modifierTarget)];
+  await dragBy(page, modifierTarget, 7);
+  const toggledAfter = [await objectX(object), await objectX(modifierTarget)];
+  assert.deepEqual(
+    toggledAfter.map((x, index) => x - toggledBefore[index]),
+    [0, 7],
+    'stationary Shift-click removes a selected object without swallowing the next drag',
+  );
+
+  await shiftClick(page, object);
+  const keepDragBefore = [await objectX(object), await objectX(modifierTarget)];
+  await shiftDragBy(page, object, 9);
+  const keepDragAfter = [await objectX(object), await objectX(modifierTarget)];
+  assert.deepEqual(
+    keepDragAfter.map((x, index) => x - keepDragBefore[index]),
+    [9, 9],
+    'Shift-drag on a selected object preserves and moves the existing selection',
+  );
+
+  await page.mouse.click(canvas.x + canvas.width - 10, canvas.y + canvas.height - 10);
+  await object.click();
+
   // Group drag snaps one anchor and applies one common delta. The generated
   // Form supplies a caption and value field, giving this check two real objects.
   const secondObject = page.locator('.fm-canvas .fm-obj').nth(1);
   assert.ok(await secondObject.count(), 'generated layout has a second object for group drag');
-  await secondObject.click({ modifiers: ['Shift'] });
+  await shiftClick(page, secondObject);
   const groupBefore = [await objectX(object), await objectX(secondObject)];
   await dragBy(page, object, 7);
   const groupAfter = [await objectX(object), await objectX(secondObject)];

@@ -142,8 +142,7 @@ export class CanvasContext {
     return elementsToObjectIds(elements, identity.painted, identity.ids);
   }
 
-  elementForId(id: number): HTMLElement | undefined {
-    const identity = this.currentIdentity();
+  elementForId(id: number, identity: IdentitySnapshot = this.currentIdentity()): HTMLElement | undefined {
     const i = identity.ids.indexOf(id);
     return i >= 0 ? identity.painted[i] : undefined;
   }

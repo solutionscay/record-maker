@@ -6,12 +6,12 @@
 import type { ToolKind } from '../doc.svelte';
 import type { ObjectView } from '../model';
 import { clampOrigin, snapToGrid } from '../canvas-edit';
-import { defaultBox, defaultProps, partAtY } from '../create';
+import { defaultBox, partAtY } from '../create';
 import { createObject } from '../persist';
 import { FIELD_DRAG_MIME, PORTAL_COLUMN_DRAG_MIME, type PortalColumnDrag } from '../dnd';
 import { llog, lerror } from '../log';
-import { lineAngle } from '../object-props';
 import type { CanvasContext } from './context';
+import { objectBehavior } from './object-behavior';
 
 type DrawTool = Exclude<ToolKind, 'pointer'>;
 type FieldPlacementTarget = {
@@ -153,24 +153,16 @@ export class PlacementController {
       yGlobal = drawing.startY;
       w = 1;
       h = 1;
-    } else if (drawing.tool === 'line') {
-      const sx = this.#snap(drawing.startX);
-      const sy = this.#snap(drawing.startY);
-      const ex = this.#snap(endX);
-      const ey = this.#snap(endY);
-      x = Math.min(sx, ex);
-      yGlobal = Math.min(sy, ey);
-      w = Math.max(1, Math.abs(ex - sx));
-      h = Math.max(1, Math.abs(ey - sy));
-      drawing.line = {
-        angle: lineAngle(sx, sy, ex, ey),
-        length: Math.max(1, Math.hypot(ex - sx, ey - sy)),
-      };
     } else {
-      x = Math.min(drawing.startX, endX);
-      yGlobal = Math.min(drawing.startY, endY);
-      w = Math.max(8, Math.abs(endX - drawing.startX));
-      h = Math.max(8, Math.abs(endY - drawing.startY));
+      const geometry = objectBehavior(drawing.tool).drawGeometry({
+        startX: drawing.startX,
+        startY: drawing.startY,
+        endX,
+        endY,
+        snap: (value) => this.#snap(value),
+      });
+      ({ x, yGlobal, w, h } = geometry);
+      drawing.line = geometry.line;
     }
 
     x = this.#snap(x);
@@ -189,13 +181,14 @@ export class PlacementController {
 
   #paintDrawPreview(drawing: DrawPlacement): void {
     if (!this.#drawPreview) return;
-    if (drawing.tool === 'line') {
-      const line = drawing.line ?? { angle: 0, length: Math.max(1, drawing.box.w) };
-      this.#drawPreview.style.left = `${drawing.box.x + drawing.box.w / 2 - line.length / 2}px`;
-      this.#drawPreview.style.top = `${drawing.partTop + drawing.box.y + drawing.box.h / 2 - 1}px`;
-      this.#drawPreview.style.width = `${line.length}px`;
-      this.#drawPreview.style.height = '2px';
-      this.#drawPreview.style.transform = `rotate(${line.angle}deg)`;
+    const frame = { dragged: drawing.dragged, box: drawing.box, partTop: drawing.partTop, line: drawing.line };
+    const style = objectBehavior(drawing.tool).previewStyle(frame);
+    if (style) {
+      this.#drawPreview.style.left = `${style.left}px`;
+      this.#drawPreview.style.top = `${style.top}px`;
+      this.#drawPreview.style.width = `${style.width}px`;
+      this.#drawPreview.style.height = `${style.height}px`;
+      this.#drawPreview.style.transform = style.transform;
       return;
     }
     this.#ctx.placeOverlay(this.#drawPreview, drawing.box, drawing.partTop);
@@ -237,11 +230,16 @@ export class PlacementController {
           y: finalBox.y,
           w: finalBox.w,
           h: finalBox.h,
-          content: tool === 'text' ? 'Text' : null,
+          content: objectBehavior(tool).defaultContent,
           // A portal binds the armed relationship route on placement (#168);
           // the server stores it in the object's `binding` slot.
           binding: tool === 'portal' ? this.#ctx.doc.toolRoute : null,
-          props: this.#placementProps(tool, drawing, finalBox),
+          props: objectBehavior(tool).placementProps({
+            dragged: drawing.dragged,
+            box: finalBox,
+            partTop: drawing.partTop,
+            line: drawing.line,
+          }),
           rec: this.#ctx.doc.rec,
         });
       }
@@ -273,13 +271,6 @@ export class PlacementController {
       w: size.w,
       h: Math.min(size.h, Math.max(1, drawing.partHeight - y)),
     };
-  }
-
-  #placementProps(tool: DrawTool, drawing: DrawPlacement, box: { w: number }): Record<string, unknown> | null {
-    const base = defaultProps(tool);
-    if (tool !== 'line') return base ?? null;
-    const line = drawing.dragged && drawing.line ? drawing.line : { angle: 0, length: Math.max(1, box.w) };
-    return { ...(base ?? {}), angle: line.angle, length: line.length };
   }
 
   // ── field drag-and-drop (drag from the field picker onto the canvas) ──────

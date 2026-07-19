@@ -513,6 +513,48 @@ try {
       h: 40,
     });
   }
+
+  // 14. Canvas press intent and per-kind behavior registry (#99/#205).
+  {
+    const { classifyPress } = await vite.ssrLoadModule('/src/lib/canvas/press-intent.ts');
+    const basePress = {
+      activeTool: 'pointer',
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      objectId: null,
+      objectIsTargeted: false,
+      moveableChrome: false,
+    };
+    eq('press intent: armed tool owns placement', classifyPress({ ...basePress, activeTool: 'rect' }), { kind: 'place' });
+    eq('press intent: Control owns containment marquee', classifyPress({ ...basePress, ctrlKey: true, objectId: 7 }), {
+      kind: 'containment-marquee',
+    });
+    eq('press intent: Shift object press stays pending', classifyPress({ ...basePress, shiftKey: true, objectId: 7 }), {
+      kind: 'toggle', id: 7,
+    });
+    eq('press intent: unselected object selects and drags', classifyPress({ ...basePress, objectId: 7 }), {
+      kind: 'drag', id: 7, select: true,
+    });
+
+    const { objectBehavior } = await vite.ssrLoadModule('/src/lib/canvas/object-behavior.ts');
+    const text = objectBehavior('text');
+    const line = objectBehavior('line');
+    ok('behavior registry: generic text owns default content', text.defaultContent === 'Text' && !text.rotatable);
+    ok('behavior registry: line owns rotation and resize persistence', line.rotatable && line.persistAfterResize);
+    eq('behavior registry: line draw resolves geometry and props', {
+      draw: line.drawGeometry({ startX: 10, startY: 20, endX: 40, endY: 60, snap: (value) => value }),
+      props: line.placementProps({
+        dragged: true,
+        box: { x: 10, y: 20, w: 30, h: 40 },
+        partTop: 0,
+        line: { angle: 53.13, length: 50 },
+      }),
+    }, {
+      draw: { x: 10, yGlobal: 20, w: 30, h: 40, line: { angle: 53.13, length: 50 } },
+      props: { stroke: '#888888', strokeWidth: 2, angle: 53.13, length: 50 },
+    });
+  }
 } finally {
   await vite.close();
 }

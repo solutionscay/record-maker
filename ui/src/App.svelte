@@ -12,6 +12,7 @@
   // control box stays crisp; the interaction layer is told the zoom so pointer
   // placement maps back to model coordinates.
   import type { EditorDoc } from './lib/doc.svelte';
+  import { flushSync } from 'svelte';
   import { registerEchoStage } from './lib/echo';
   import { CanvasInteraction } from './lib/interaction';
   import { setPartHeight as persistPartHeight } from './lib/persist';
@@ -275,7 +276,31 @@
     const canvas = stage.querySelector<HTMLElement>('.fm-canvas');
     if (!canvas) return;
     const minHeight = doc.minPartHeight(id);
-    const canvasRect = canvas.getBoundingClientRect();
+    const part = doc.getPart(id);
+    if (!part) return;
+    const startHeight = part.height;
+    let latestHeight = startHeight;
+    const startClientY = event.clientY;
+    const partElement = canvas.querySelector<HTMLElement>(`.fm-part[data-part-id="${id}"]`);
+    const overlay = stage.querySelector<HTMLElement>('.le-part-overlays');
+    const label = overlay?.querySelector<HTMLElement>(`.le-part-label[data-overlay-part-id="${id}"]`) ?? null;
+    const handle = overlay?.querySelector<HTMLElement>(`.le-part-resize[data-overlay-part-id="${id}"]`) ?? null;
+    const grid = stage.querySelector<HTMLElement>('.le-layout-grid');
+    const laterIds = partBands.filter((band) => band.top > top).map((band) => band.part.id);
+    const shifted = laterIds.flatMap((partId) => [
+      overlay?.querySelector<HTMLElement>(`.le-part-label[data-overlay-part-id="${partId}"]`) ?? null,
+      overlay?.querySelector<HTMLElement>(`.le-part-resize[data-overlay-part-id="${partId}"]`) ?? null,
+    ]).filter((element): element is HTMLElement => !!element);
+    const originals = {
+      partHeight: partElement?.style.height ?? '',
+      labelHeight: label?.style.height ?? '',
+      handleTop: handle?.style.top ?? '',
+      gridHeight: grid?.style.height ?? '',
+      shifted: new Map(shifted.map((element) => [element, element.style.transform])),
+    };
+    const startLayoutHeight = doc.renderModel.parts.reduce((sum, candidate) => sum + candidate.height, 0);
+    let previewFrame: number | null = null;
+    let receivedMove = false;
     const selectionBefore = [...doc.selection];
     const selectedPartBefore = doc.selectedPartId;
     const checkpoint = doc.beginGestureTransaction();
@@ -284,18 +309,41 @@
     doc.selectPart(id);
     llog('resize', 'part resizeStart', { id, minHeight });
 
+    const paintPreview = () => {
+      previewFrame = null;
+      const delta = latestHeight - startHeight;
+      if (partElement) partElement.style.height = `${latestHeight}px`;
+      if (label) label.style.height = `${latestHeight}px`;
+      if (handle) handle.style.top = `${top + latestHeight - 4}px`;
+      if (grid) grid.style.height = `${startLayoutHeight + delta}px`;
+      for (const element of shifted) element.style.transform = `translateY(${delta}px)`;
+    };
+    const propose = (e: PointerEvent) => {
+      const zoom = doc.zoom || 1;
+      const authored = startHeight + (e.clientY - startClientY) / zoom;
+      latestHeight = Math.max(minHeight, snapToGrid(authored, doc.snapToGrid ? doc.gridSize : 0));
+      if (previewFrame === null) previewFrame = requestAnimationFrame(paintPreview);
+    };
     const move = (e: PointerEvent) => {
       if (!partResizeLifecycle.owns(e)) return;
-      const zoom = doc.zoom || 1;
-      const modelY = (e.clientY - canvasRect.top) / zoom;
-      const authored = modelY - top;
-      const height = Math.max(minHeight, snapToGrid(authored, doc.snapToGrid ? doc.gridSize : 0));
-      doc.setPartHeight(id, height);
+      receivedMove = true;
+      propose(e);
     };
-    const cleanup = () => {
+    const clearPreview = (restore: boolean) => {
+      if (previewFrame !== null) cancelAnimationFrame(previewFrame);
+      previewFrame = null;
+      if (restore) {
+        if (partElement) partElement.style.height = originals.partHeight;
+        if (label) label.style.height = originals.labelHeight;
+        if (handle) handle.style.top = originals.handleTop;
+        if (grid) grid.style.height = originals.gridHeight;
+      }
+      for (const [element, transform] of originals.shifted) element.style.transform = transform;
+    };
+    const cleanup = (restore: boolean) => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
-      resizingPartId = null;
+      clearPreview(restore);
       interaction?.setExternalGesturing(false);
     };
     const restoreSelection = () => {
@@ -304,13 +352,23 @@
     };
     const up = (e: PointerEvent) => {
       if (!partResizeLifecycle.owns(e)) return;
+      if (receivedMove) propose(e);
+      if (receivedMove && previewFrame !== null) {
+        cancelAnimationFrame(previewFrame);
+        previewFrame = null;
+        paintPreview();
+      }
       partResizeLifecycle.commit();
-      cleanup();
-      const part = doc.getPart(id);
-      if (!part) return;
+      const changed = latestHeight !== startHeight;
+      flushSync(() => {
+        if (changed) doc.setPartHeight(id, latestHeight);
+        resizingPartId = null;
+      });
+      cleanup(false);
       doc.commitGestureTransaction(checkpoint);
-      llog('resize', 'part resizeEnd', { id, height: part.height });
-      void persistPartHeight(layoutId, id, part.height).catch((e) => {
+      llog('resize', 'part resizeEnd', { id, height: latestHeight, changed });
+      if (!changed) return;
+      void persistPartHeight(layoutId, id, latestHeight).catch((e) => {
         lerror('persist', 'failed to persist part height', e);
         doc.setError(e instanceof Error ? e.message : String(e));
       });
@@ -320,14 +378,15 @@
       pointerId: event.pointerId,
       captureTarget: event.currentTarget as Element | null,
       onCancel: (reason) => {
-        cleanup();
+        flushSync(() => { resizingPartId = null; });
+        cleanup(true);
         doc.cancelGestureTransaction(checkpoint);
         restoreSelection();
         llog('resize', 'part resize cancelled', { id, reason });
       },
     });
     window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up, { once: true });
+    window.addEventListener('pointerup', up);
   }
 </script>
 
@@ -359,6 +418,7 @@
               type="button"
               class="le-part-label"
               class:selected={doc.selectedPartId === band.part.id}
+              data-overlay-part-id={band.part.id}
               style={`top: ${band.top}px; height: ${band.part.height}px;`}
               title={`Select ${partLabel(band.part.kind)} band`}
               onclick={(e) => selectPart(band.part.id, e)}
@@ -373,6 +433,7 @@
               class="le-part-resize"
               class:selected={doc.selectedPartId === band.part.id}
               class:resizing={resizingPartId === band.part.id}
+              data-overlay-part-id={band.part.id}
               style={`top: ${band.top + band.part.height - 4}px;`}
               title={`Resize ${partLabel(band.part.kind)} band`}
               onpointerdown={(e) => startPartResize(band.part.id, band.top, e)}

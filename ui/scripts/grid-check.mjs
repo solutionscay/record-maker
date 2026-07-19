@@ -1,5 +1,6 @@
-// #193/#194/#195 browser acceptance: layout-owned snapping plus frame-sampled
-// object/bounds alignment and pointer-to-style commit latency under burst drag.
+// #193/#194/#195/#214 browser acceptance: layout-owned snapping plus
+// frame-sampled drag/resize alignment, ephemeral preview latency, and one final
+// authored geometry commit under burst input.
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -207,6 +208,107 @@ async function fastDragAligned(page, objectCount, dx, label) {
   console.log(`${label} latency: ${JSON.stringify(fastDrift)}`);
 }
 
+async function beginFastResizePreview(page, object, handle, dx, dy, label, edgeObjects = [object]) {
+  const objectId = await object.getAttribute('data-object-id');
+  const objectSelector = `[data-object-id="${objectId}"]`;
+  const edgeSelectors = await Promise.all(edgeObjects.map(async (locator) =>
+    `[data-object-id="${await locator.getAttribute('data-object-id')}"]:not(.le-echo-ghost)`));
+  const handleBox = await handle.boundingBox();
+  assert.ok(handleBox, `${label} has a resize handle`);
+  const widthInput = page.locator('#layout-inspector input[aria-label="Width in pixels"]');
+  const heightInput = page.locator('#layout-inspector input[aria-label="Height in pixels"]');
+  const inspectorBefore = { width: await widthInput.inputValue(), height: await heightInput.inputValue() };
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  const sampled = page.evaluate(({ selector, edgeSelectors, inspectorBefore }) => new Promise((resolveSample) => {
+    let pointerSequence = 0;
+    let previousFrameSequence = -1;
+    let latestPointerAt = performance.now();
+    let observedSequence = -1;
+    let maxStableEdgeGap = 0;
+    let reactiveChanges = 0;
+    let frames = 0;
+    const styleLatencies = [];
+    const target = document.querySelector(selector);
+    const width = document.querySelector('#layout-inspector input[aria-label="Width in pixels"]');
+    const height = document.querySelector('#layout-inspector input[aria-label="Height in pixels"]');
+    const observer = new MutationObserver(() => {
+      if (observedSequence === pointerSequence) return;
+      observedSequence = pointerSequence;
+      styleLatencies.push(performance.now() - latestPointerAt);
+    });
+    if (target) observer.observe(target, { attributes: true, attributeFilter: ['style'] });
+    const onPointerMove = () => {
+      pointerSequence += 1;
+      latestPointerAt = performance.now();
+    };
+    window.addEventListener('pointermove', onPointerMove, { capture: true });
+    const sample = () => {
+      const controls = [...document.querySelectorAll('.moveable-control[data-direction="se"]')];
+      const control = controls.at(-1);
+      if (target && control && pointerSequence > 0 && pointerSequence === previousFrameSequence) {
+        const boxes = edgeSelectors
+          .map((edgeSelector) => document.querySelector(edgeSelector)?.getBoundingClientRect())
+          .filter(Boolean);
+        const handleBox = control.getBoundingClientRect();
+        if (boxes.length > 0) {
+          maxStableEdgeGap = Math.max(
+            maxStableEdgeGap,
+            Math.abs(Math.max(...boxes.map((box) => box.right)) - (handleBox.left + handleBox.width / 2)),
+            Math.abs(Math.max(...boxes.map((box) => box.bottom)) - (handleBox.top + handleBox.height / 2)),
+          );
+        }
+      }
+      if ((width && width.value !== inspectorBefore.width) || (height && height.value !== inspectorBefore.height)) {
+        reactiveChanges += 1;
+      }
+      previousFrameSequence = pointerSequence;
+      frames += 1;
+      if (frames < 35) requestAnimationFrame(sample);
+      else {
+        observer.disconnect();
+        window.removeEventListener('pointermove', onPointerMove, { capture: true });
+        resolveSample({
+          maxStableEdgeGap,
+          reactiveChanges,
+          styleSamples: styleLatencies.length,
+          maxStyleLatencyMs: styleLatencies.length ? Math.max(...styleLatencies) : 0,
+        });
+      }
+    };
+    requestAnimationFrame(sample);
+  }), { selector: objectSelector, edgeSelectors, inspectorBefore });
+  await page.mouse.down();
+  await page.mouse.move(
+    handleBox.x + handleBox.width / 2 + dx,
+    handleBox.y + handleBox.height / 2 + dy,
+    { steps: 80 },
+  );
+  const result = await sampled;
+  assert.equal(result.reactiveChanges, 0,
+    `${label} leaves the reactive document/Inspector unchanged during preview (${JSON.stringify(result)})`);
+  assert.ok(result.styleSamples > 0 && result.maxStyleLatencyMs <= 34.5,
+    `${label} paints feedback within one display frame (${JSON.stringify(result)})`);
+  assert.ok(result.maxStableEdgeGap <= 1.01,
+    `${label} keeps the southeast handle attached after one display frame (${JSON.stringify(result)})`);
+  assert.deepEqual(
+    { width: await widthInput.inputValue(), height: await heightInput.inputValue() },
+    inspectorBefore,
+    `${label} has no authored geometry before pointer-up`,
+  );
+  console.log(`${label} resize preview: ${JSON.stringify(result)}`);
+  return { inspectorBefore, result };
+}
+
+async function setCanvasZoom(page, percent) {
+  const readout = page.locator('.le-zoom-num');
+  for (let attempts = 0; attempts < 50; attempts += 1) {
+    const current = Number((await readout.textContent()).replace('%', ''));
+    if (current === percent) return;
+    await page.getByRole('button', { name: current < percent ? 'Zoom in' : 'Zoom out' }).click();
+  }
+  assert.fail(`could not set canvas zoom to ${percent}%`);
+}
+
 let browser;
 try {
   await waitForServer();
@@ -401,8 +503,8 @@ try {
   // right edge enters the candidate's left-edge threshold, so both the live box
   // and the only active vertical guide land at model x=700; pointer-up persists
   // that exact live result and removes the guide.
-  const snapSource = page.locator(`[data-object-id="${snapSourceId}"]`);
-  const snapCandidate = page.locator(`[data-object-id="${snapCandidateId}"]`);
+  const snapSource = page.locator(`.fm-part > .fm-obj:not(.le-echo-ghost)[data-object-id="${snapSourceId}"]`);
+  const snapCandidate = page.locator(`.fm-part > .fm-obj:not(.le-echo-ghost)[data-object-id="${snapCandidateId}"]`);
   const snapSourceBox = await snapSource.boundingBox();
   const snapCandidateBox = await snapCandidate.boundingBox();
   const smartSnapWrites = writeRequests.length;
@@ -455,16 +557,8 @@ try {
   assert.ok(smartResizeHandleBox, 'smart-snap source exposes a southeast resize handle');
   const smartResizeSaved = page.waitForResponse((response) =>
     new URL(response.url()).pathname === `/design/${layout.id}/geometry` && response.request().method() === 'POST');
-  await page.mouse.move(
-    smartResizeHandleBox.x + smartResizeHandleBox.width / 2,
-    smartResizeHandleBox.y + smartResizeHandleBox.height / 2,
-  );
-  await page.mouse.down();
-  await page.mouse.move(
-    smartResizeHandleBox.x + smartResizeHandleBox.width / 2 + 136,
-    smartResizeHandleBox.y + smartResizeHandleBox.height / 2,
-    { steps: 5 },
-  );
+  const singleResizeWrites = writeRequests.filter((path) => path === `/design/${layout.id}/geometry`).length;
+  await beginFastResizePreview(page, snapSource, smartResizeHandle, 136, 0, 'single object');
   await page.waitForTimeout(50);
   assert.equal(await snapSource.evaluate((element) => Number.parseFloat(element.style.width)), 180,
     'live resize edge adheres to the sibling guide');
@@ -472,9 +566,96 @@ try {
     'resize guide and applied edge share one coordinate');
   await page.mouse.up();
   assert.equal((await smartResizeSaved).status(), 200);
+  assert.equal(writeRequests.filter((path) => path === `/design/${layout.id}/geometry`).length, singleResizeWrites + 1,
+    '80-sample single resize emits exactly one final bulk geometry request');
   assert.equal(await snapSource.evaluate((element) => Number.parseFloat(element.style.width)), 180,
     'pointer-up persists the live smart-snapped width');
   assert.equal(await page.locator('.le-smart-guide').count(), 0, 'resize guides clear on pointer-up');
+  assert.equal(await page.locator('#layout-inspector input[aria-label="Width in pixels"]').inputValue(), '180',
+    'single resize publishes final authored width only after pointer-up');
+
+  await page.keyboard.press('Control+z');
+  await page.waitForTimeout(150);
+  assert.equal(await snapSource.evaluate((element) => Number.parseFloat(element.style.width)), 40,
+    'one undo restores the exact pre-resize width');
+  await page.keyboard.press('Control+Shift+z');
+  await page.waitForTimeout(150);
+  assert.equal(await snapSource.evaluate((element) => Number.parseFloat(element.style.width)), 180,
+    'one redo reapplies the final resize width');
+  await page.keyboard.press('Control+z');
+  await page.waitForTimeout(150);
+  assert.equal(await snapSource.evaluate((element) => Number.parseFloat(element.style.width)), 40,
+    'source returns to its equal-width group fixture');
+
+  // #214 group preview scales one captured union without rebuilding the document
+  // per target/sample. Equal-width members keep the Inspector at 40px throughout
+  // the 80-sample preview, then land in one bulk geometry request and undo step.
+  await snapSource.click();
+  await shiftClick(page, snapCandidate);
+  const groupResizeHandle = page.locator('.moveable-control[data-direction="se"]').last();
+  const groupWidthsBefore = await Promise.all([snapSource, snapCandidate].map((locator) =>
+    locator.evaluate((element) => Number.parseFloat(element.style.width))));
+  assert.deepEqual(groupWidthsBefore, [40, 40], 'group resize fixture starts with equal authored widths');
+  const groupResizeWrites = writeRequests.filter((path) => path === `/design/${layout.id}/geometry`).length;
+  await beginFastResizePreview(page, snapSource, groupResizeHandle, 80, 20, 'group object', [snapSource, snapCandidate]);
+  const liveGroupWidths = await Promise.all([snapSource, snapCandidate].map((locator) =>
+    locator.evaluate((element) => Number.parseFloat(element.style.width))));
+  assert.ok(liveGroupWidths.every((width) => width > 40) && liveGroupWidths[0] === liveGroupWidths[1],
+    `group preview scales only its targets with one common factor: ${JSON.stringify(liveGroupWidths)}`);
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  assert.equal(writeRequests.filter((path) => path === `/design/${layout.id}/geometry`).length, groupResizeWrites + 1,
+    '80-sample group resize emits one bulk geometry request');
+  await page.keyboard.press('Control+z');
+  await page.waitForTimeout(150);
+  assert.deepEqual(await Promise.all([snapSource, snapCandidate].map((locator) =>
+    locator.evaluate((element) => Number.parseFloat(element.style.width)))), groupWidthsBefore,
+  'one undo restores every group member');
+
+  // Pointer deltas remain model-correct at both zoom limits. Pick a requested
+  // right edge that is clear of every sibling anchor even at 25%'s 20-model-px
+  // smart-guide threshold, so this isolates zoom conversion from guide snapping.
+  const zoomObjectId = await object.getAttribute('data-object-id');
+  const zoomDelta = await page.evaluate((targetId) => {
+    const targets = [...document.querySelectorAll('.fm-part > .fm-obj:not(.le-echo-ghost)')];
+    const target = targets.find((element) => element.getAttribute('data-object-id') === targetId);
+    const right = Number.parseFloat(target.style.left) + Number.parseFloat(target.style.width);
+    const anchors = targets.filter((element) => element !== target).flatMap((element) => {
+      const left = Number.parseFloat(element.style.left);
+      const width = Number.parseFloat(element.style.width);
+      return [left, left + width / 2, left + width];
+    });
+    return Array.from({ length: 18 }, (_, index) => (index + 3) * 4)
+      .find((delta) => anchors.every((anchor) => Math.abs(right + delta - anchor) > 21));
+  }, zoomObjectId);
+  assert.ok(zoomDelta, 'zoom acceptance finds a guide-free resize delta');
+  for (const percent of [25, 400]) {
+    await setCanvasZoom(page, percent);
+    await page.locator('.fm-canvas').dispatchEvent('click');
+    await object.dispatchEvent('click');
+    await page.waitForTimeout(50);
+    const zoomHandle = page.locator('.moveable-control[data-direction="se"]').last();
+    const zoomHandleBox = await zoomHandle.boundingBox();
+    const zoomWidthBefore = await object.evaluate((element) => Number.parseFloat(element.style.width));
+    const zoomWrites = writeRequests.filter((path) => path === `/design/${layout.id}/geometry`).length;
+    const zoomHandleX = Math.round(zoomHandleBox.x + zoomHandleBox.width / 2);
+    const zoomHandleY = Math.round(zoomHandleBox.y + zoomHandleBox.height / 2);
+    await page.mouse.move(zoomHandleX, zoomHandleY);
+    await page.mouse.down();
+    await page.mouse.move(zoomHandleX + zoomDelta * percent / 100, zoomHandleY, { steps: 5 });
+    const zoomWidthLive = await object.evaluate((element) => Number.parseFloat(element.style.width));
+    assert.equal(zoomWidthLive, zoomWidthBefore + zoomDelta,
+      `${percent}% zoom maps client resize delta to authored pixels`);
+    await page.mouse.up();
+    await page.waitForTimeout(150);
+    assert.equal(writeRequests.filter((path) => path === `/design/${layout.id}/geometry`).length, zoomWrites + 1,
+      `${percent}% zoom persists one final geometry request`);
+    await page.keyboard.press('Control+z');
+    await page.waitForTimeout(150);
+    assert.equal(await object.evaluate((element) => Number.parseFloat(element.style.width)), zoomWidthBefore,
+      `${percent}% zoom resize undoes exactly`);
+  }
+  await setCanvasZoom(page, 100);
 
   // #217: Escape cancels a live object drag, restores the exact authored box,
   // and emits no geometry persistence. Releasing the physical pointer afterward
@@ -560,7 +741,7 @@ try {
   // Moveable and drags the expanded selection. A stationary Shift-click still
   // toggles, while Shift-dragging an already selected object preserves the
   // group instead of removing it at pointer-down.
-  const modifierTarget = page.locator(`[data-object-id="${modifierTargetId}"]`);
+  const modifierTarget = page.locator(`.fm-part > .fm-obj:not(.le-echo-ghost)[data-object-id="${modifierTargetId}"]`);
   await object.click();
   const addDragBefore = [await objectX(object), await objectX(modifierTarget)];
   await shiftDragBy(page, modifierTarget, 11);
@@ -636,17 +817,43 @@ try {
   assert.equal(writeRequests.filter((path) => path.endsWith(`/part/${bodyPart.id}/height`)).length, cancelBandWrites,
     'cancelled band resize performs no height request');
 
+  const noOpBandHandle = await bodyResize.boundingBox();
+  await page.mouse.move(noOpBandHandle.x + noOpBandHandle.width / 2, noOpBandHandle.y + noOpBandHandle.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForTimeout(50);
+  assert.equal((await bodyBand.boundingBox()).height, bodyBeforeCancel.height,
+    'stationary band-handle click does not jump a short band to its content minimum');
+  assert.equal(writeRequests.filter((path) => path.endsWith(`/part/${bodyPart.id}/height`)).length, cancelBandWrites,
+    'stationary band-handle click performs no height request');
+
   const bodyResizeAfterCancel = await bodyResize.boundingBox();
-  const committedBandSaved = page.waitForResponse((response) =>
-    new URL(response.url()).pathname === `/design/${layout.id}/part/${bodyPart.id}/height` &&
-      response.request().method() === 'POST');
   await page.mouse.move(bodyResizeAfterCancel.x + bodyResizeAfterCancel.width / 2, bodyResizeAfterCancel.y + bodyResizeAfterCancel.height / 2);
   await page.mouse.down();
-  await page.mouse.move(bodyResizeAfterCancel.x + bodyResizeAfterCancel.width / 2, bodyResizeAfterCancel.y + bodyResizeAfterCancel.height / 2 + 10, { steps: 3 });
+  const bandSection = page.locator('#layout-inspector .insp-sec').filter({ has: page.getByText('Band', { exact: true }) });
+  await bandSection.waitFor();
+  const partHeightInput = bandSection.locator('.insp-row').filter({ hasText: 'Height' }).locator('input[type="number"]');
+  await partHeightInput.waitFor();
+  const authoredBandHeight = await partHeightInput.inputValue();
+  const minimumBandHeight = Number(await partHeightInput.getAttribute('min'));
+  const expectedBandHeight = Math.max(minimumBandHeight, Number(authoredBandHeight) + 10);
+  assert.equal(Number(authoredBandHeight), Math.round(bodyBeforeCancel.height), 'band Inspector starts at authored DOM height');
+  await page.mouse.move(bodyResizeAfterCancel.x + bodyResizeAfterCancel.width / 2, bodyResizeAfterCancel.y + bodyResizeAfterCancel.height / 2 + 10, { steps: 80 });
+  await page.waitForTimeout(40);
+  const liveBandBox = await bodyBand.boundingBox();
+  const liveBandHandle = await bodyResize.boundingBox();
+  assert.equal(await partHeightInput.inputValue(), authoredBandHeight,
+    '80-sample band preview leaves the reactive authored height unchanged');
+  assert.equal(Math.round(liveBandBox.height), expectedBandHeight,
+    'band DOM previews the final clamped height before pointer-up');
+  assert.ok(Math.abs(liveBandBox.y + liveBandBox.height - (liveBandHandle.y + liveBandHandle.height / 2)) <= 1.51,
+    'band resize handle stays attached to its preview edge');
   await page.mouse.up();
-  assert.equal((await committedBandSaved).status(), 200, 'successful band resize persists once');
+  await page.waitForTimeout(150);
   assert.equal(writeRequests.filter((path) => path.endsWith(`/part/${bodyPart.id}/height`)).length, cancelBandWrites + 1,
     'successful band resize emits exactly one height request');
+  assert.equal(await partHeightInput.inputValue(), String(expectedBandHeight),
+    'band publishes one final authored height on pointer-up');
 
   // Draw cancellation removes its preview, creates no object, and leaves the
   // tool armed. A second Escape disarms it, establishing the documented priority.
@@ -702,7 +909,7 @@ try {
 
   // Rotation is another authored-geometry family and must roll both its box and
   // behavior props back together.
-  const line = page.locator(`[data-object-id="${lineId}"]`);
+  const line = page.locator(`.fm-part > .fm-obj:not(.le-echo-ghost)[data-object-id="${lineId}"]`);
   await line.click({ force: true });
   await page.waitForTimeout(50);
   const lineBeforeRotateCancel = await line.evaluate((element) => ({
@@ -732,8 +939,8 @@ try {
   // #203: a portal's owned header + field move implicitly while the portal stays
   // the sole visible selection. Pointer drag, keyboard nudge, cross-band settle,
   // and reload persistence all operate on the same expanded movement set.
-  const portal = page.locator(`[data-object-id="${portalId}"]`);
-  const portalChildren = portalChildIds.map((id) => page.locator(`[data-object-id="${id}"]`));
+  const portal = page.locator(`.fm-part > .fm-obj:not(.le-echo-ghost)[data-object-id="${portalId}"]`);
+  const portalChildren = portalChildIds.map((id) => page.locator(`.fm-part > .fm-obj:not(.le-echo-ghost)[data-object-id="${id}"]`));
   const beforePortalDrag = await Promise.all([portal, ...portalChildren].map((locator) => locator.boundingBox()));
   await dragBy(page, portal, 17, 9);
   const afterPortalDrag = await Promise.all([portal, ...portalChildren].map((locator) => locator.boundingBox()));

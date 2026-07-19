@@ -73,10 +73,10 @@ async function fastDragAligned(page, objectCount, dx, label) {
   const fastBox = await dragTarget.boundingBox();
   assert.ok(fastBox, `${label} has a fast-drag box`);
   await page.mouse.move(fastBox.x + fastBox.width / 2, fastBox.y + fastBox.height / 2);
-  await page.mouse.down();
   const sampledDrift = page.evaluate(({ count, pointerX, grabOffsetX }) => new Promise((resolveDrift) => {
     let maxBounds = 0;
     let boundsDetail = null;
+    let activationBounds = null;
     let maxCursor = 0;
     let cursorDetail = null;
     let frames = 0;
@@ -108,7 +108,9 @@ async function fastDragAligned(page, objectCount, dx, label) {
         const objectTop = Math.min(...objectRects.map((rect) => rect.top));
         const boundsRect = boundsElement.getBoundingClientRect();
         const drift = Math.max(Math.abs(objectLeft - boundsRect.left), Math.abs(objectTop - boundsRect.top));
-        if (drift > maxBounds) {
+        if (activationBounds === null) {
+          activationBounds = drift;
+        } else if (drift > maxBounds) {
           maxBounds = drift;
           boundsDetail = { frame: frames, objectLeft, objectTop, boundsLeft: boundsRect.left, boundsTop: boundsRect.top };
         }
@@ -131,6 +133,7 @@ async function fastDragAligned(page, objectCount, dx, label) {
         resolveDrift({
           maxBounds,
           boundsDetail,
+          activationBounds: activationBounds ?? 0,
           maxCursor,
           cursorDetail,
           commitSamples: sortedLatencies.length,
@@ -142,16 +145,33 @@ async function fastDragAligned(page, objectCount, dx, label) {
     };
     requestAnimationFrame(() => setTimeout(sample, 0));
   }), { count: objectCount, pointerX: fastBox.x + fastBox.width / 2, grabOffsetX: fastBox.width / 2 });
+  // Install the pointer timestamp probe before pointer-down, so it runs before
+  // the editor's drag-start listener registers its compositor feedback path.
+  await page.mouse.down();
   await page.mouse.move(fastBox.x + fastBox.width / 2 + dx, fastBox.y + fastBox.height / 2, { steps: 80 });
   const fastDrift = await sampledDrift;
   const objectBoxes = await Promise.all(
     Array.from({ length: objectCount }, (_, index) => objects.nth(index).boundingBox()),
   );
+  const feedbackStyles = await objects.evaluateAll((elements, count) => elements.slice(0, count).map((element) => ({
+    left: element.style.left,
+    transform: element.style.transform,
+    willChange: element.style.willChange,
+  })), objectCount);
   const liveBoundsBox = await page.locator('.moveable-control-box[data-rm-drag-bounds]').boundingBox();
   await page.mouse.up();
   assert.ok(fastDrift.maxBounds <= 0.5, `${label} never splits across fast-drag frames (${JSON.stringify(fastDrift)})`);
+  assert.ok(fastDrift.activationBounds <= 3.01, `${label} activates within one small frame tolerance (${JSON.stringify(fastDrift)})`);
   assert.ok(Math.abs(fastDrift.maxCursor) <= 1.01, `${label} stays within whole-pixel cursor geometry (${JSON.stringify(fastDrift)})`);
   assert.ok(objectBoxes.every(Boolean) && liveBoundsBox, `${label} and transform bounds render during fast drag`);
+  assert.ok(
+    feedbackStyles.every((style) => style.transform.startsWith('translate3d(') && style.willChange === 'transform'),
+    `${label} uses compositor-only feedback until pointer-up (${JSON.stringify(feedbackStyles)})`,
+  );
+  assert.ok(
+    await objects.evaluateAll((elements, count) => elements.slice(0, count).every((element) => !element.style.transform), objectCount),
+    `${label} clears temporary transforms after authored geometry commits`,
+  );
   const liveLeft = Math.min(...objectBoxes.map((box) => box.x));
   const liveTop = Math.min(...objectBoxes.map((box) => box.y));
   assert.ok(

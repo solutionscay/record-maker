@@ -3,14 +3,13 @@
 // (marquee multi-select) to the editor document store (#45), and owns moveable's
 // target sync with the store selection. The vanilla cores are consumed directly.
 //
-// Single source of truth is the store: pointer gestures never write element
-// styles. moveable reports the gesture position/size; this controller resolves
-// it against the layout grid and pushes it through the store's command surface
-// (setObjectGeometry); Svelte then
-// re-renders the object from the store. moveable derives its control box from the
-// gesture's cached start rect + pointer delta, so routing output back into the
-// store does NOT create a feedback loop. A whole gesture commits as ONE undo step
-// (mark on end) and persists to the engine via the bulk axum contract.
+// Single source of truth is the store. During a drag, compositor-only transforms
+// immediately paint the latest snapped pointer geometry; pointer-up then replaces
+// that temporary feedback with authored left/top in one store commit.
+// moveable derives its control box from the gesture's cached start rect + pointer
+// delta, so routing output back into the store does NOT create a feedback loop. A
+// whole gesture commits as ONE undo step (mark on end) and persists to the engine
+// via the bulk axum contract.
 
 import Moveable from 'moveable';
 import Selecto from 'selecto';
@@ -46,6 +45,20 @@ export class TransformController {
     number,
     { target: HTMLElement | SVGElement; next: { x: number; y: number } }
   >();
+  /** Original inline compositor properties for objects receiving immediate drag
+   * feedback. They remain promoted for the gesture and are restored on end. */
+  #moveFeedback = new Map<
+    HTMLElement | SVGElement,
+    { transform: string; willChange: string }
+  >();
+  /** Raw pointer origin and group anchor for the compositor feedback path. */
+  #dragPointer: {
+    pointerId: number;
+    clientX: number;
+    clientY: number;
+    anchorId: number;
+  } | null = null;
+  #pressedPointer: { pointerId: number; clientX: number; clientY: number } | null = null;
   /** Object ids moveable currently targets, and a cheap key to dedupe setState. */
   #targetIds = new Set<number>();
   #targetKey = '';
@@ -79,6 +92,10 @@ export class TransformController {
     this.#ctx = ctx;
     const stage = ctx.stage;
 
+    // Register before Moveable so compositor feedback is authored at the entry
+    // to each pointer sample, before the library's drag calculations.
+    window.addEventListener('pointerdown', this.#onPointerDown, { capture: true });
+    window.addEventListener('pointermove', this.#onDragPointerMove, { capture: true });
     this.#moveable = new Moveable(stage, {
       target: [],
       draggable: true,
@@ -96,18 +113,34 @@ export class TransformController {
 
     // ── drag (single + group). Single-target start also makes it the selection. ──
     this.#moveable.on('dragStart', (e) => {
-      llog('drag', 'dragStart', { id: this.#ctx.idForElement(e.target) });
+      const id = this.#ctx.idForElement(e.target);
+      llog('drag', 'dragStart', { id });
       this.#begin();
       this.#selectFromTarget(e.target);
       this.#captureDragStarts();
+      if (id !== undefined) this.#startDragPointerFeedback(id, e.inputEvent);
     });
-    this.#moveable.on('drag', (e) => this.#applyMove(e.target, e.left, e.top));
+    this.#moveable.on('drag', (e) => {
+      if (this.#dragPointer) {
+        this.#applyMove(e.target, e.left, e.top, false);
+        queueMicrotask(() => this.#syncBoundsToMoveFeedback());
+      }
+      else this.#applyMove(e.target, e.left, e.top);
+    });
     this.#moveable.on('dragEnd', () => this.#end('drag'));
-    this.#moveable.on('dragGroupStart', () => {
+    this.#moveable.on('dragGroupStart', (e) => {
       this.#begin();
       this.#captureDragStarts();
+      const anchorId = this.#dragStarts.keys().next().value;
+      if (anchorId !== undefined) this.#startDragPointerFeedback(anchorId, e.inputEvent);
     });
-    this.#moveable.on('dragGroup', (e) => this.#applyGroupMove(e.events));
+    this.#moveable.on('dragGroup', (e) => {
+      if (this.#dragPointer) {
+        this.#applyGroupMove(e.events, false);
+        queueMicrotask(() => this.#syncBoundsToMoveFeedback());
+      }
+      else this.#applyGroupMove(e.events);
+    });
     this.#moveable.on('dragGroupEnd', () => this.#end('drag'));
 
     // ── resize (single + group) — e.drag carries the new left/top for top/left handles ──
@@ -508,6 +541,7 @@ export class TransformController {
 
   #begin(): void {
     this.#clearPendingMoves();
+    this.#stopDragPointerFeedback();
     this.#ctx.gesturing = true;
     this.#moved = false;
     this.#dragStarts.clear();
@@ -518,6 +552,7 @@ export class TransformController {
   /** End a gesture: if it actually changed geometry, seal one undo step and
    * persist the moved/resized group; a no-move click does neither. Then re-target. */
   #end(kind: 'drag' | 'resize' = 'drag'): void {
+    this.#stopDragPointerFeedback();
     // Pointer-up can arrive before the last requested display frame. Commit that
     // final authored position before band settlement, undo sealing, or persist.
     this.#flushMoves();
@@ -526,6 +561,7 @@ export class TransformController {
     // real band (reparenting) BEFORE the undo mark so it's one step. Resize never
     // crosses bands, so it skips this.
     const reparented = kind === 'drag' && this.#moved ? this.#settleBands() : new Set<number>();
+    this.#clearMoveFeedback();
     this.#clearBoundsCorrection();
     llog(kind, `${kind}End`, { moved: this.#moved, selection: [...this.#ctx.doc.selection], reparented: [...reparented] });
     if (this.#moved) {
@@ -565,6 +601,57 @@ export class TransformController {
     }
   }
 
+  /** Moveable remains responsible for gesture ownership and transform bounds,
+   * but its drag callback can arrive after expensive library processing. Capture
+   * the same pointer stream at window entry so the object layer receives the
+   * snapped authored position before that work begins (#195). */
+  #startDragPointerFeedback(anchorId: number, inputEvent?: Event): void {
+    const pointer = inputEvent as PointerEvent | MouseEvent | undefined;
+    const origin = pointer
+      ? {
+          pointerId: 'pointerId' in pointer ? pointer.pointerId : (this.#pressedPointer?.pointerId ?? -1),
+          clientX: pointer.clientX,
+          clientY: pointer.clientY,
+        }
+      : this.#pressedPointer;
+    if (!origin || !this.#dragStarts.has(anchorId)) {
+      return;
+    }
+    this.#dragPointer = {
+      pointerId: origin.pointerId,
+      clientX: origin.clientX,
+      clientY: origin.clientY,
+      anchorId,
+    };
+  }
+
+  #stopDragPointerFeedback(): void {
+    this.#dragPointer = null;
+  }
+
+  #onPointerDown = (event: PointerEvent): void => {
+    this.#pressedPointer = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY };
+  };
+
+  #onDragPointerMove = (event: PointerEvent): void => {
+    const pointer = this.#dragPointer;
+    if (!pointer || (pointer.pointerId !== -1 && event.pointerId !== pointer.pointerId)) return;
+    const anchorStart = this.#dragStarts.get(pointer.anchorId);
+    if (!anchorStart) return;
+    const zoom = this.#ctx.zoom || 1;
+    const anchorNext = this.#snappedMovePosition(
+      anchorStart.x + (event.clientX - pointer.clientX) / zoom,
+      anchorStart.y + (event.clientY - pointer.clientY) / zoom,
+    );
+    const dx = anchorNext.x - anchorStart.x;
+    const dy = anchorNext.y - anchorStart.y;
+    for (const [id, start] of this.#dragStarts) {
+      const target = this.#ctx.elementForId(id);
+      if (!target) continue;
+      this.#queueMove(id, target, { x: clampOrigin(start.x + dx), y: start.y + dy });
+    }
+  };
+
   #snappedMovePosition(left: number, top: number): { x: number; y: number } {
     const grid = this.#ctx.doc.snapToGrid ? this.#ctx.doc.gridSize : 0;
     return {
@@ -574,7 +661,12 @@ export class TransformController {
     };
   }
 
-  #queueMove(id: number, target: HTMLElement | SVGElement, next: { x: number; y: number }): void {
+  #queueMove(
+    id: number,
+    target: HTMLElement | SVGElement,
+    next: { x: number; y: number },
+    paintFeedback = true,
+  ): void {
     const pending = this.#pendingMoves.get(id)?.next;
     const current = this.#ctx.doc.getObject(id);
     if (
@@ -582,7 +674,11 @@ export class TransformController {
       (!pending && current && current.x === next.x && current.y === next.y)
     ) return;
     this.#pendingMoves.set(id, { target, next });
+    if (paintFeedback) this.#paintMoveFeedback(target, next);
     this.#moved = true;
+    // Keep raw-pointer movement compositor-only until pointer-up. The Moveable
+    // fallback below retains the frame-coalesced store path for synthetic input.
+    if (this.#dragPointer) return;
     if (this.#moveFrame !== null) return;
     this.#moveFrame = requestAnimationFrame(() => {
       this.#moveFrame = null;
@@ -599,10 +695,12 @@ export class TransformController {
     const moved: Array<{ id: number; x: number; y: number; target: HTMLElement | SVGElement }> = [];
     for (const [id, { target, next }] of this.#pendingMoves) {
       this.#ctx.doc.setObjectGeometry(id, next);
-      // Commit the same geometry synchronously to this frame. Svelte remains the
-      // source of truth and subsequently writes these identical values.
+      // Replace the temporary compositor translation with the same authored
+      // left/top without changing the painted position. Svelte remains the source
+      // of truth and subsequently writes these identical values.
       target.style.left = `${next.x}px`;
       target.style.top = `${next.y}px`;
+      target.style.transform = this.#moveFeedback.get(target)?.transform ?? '';
       moved.push({ id, ...next, target });
     }
     this.#pendingMoves.clear();
@@ -628,7 +726,51 @@ export class TransformController {
     if (this.#moveFrame !== null) cancelAnimationFrame(this.#moveFrame);
     this.#moveFrame = null;
     this.#pendingMoves.clear();
+    this.#clearMoveFeedback();
     this.#clearBoundsCorrection();
+  }
+
+  /** Paint the newest authored drag position in the pointer event itself. Only a
+   * transform changes here, so Chromium can advance the existing layer without
+   * waiting for the next reactive-store/layout frame (#195). */
+  #paintMoveFeedback(target: HTMLElement | SVGElement, next: { x: number; y: number }): void {
+    let original = this.#moveFeedback.get(target);
+    if (!original) {
+      original = { transform: target.style.transform, willChange: target.style.willChange };
+      this.#moveFeedback.set(target, original);
+    }
+    const left = Number.parseFloat(target.style.left) || 0;
+    const top = Number.parseFloat(target.style.top) || 0;
+    const translate = `translate3d(${next.x - left}px, ${next.y - top}px, 0)`;
+    target.style.willChange = 'transform';
+    target.style.transform = original.transform ? `${translate} ${original.transform}` : translate;
+  }
+
+  #clearMoveFeedback(): void {
+    for (const [target, original] of this.#moveFeedback) {
+      target.style.transform = original.transform;
+      target.style.willChange = original.willChange;
+    }
+    this.#moveFeedback.clear();
+  }
+
+  /** Moveable advances its group wrappers after the raw object transform. Pin
+   * the visible child box to the already-painted target union before this event
+   * can paint, without committing layout geometry. */
+  #syncBoundsToMoveFeedback(): void {
+    if (this.#moveFeedback.size === 0) return;
+    const controlBox = this.#activeControlBox();
+    this.#clearBoundsCorrection();
+    const targetRects = [...this.#moveFeedback.keys()].map((target) => target.getBoundingClientRect());
+    const targetLeft = Math.min(...targetRects.map((rect) => rect.left));
+    const targetTop = Math.min(...targetRects.map((rect) => rect.top));
+    const controlRect = controlBox.getBoundingClientRect();
+    const transform = new DOMMatrixReadOnly(getComputedStyle(controlBox).transform);
+    const host = this.#ctx.stage.ownerDocument.documentElement;
+    host.style.setProperty('--le-drag-bounds-x', `${transform.m41 + targetLeft - controlRect.left}px`);
+    host.style.setProperty('--le-drag-bounds-y', `${transform.m42 + targetTop - controlRect.top}px`);
+    host.classList.add('syncing-drag-bounds');
+    controlBox.toggleAttribute('data-rm-drag-bounds', true);
   }
 
   #clearBoundsCorrection(): void {
@@ -649,7 +791,7 @@ export class TransformController {
     return boxes.findLast((box) => box.querySelector('.moveable-line')) ?? this.#moveable.getControlBoxElement();
   }
 
-  #applyMove(target: HTMLElement | SVGElement, left: number, top: number): void {
+  #applyMove(target: HTMLElement | SVGElement, left: number, top: number, paintFeedback = true): void {
     const identity = this.#ctx.currentIdentity();
     const id = this.#ctx.idForElement(target, identity);
     if (id === undefined) {
@@ -662,10 +804,13 @@ export class TransformController {
     // y is left UNCLAMPED during a drag so the object can travel above its own band
     // (a negative part-relative y renders over the band above) — cross-band drags
     // are settled to a real band + local y on drop (#settleBands). x stays ≥ 0.
-    this.#queueMove(id, target, next);
+    this.#queueMove(id, target, next, paintFeedback);
   }
 
-  #applyGroupMove(events: Array<{ target: HTMLElement | SVGElement; left: number; top: number }>): void {
+  #applyGroupMove(
+    events: Array<{ target: HTMLElement | SVGElement; left: number; top: number }>,
+    paintFeedback = true,
+  ): void {
     const identity = this.#ctx.currentIdentity();
     const anchorEvent = events.find((event) => {
       const id = this.#ctx.idForElement(event.target, identity);
@@ -684,7 +829,7 @@ export class TransformController {
       const start = id === undefined ? undefined : this.#dragStarts.get(id);
       if (id === undefined || !start) continue;
       const next = { x: clampOrigin(start.x + dx), y: start.y + dy };
-      this.#queueMove(id, event.target, next);
+      this.#queueMove(id, event.target, next, paintFeedback);
     }
     llog('drag', 'queue group move', { anchorId, dx, dy, ids: [...this.#dragStarts.keys()] });
   }
@@ -927,6 +1072,8 @@ export class TransformController {
 
   destroy(): void {
     window.removeEventListener('pointerup', this.#onObjectClickUp);
+    window.removeEventListener('pointerdown', this.#onPointerDown, { capture: true });
+    window.removeEventListener('pointermove', this.#onDragPointerMove, { capture: true });
     this.#clearPendingMoves();
     if (this.#rectFrame !== null) cancelAnimationFrame(this.#rectFrame);
     this.#moveable.destroy();

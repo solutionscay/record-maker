@@ -69,7 +69,7 @@ function buffer(entry: LogEntry): void {
   if (buf.length > 2000) buf.shift();
 }
 
-function enabled(): boolean {
+export function layoutLogEnabled(): boolean {
   if (typeof window === 'undefined') return false;
   const w = window as unknown as { RM_LOG?: boolean };
   if (w.RM_LOG === false) return false;
@@ -85,7 +85,7 @@ function enabled(): boolean {
  * `data` object is logged live (devtools shows the object), so expand it to
  * inspect coordinates, ids, element counts, etc. No-op outside the browser. */
 export function llog(cat: LogCat, message: string, data?: Record<string, unknown>): void {
-  if (!enabled()) return;
+  if (!layoutLogEnabled()) return;
   seq += 1;
   const dt = (typeof performance !== 'undefined' ? performance.now() : 0) - start;
   buffer({ seq, t: Math.round(dt), cat, message, data });
@@ -107,6 +107,6 @@ export function lerror(cat: LogCat, message: string, err: unknown): void {
 }
 
 // Announce the toggle once, so the trace is discoverable in a fresh console.
-if (enabled()) {
+if (layoutLogEnabled()) {
   llog('init', 'Layout-Mode logging on — disable with RM_LOG = false');
 }

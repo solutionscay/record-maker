@@ -9,14 +9,25 @@
 
 import type { EditorDoc } from '../doc.svelte';
 import type { ObjectView } from '../model';
-import { elementsToObjectIds } from '../canvas-edit';
 import type { ClipboardController } from './clipboard-controller';
 import type { HoverController } from './hover';
 import type { PlacementController } from './placement';
 import type { TextEditController } from './text-edit';
 import type { TransformController } from './transform';
 
-export type IdentitySnapshot = { painted: HTMLElement[]; ids: number[] };
+export type IdentitySnapshot = {
+  painted: HTMLElement[];
+  ids: number[];
+  elementToId: Map<Element, number>;
+  idToElement: Map<number, HTMLElement>;
+};
+export type CanvasCoordinateFrame = {
+  canvas: HTMLElement;
+  rect: { left: number; top: number; right: number; bottom: number };
+  zoom: number;
+  clientLeft: number;
+  clientTop: number;
+};
 
 export class CanvasContext {
   readonly stage: HTMLElement;
@@ -86,29 +97,48 @@ export class CanvasContext {
     el.style.height = `${box.h}px`;
   }
 
-  canvasPoint(clientX: number, clientY: number): { x: number; y: number } | null {
+  coordinateFrame(): CanvasCoordinateFrame | null {
     const canvas = this.canvas();
     if (!canvas) return null;
     const r = canvas.getBoundingClientRect();
-    const z = this.zoom || 1;
     return {
-      x: Math.max(0, (clientX - r.left) / z - canvas.clientLeft),
-      y: Math.max(0, (clientY - r.top) / z - canvas.clientTop),
+      canvas,
+      rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
+      zoom: this.zoom || 1,
+      clientLeft: canvas.clientLeft,
+      clientTop: canvas.clientTop,
     };
   }
 
-  pointInCanvas(clientX: number, clientY: number): boolean {
-    const canvas = this.canvas();
-    if (!canvas) return false;
-    const r = canvas.getBoundingClientRect();
-    return clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom;
+  canvasPoint(
+    clientX: number,
+    clientY: number,
+    frame: CanvasCoordinateFrame | null = this.coordinateFrame(),
+  ): { x: number; y: number } | null {
+    if (!frame) return null;
+    return {
+      x: Math.max(0, (clientX - frame.rect.left) / frame.zoom - frame.clientLeft),
+      y: Math.max(0, (clientY - frame.rect.top) / frame.zoom - frame.clientTop),
+    };
+  }
+
+  pointInCanvas(
+    clientX: number,
+    clientY: number,
+    frame: CanvasCoordinateFrame | null = this.coordinateFrame(),
+  ): boolean {
+    if (!frame) return false;
+    const { rect } = frame;
+    return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
   }
 
   // ── id ↔ element mapping ───────────────────────────────────────────────────
 
   paintedElements(): HTMLElement[] {
     const canvas = this.canvas();
-    return canvas ? Array.from(canvas.querySelectorAll<HTMLElement>('.fm-obj')) : [];
+    // History echo ghosts deliberately reuse data-object-id for animation, but
+    // they are not authored targets and must never enter the identity maps.
+    return canvas ? Array.from(canvas.querySelectorAll<HTMLElement>('.fm-obj:not(.le-echo-ghost)')) : [];
   }
 
   identitySnapshot(): IdentitySnapshot {
@@ -116,9 +146,12 @@ export class CanvasContext {
     // element↔id pairing can never drift from paint-order assumptions. An
     // element without the attribute maps to NaN, which matches no id.
     const painted = this.paintedElements();
+    const ids = painted.map((el) => Number(el.dataset.objectId));
     return {
       painted,
-      ids: painted.map((el) => Number(el.dataset.objectId)),
+      ids,
+      elementToId: new Map(painted.map((element, index) => [element, ids[index]])),
+      idToElement: new Map(painted.map((element, index) => [ids[index], element])),
     };
   }
 
@@ -139,18 +172,17 @@ export class CanvasContext {
 
   elementsToIds(elements: Array<HTMLElement | SVGElement>): number[] {
     const identity = this.currentIdentity();
-    return elementsToObjectIds(elements, identity.painted, identity.ids);
+    return elements
+      .map((element) => identity.elementToId.get(element))
+      .filter((id): id is number => id !== undefined && Number.isFinite(id));
   }
 
   elementForId(id: number, identity: IdentitySnapshot = this.currentIdentity()): HTMLElement | undefined {
-    const i = identity.ids.indexOf(id);
-    return i >= 0 ? identity.painted[i] : undefined;
+    return identity.idToElement.get(id);
   }
 
   idForElement(el: Element, identity: IdentitySnapshot = this.currentIdentity()): number | undefined {
-    const i = identity.painted.indexOf(el as HTMLElement);
-    if (i < 0) return undefined;
-    return identity.ids[i];
+    return identity.elementToId.get(el);
   }
 
   // ── model lookups ──────────────────────────────────────────────────────────

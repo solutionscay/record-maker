@@ -106,26 +106,23 @@ async function fastDragAligned(page, objectCount, dx, label) {
     let maxCursor = 0;
     let cursorDetail = null;
     let frames = 0;
-    let latestPointerX = pointerX;
-    let latestPointerAt = performance.now();
-    let pointerSequence = 0;
+    const tracker = window.__rmPointerProbe;
+    let latestPointerX = tracker?.clientX ?? pointerX;
+    let pointerSequence = tracker?.sequence ?? 0;
     let sampledSequence = -1;
     let committedSequence = -1;
     const commitLatencies = [];
     const observedObject = document.querySelector('.fm-canvas .fm-obj');
     const observer = new MutationObserver(() => {
-      if (pointerSequence === committedSequence) return;
-      committedSequence = pointerSequence;
-      commitLatencies.push(performance.now() - latestPointerAt);
+      const sequence = tracker?.sequence ?? pointerSequence;
+      if (sequence === committedSequence) return;
+      committedSequence = sequence;
+      commitLatencies.push(performance.now() - (tracker?.at ?? performance.now()));
     });
     if (observedObject) observer.observe(observedObject, { attributes: true, attributeFilter: ['style'] });
-    const onPointerMove = (event) => {
-      latestPointerX = event.clientX;
-      latestPointerAt = performance.now();
-      pointerSequence += 1;
-    };
-    window.addEventListener('pointermove', onPointerMove, { capture: true });
     const sample = () => {
+      latestPointerX = tracker?.clientX ?? latestPointerX;
+      pointerSequence = tracker?.sequence ?? pointerSequence;
       const objectElements = [...document.querySelectorAll('.fm-canvas .fm-obj')].slice(0, count);
       const boundsElement = document.querySelector('.moveable-control-box[data-rm-drag-bounds]');
       if (objectElements.length === count && boundsElement) {
@@ -153,7 +150,6 @@ async function fastDragAligned(page, objectCount, dx, label) {
       frames += 1;
       if (frames < 30) requestAnimationFrame(() => setTimeout(sample, 0));
       else {
-        window.removeEventListener('pointermove', onPointerMove, { capture: true });
         observer.disconnect();
         const sortedLatencies = commitLatencies.toSorted((a, b) => a - b);
         resolveDrift({
@@ -210,7 +206,7 @@ async function fastDragAligned(page, objectCount, dx, label) {
 
 async function beginFastResizePreview(page, object, handle, dx, dy, label, edgeObjects = [object]) {
   const objectId = await object.getAttribute('data-object-id');
-  const objectSelector = `[data-object-id="${objectId}"]`;
+  const objectSelector = `.fm-obj:not(.le-echo-ghost)[data-object-id="${objectId}"]`;
   const edgeSelectors = await Promise.all(edgeObjects.map(async (locator) =>
     `[data-object-id="${await locator.getAttribute('data-object-id')}"]:not(.le-echo-ghost)`));
   const handleBox = await handle.boundingBox();
@@ -220,9 +216,9 @@ async function beginFastResizePreview(page, object, handle, dx, dy, label, edgeO
   const inspectorBefore = { width: await widthInput.inputValue(), height: await heightInput.inputValue() };
   await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
   const sampled = page.evaluate(({ selector, edgeSelectors, inspectorBefore }) => new Promise((resolveSample) => {
-    let pointerSequence = 0;
+    const tracker = window.__rmPointerProbe;
+    let pointerSequence = tracker?.sequence ?? 0;
     let previousFrameSequence = -1;
-    let latestPointerAt = performance.now();
     let observedSequence = -1;
     let maxStableEdgeGap = 0;
     let reactiveChanges = 0;
@@ -232,17 +228,14 @@ async function beginFastResizePreview(page, object, handle, dx, dy, label, edgeO
     const width = document.querySelector('#layout-inspector input[aria-label="Width in pixels"]');
     const height = document.querySelector('#layout-inspector input[aria-label="Height in pixels"]');
     const observer = new MutationObserver(() => {
-      if (observedSequence === pointerSequence) return;
-      observedSequence = pointerSequence;
-      styleLatencies.push(performance.now() - latestPointerAt);
+      const sequence = tracker?.sequence ?? pointerSequence;
+      if (observedSequence === sequence) return;
+      observedSequence = sequence;
+      styleLatencies.push(performance.now() - (tracker?.at ?? performance.now()));
     });
     if (target) observer.observe(target, { attributes: true, attributeFilter: ['style'] });
-    const onPointerMove = () => {
-      pointerSequence += 1;
-      latestPointerAt = performance.now();
-    };
-    window.addEventListener('pointermove', onPointerMove, { capture: true });
     const sample = () => {
+      pointerSequence = tracker?.sequence ?? pointerSequence;
       const controls = [...document.querySelectorAll('.moveable-control[data-direction="se"]')];
       const control = controls.at(-1);
       if (target && control && pointerSequence > 0 && pointerSequence === previousFrameSequence) {
@@ -266,7 +259,6 @@ async function beginFastResizePreview(page, object, handle, dx, dy, label, edgeO
       if (frames < 35) requestAnimationFrame(sample);
       else {
         observer.disconnect();
-        window.removeEventListener('pointermove', onPointerMove, { capture: true });
         resolveSample({
           maxStableEdgeGap,
           reactiveChanges,
@@ -406,6 +398,15 @@ try {
     executablePath: process.env.CHROME_BIN || '/usr/bin/google-chrome',
   });
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+  await page.addInitScript(() => {
+    window.__rmPointerProbe = { sequence: 0, clientX: 0, clientY: 0, at: performance.now() };
+    window.addEventListener('pointermove', (event) => {
+      window.__rmPointerProbe.sequence += 1;
+      window.__rmPointerProbe.clientX = event.clientX;
+      window.__rmPointerProbe.clientY = event.clientY;
+      window.__rmPointerProbe.at = performance.now();
+    }, { capture: true });
+  });
   const pageErrors = [];
   const writeRequests = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
@@ -560,7 +561,7 @@ try {
   const singleResizeWrites = writeRequests.filter((path) => path === `/design/${layout.id}/geometry`).length;
   await beginFastResizePreview(page, snapSource, smartResizeHandle, 136, 0, 'single object');
   await page.waitForTimeout(50);
-  assert.equal(await snapSource.evaluate((element) => Number.parseFloat(element.style.width)), 180,
+  assert.equal(Math.round((await snapSource.boundingBox()).width), 180,
     'live resize edge adheres to the sibling guide');
   assert.equal(await page.locator('.le-smart-guide-x').evaluate((element) => Number.parseFloat(element.style.left)), 700,
     'resize guide and applied edge share one coordinate');
@@ -598,8 +599,8 @@ try {
   assert.deepEqual(groupWidthsBefore, [40, 40], 'group resize fixture starts with equal authored widths');
   const groupResizeWrites = writeRequests.filter((path) => path === `/design/${layout.id}/geometry`).length;
   await beginFastResizePreview(page, snapSource, groupResizeHandle, 80, 20, 'group object', [snapSource, snapCandidate]);
-  const liveGroupWidths = await Promise.all([snapSource, snapCandidate].map((locator) =>
-    locator.evaluate((element) => Number.parseFloat(element.style.width))));
+  const liveGroupWidths = await Promise.all([snapSource, snapCandidate].map(async (locator) =>
+    Math.round((await locator.boundingBox()).width)));
   assert.ok(liveGroupWidths.every((width) => width > 40) && liveGroupWidths[0] === liveGroupWidths[1],
     `group preview scales only its targets with one common factor: ${JSON.stringify(liveGroupWidths)}`);
   await page.mouse.up();
@@ -643,7 +644,7 @@ try {
     await page.mouse.move(zoomHandleX, zoomHandleY);
     await page.mouse.down();
     await page.mouse.move(zoomHandleX + zoomDelta * percent / 100, zoomHandleY, { steps: 5 });
-    const zoomWidthLive = await object.evaluate((element) => Number.parseFloat(element.style.width));
+    const zoomWidthLive = Math.round((await object.boundingBox()).width / (percent / 100));
     assert.equal(zoomWidthLive, zoomWidthBefore + zoomDelta,
       `${percent}% zoom maps client resize delta to authored pixels`);
     await page.mouse.up();

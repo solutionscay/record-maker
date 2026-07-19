@@ -569,7 +569,7 @@ try {
       props: { stroke: '#888888', strokeWidth: 2, angle: 53.13, length: 50 },
     });
 
-    const { resolveMoveGuides, resolveResizeGuides, unionGuideBoxes } =
+    const { buildGuideIndex, candidatesNearGuideBox, resolveMoveGuides, resolveResizeGuides, unionGuideBoxes } =
       await vite.ssrLoadModule('/src/lib/canvas/smart-guides.ts');
     const candidates = [{ id: 2, box: { x: 300, y: 80, w: 100, h: 40 } }];
     eq('smart guides: move geometry and chrome share one resolution',
@@ -586,6 +586,20 @@ try {
       { x: 10, y: 30, w: 20, h: 10 },
       { x: 50, y: 10, w: 15, h: 25 },
     ]), { x: 10, y: 10, w: 55, h: 30 });
+    const indexedCandidates = [
+      ...candidates,
+      ...Array.from({ length: 200 }, (_, index) => ({
+        id: index + 10,
+        box: { x: 1_000 + index * 20, y: 1_000 + index * 20, w: 10, h: 10 },
+      })),
+    ];
+    eq('smart guides: spatial index returns only capable nearby candidates',
+      candidatesNearGuideBox(
+        buildGuideIndex(indexedCandidates),
+        { x: 196, y: 38, w: 100, h: 40 },
+        5,
+      ).map((candidate) => candidate.id),
+      [2]);
   }
 } finally {
   await vite.close();

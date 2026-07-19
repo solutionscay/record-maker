@@ -22,19 +22,22 @@ import {
   setObjectProps as persistObjectProps,
   setObjectsGeometry,
 } from '../persist';
-import { llog, lerror } from '../log';
-import { parseProps, portalRowCount } from '../object-props';
+import { layoutLogEnabled, llog, lerror } from '../log';
+import { parseProps } from '../object-props';
 import type { CanvasContext, IdentitySnapshot } from './context';
 import { GestureLifecycle, type GestureCancelReason } from './gesture-lifecycle';
 import { objectBehavior } from './object-behavior';
 import { classifyPress, type GestureIntent } from './press-intent';
 import {
+  buildGuideIndex,
+  candidatesNearGuideBox,
   resolveMoveGuides,
   resolveResizeGuides,
   unionGuideBoxes,
   type ActiveGuide,
   type GuideBox,
   type GuideCandidate,
+  type GuideIndex,
 } from './smart-guides';
 
 type PendingObjectClick = {
@@ -59,10 +62,20 @@ type ResizePreview = ResizeProposal & {
     top: string;
     width: string;
     height: string;
+    transform: string;
+    transformOrigin: string;
     willChange: string;
-    shapeStyle: string | null;
-    portalStyle: string | null;
   };
+};
+
+type DragGestureTarget = {
+  id: number;
+  target: HTMLElement;
+  x: number;
+  y: number;
+  selected: boolean;
+  role: 'selection' | 'portal-owned';
+  startRect: { left: number; top: number; right: number; bottom: number };
 };
 
 export class TransformController {
@@ -108,7 +121,13 @@ export class TransformController {
   #suppressClickUntil = 0;
   /** Geometry at pointer-down. Group dragging snaps one anchor and applies its
    * delta to every member, preserving authored offsets between group members. */
-  #dragStarts = new Map<number, { x: number; y: number }>();
+  #dragStarts = new Map<number, DragGestureTarget>();
+  #dragClientUnionStart: { left: number; top: number } | null = null;
+  #latestDragDelta = { dx: 0, dy: 0 };
+  #boundsFrame: number | null = null;
+  #rawDragStreamStopped = false;
+  #rawResizeStreamStopped = false;
+  #resizeControlStart: { x: number; y: number } | null = null;
   #resizeStarts = new Map<
     number,
     {
@@ -119,8 +138,12 @@ export class TransformController {
       direction: number[];
       clientX: number;
       clientY: number;
+      target: HTMLElement | SVGElement;
+      partTop: number;
+      box: GuideBox;
     }
   >();
+  #resizeUnionStart: GuideBox | null = null;
   #rotatingObjectId: number | null = null;
   #rotateStartMeasure = 0;
   #dirtyBehaviorProps = new Set<number>();
@@ -131,6 +154,7 @@ export class TransformController {
   #activeSelectionSnapshot: number[] = [];
   #selectionGesture = false;
   #guideCandidates: GuideCandidate[] = [];
+  #guideIndex: GuideIndex = { x: [], y: [] };
   #dragUnionStart: GuideBox | null = null;
   #guideElements: HTMLElement[] = [];
   /** Object resize is an ephemeral DOM preview. No EditorDoc geometry changes
@@ -146,6 +170,7 @@ export class TransformController {
     // to each pointer sample, before the library's drag calculations.
     window.addEventListener('pointerdown', this.#onPointerDown, { capture: true });
     window.addEventListener('pointermove', this.#onTransformPointerMove, { capture: true });
+    window.addEventListener('pointerup', this.#onRawDragPointerUp, { capture: true });
     this.#moveable = new Moveable(stage, {
       target: [],
       draggable: true,
@@ -172,12 +197,13 @@ export class TransformController {
     });
     this.#moveable.on('drag', (e) => {
       if (this.#dragPointer) {
-        this.#applyMove(e.target, e.left, e.top, false);
-        queueMicrotask(() => this.#syncBoundsToMoveFeedback());
+        this.#scheduleBoundsSync();
       }
       else this.#applyMove(e.target, e.left, e.top);
     });
-    this.#moveable.on('dragEnd', () => this.#end('drag'));
+    this.#moveable.on('dragEnd', () => {
+      if (!this.#rawDragStreamStopped && !this.#rawResizeStreamStopped) this.#end('drag');
+    });
     this.#moveable.on('dragGroupStart', (e) => {
       this.#begin(e.inputEvent);
       this.#captureDragStarts();
@@ -186,12 +212,13 @@ export class TransformController {
     });
     this.#moveable.on('dragGroup', (e) => {
       if (this.#dragPointer) {
-        this.#applyGroupMove(e.events, false);
-        queueMicrotask(() => this.#syncBoundsToMoveFeedback());
+        this.#scheduleBoundsSync();
       }
       else this.#applyGroupMove(e.events);
     });
-    this.#moveable.on('dragGroupEnd', () => this.#end('drag'));
+    this.#moveable.on('dragGroupEnd', () => {
+      if (!this.#rawDragStreamStopped && !this.#rawResizeStreamStopped) this.#end('drag');
+    });
 
     // ── resize (single + group) — e.drag carries the new left/top for top/left handles ──
     this.#moveable.on('resizeStart', (e) => {
@@ -199,21 +226,27 @@ export class TransformController {
       this.#begin(e.inputEvent);
       this.#selectFromTarget(e.target);
       this.#captureResizeStart(e.target, e.direction, e.inputEvent);
+      this.#finishResizeCapture();
     });
     this.#moveable.on('resize', (e) => {
-      if (this.#resizePointerId === null) {
+      if (!this.#rawResizeStreamStopped && this.#resizePointerId === null) {
         this.#applyResize(e.target, e.width, e.height, e.drag.left, e.drag.top, e.inputEvent);
       }
     });
-    this.#moveable.on('resizeEnd', () => this.#end('resize'));
+    this.#moveable.on('resizeEnd', () => {
+      if (!this.#rawResizeStreamStopped) this.#end('resize');
+    });
     this.#moveable.on('resizeGroupStart', (e) => {
       this.#begin(e.inputEvent);
       e.events.forEach((ev) => this.#captureResizeStart(ev.target, ev.direction, ev.inputEvent));
+      this.#finishResizeCapture();
     });
     this.#moveable.on('resizeGroup', (e) => {
-      if (this.#resizePointerId === null) this.#applyResizeGroup(e.events);
+      if (!this.#rawResizeStreamStopped && this.#resizePointerId === null) this.#applyResizeGroup(e.events);
     });
-    this.#moveable.on('resizeGroupEnd', () => this.#end('resize'));
+    this.#moveable.on('resizeGroupEnd', () => {
+      if (!this.#rawResizeStreamStopped) this.#end('resize');
+    });
 
     // ── rotate (line objects only) ──────────────────────────────────────────
     this.#moveable.on('rotateStart', (e) => {
@@ -502,11 +535,13 @@ export class TransformController {
         { target: null, elementGuidelines: [], rotatable: false, hideChildMoveableDefaultLines: false },
         () => this.#moveable.forceUpdate(),
       );
-      llog('target', 'moveable target cleared', {
-        hoverId: this.#ctx.hover.hoverId,
-        selection: sel,
-        paintedCount: this.#ctx.paintedElements().length,
-      });
+      if (layoutLogEnabled()) {
+        llog('target', 'moveable target cleared', {
+          hoverId: this.#ctx.hover.hoverId,
+          selection: sel,
+          paintedCount: this.#ctx.paintedElements().length,
+        });
+      }
       this.#ctx.hover.paint();
       return;
     }
@@ -515,15 +550,17 @@ export class TransformController {
     // `resolvedEls` is fewer, moveable has no element to attach handles to — the
     // store id didn't map to a painted `.fm-obj` (stale paint order / DOM not yet
     // committed after a create).
-    llog('target', 'moveable target set', {
-      hoverId: this.#ctx.hover.hoverId,
-      selection: sel,
-      chosenIds: ids,
-      persistedGroup,
-      resolvedEls: targets.length,
-      paintedCount: this.#ctx.paintedElements().length,
-      paintOrderIds: objectIdsInPaintOrder(this.#ctx.doc.renderModel),
-    });
+    if (layoutLogEnabled()) {
+      llog('target', 'moveable target set', {
+        hoverId: this.#ctx.hover.hoverId,
+        selection: sel,
+        chosenIds: ids,
+        persistedGroup,
+        resolvedEls: targets.length,
+        paintedCount: this.#ctx.paintedElements().length,
+        paintOrderIds: objectIdsInPaintOrder(this.#ctx.doc.renderModel),
+      });
+    }
     this.#ctx.hover.paint();
   }
 
@@ -628,6 +665,8 @@ export class TransformController {
     this.#clearPendingMoves();
     this.#clearResizePreviews(true);
     this.#resizePointerId = null;
+    this.#rawResizeStreamStopped = false;
+    this.#clearResizeBoundsPreview();
     this.#clearSmartGuides();
     this.#stopDragPointerFeedback();
     this.#historyCheckpoint = this.#ctx.doc.beginGestureTransaction();
@@ -636,7 +675,10 @@ export class TransformController {
     this.#ctx.gesturing = true;
     this.#moved = false;
     this.#dragStarts.clear();
+    this.#dragClientUnionStart = null;
+    this.#latestDragDelta = { dx: 0, dy: 0 };
     this.#resizeStarts.clear();
+    this.#resizeUnionStart = null;
     this.#ctx.gestureIdentity = this.#ctx.identitySnapshot();
     this.#lifecycle.begin({
       inputEvent,
@@ -684,6 +726,7 @@ export class TransformController {
     this.#flushMoves();
     const resizedIds = kind === 'resize' ? this.#commitResizePreviews() : [];
     this.#resizePointerId = null;
+    this.#rawResizeStreamStopped = false;
     this.#ctx.gesturing = false;
     // A drag may have carried objects across band boundaries; settle them onto a
     // real band (reparenting) BEFORE the undo mark so it's one step. Resize never
@@ -693,6 +736,7 @@ export class TransformController {
     this.#clearMoveFeedback();
     this.#clearResizePreviews(false);
     this.#clearBoundsCorrection();
+    this.#clearResizeBoundsPreview();
     this.#clearSmartGuides();
     llog(kind, `${kind}End`, { moved: this.#moved, selection: [...this.#ctx.doc.selection], reparented: [...reparented] });
     if (this.#moved) {
@@ -703,7 +747,10 @@ export class TransformController {
     this.#historyCheckpoint = null;
     this.#activeSelectionSnapshot = [];
     this.#dragStarts.clear();
+    this.#dragClientUnionStart = null;
+    this.#latestDragDelta = { dx: 0, dy: 0 };
     this.#resizeStarts.clear();
+    this.#resizeUnionStart = null;
     this.#ctx.gestureIdentity = null;
     this.#scheduleRectUpdate();
     this.updateTarget();
@@ -724,6 +771,8 @@ export class TransformController {
     // Make any Moveable/Selecto end event caused by stopDrag/stop a no-op.
     this.#ctx.gesturing = false;
     this.#moveable.stopDrag();
+    this.#rawDragStreamStopped = false;
+    this.#rawResizeStreamStopped = false;
     this.#stopDragPointerFeedback();
     this.#clearPendingMoves();
     this.#clearResizePreviews(true);
@@ -750,7 +799,10 @@ export class TransformController {
     this.#ctx.doc.selectOnly(this.#activeSelectionSnapshot);
     this.#activeSelectionSnapshot = [];
     this.#dragStarts.clear();
+    this.#dragClientUnionStart = null;
+    this.#latestDragDelta = { dx: 0, dy: 0 };
     this.#resizeStarts.clear();
+    this.#resizeUnionStart = null;
     this.#rotatingObjectId = null;
     this.#rotateStartMeasure = 0;
     this.#moved = false;
@@ -759,6 +811,7 @@ export class TransformController {
     window.removeEventListener('pointerup', this.#onObjectClickUp);
     this.#ctx.gestureIdentity = null;
     this.#clearBoundsCorrection();
+    this.#clearResizeBoundsPreview();
     this.#clearSmartGuides();
     this.#scheduleRectUpdate();
     this.updateTarget();
@@ -783,10 +836,36 @@ export class TransformController {
     // Portal children join the effective movement set without joining the visible
     // selection. This keeps the portal's own Moveable handles while its authored
     // fields and header labels travel by the same delta (#203).
+    const identity = this.#ctx.currentIdentity();
     for (const id of this.#ctx.doc.movementObjectIds()) {
       const o = this.#ctx.doc.getObject(id);
-      if (o) this.#dragStarts.set(id, { x: o.x, y: o.y });
+      const target = this.#ctx.elementForId(id, identity);
+      if (!o || !target) continue;
+      // Direct manipulation supersedes a still-running undo/redo echo. Finish it
+      // before capturing the immutable client rect so the cached baseline cannot
+      // shift underneath the gesture a few frames later.
+      for (const animation of target.getAnimations()) animation.finish();
+      const rect = target.getBoundingClientRect();
+      const selected = this.#ctx.doc.isSelected(id);
+      this.#dragStarts.set(id, {
+        id,
+        target,
+        x: o.x,
+        y: o.y,
+        selected,
+        role: selected ? 'selection' : 'portal-owned',
+        startRect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
+      });
     }
+    const selected = [...this.#dragStarts.values()].filter((entry) => entry.selected);
+    const framed = selected.length > 0 ? selected : [...this.#dragStarts.values()];
+    this.#dragClientUnionStart = framed.length > 0
+      ? {
+          left: Math.min(...framed.map((entry) => entry.startRect.left)),
+          top: Math.min(...framed.map((entry) => entry.startRect.top)),
+        }
+      : null;
+    this.#latestDragDelta = { dx: 0, dy: 0 };
     this.#captureGuideFrame(new Set(this.#dragStarts.keys()));
   }
 
@@ -828,7 +907,16 @@ export class TransformController {
       event.pointerId === this.#resizePointerId &&
       this.#resizeStarts.size > 0
     ) {
+      if (!this.#rawResizeStreamStopped) {
+        this.#startResizeBoundsPreview();
+        this.#rawResizeStreamStopped = true;
+        this.#moveable.stopDrag();
+      }
       this.#applyPointerResize(event);
+      // The controller has already painted the authoritative frame. Prevent
+      // Moveable's duplicate per-target pointer pipeline from remeasuring the
+      // group; the capture-phase pointer-up finalizes this raw stream.
+      event.stopImmediatePropagation();
       return;
     }
     const pointer = this.#dragPointer;
@@ -847,6 +935,25 @@ export class TransformController {
     const dx = resolved.dx;
     const dy = resolved.dy;
     this.#queueDragDelta(dx, dy);
+    this.#scheduleBoundsSync();
+    if (!this.#rawDragStreamStopped) {
+      this.#rawDragStreamStopped = true;
+      this.#moveable.stopDrag();
+    }
+    event.stopImmediatePropagation();
+  };
+
+  #onRawDragPointerUp = (event: PointerEvent): void => {
+    if (this.#rawResizeStreamStopped && event.pointerId === this.#resizePointerId) {
+      this.#rawResizeStreamStopped = false;
+      this.#end('resize');
+      return;
+    }
+    const pointer = this.#dragPointer;
+    if (!this.#rawDragStreamStopped || !pointer) return;
+    if (pointer.pointerId !== -1 && event.pointerId !== pointer.pointerId) return;
+    this.#rawDragStreamStopped = false;
+    this.#end('drag');
   };
 
   /** Constrain the common delta at the canvas origin instead of clamping each
@@ -876,6 +983,7 @@ export class TransformController {
         return box ? { id, box } : null;
       })
       .filter((candidate): candidate is GuideCandidate => !!candidate);
+    this.#guideIndex = buildGuideIndex(this.#guideCandidates);
   }
 
   #resolveDragDelta(dx: number, dy: number): { dx: number; dy: number } {
@@ -884,10 +992,12 @@ export class TransformController {
       this.#clearSmartGuides();
       return { dx, dy };
     }
+    const box = { ...start, x: start.x + dx, y: start.y + dy };
+    const threshold = SNAP_THRESHOLD / (this.#ctx.zoom || 1);
     const resolved = resolveMoveGuides(
-      { ...start, x: start.x + dx, y: start.y + dy },
-      this.#guideCandidates,
-      SNAP_THRESHOLD / (this.#ctx.zoom || 1),
+      box,
+      candidatesNearGuideBox(this.#guideIndex, box, threshold),
+      threshold,
     );
     const next = {
       dx: this.#clampDragDeltaX(dx + resolved.box.x - (start.x + dx)),
@@ -926,10 +1036,9 @@ export class TransformController {
   }
 
   #queueDragDelta(dx: number, dy: number, paintFeedback = true): void {
+    this.#latestDragDelta = { dx, dy };
     for (const [id, start] of this.#dragStarts) {
-      const target = this.#ctx.elementForId(id);
-      if (!target) continue;
-      this.#queueMove(id, target, { x: start.x + dx, y: start.y + dy }, paintFeedback);
+      this.#queueMove(id, start.target, { x: start.x + dx, y: start.y + dy }, paintFeedback);
     }
   }
 
@@ -989,26 +1098,19 @@ export class TransformController {
     const controlBox = this.#activeControlBox();
     this.#clearBoundsCorrection();
     this.#moveable.updateRect();
-    const selectedMoved = moved.filter(({ id }) => this.#ctx.doc.isSelected(id));
-    const targetRects = (selectedMoved.length > 0 ? selectedMoved : moved)
-      .map(({ target }) => target.getBoundingClientRect());
-    const targetLeft = Math.min(...targetRects.map((rect) => rect.left));
-    const targetTop = Math.min(...targetRects.map((rect) => rect.top));
-    const controlRect = controlBox.getBoundingClientRect();
-    const transform = new DOMMatrixReadOnly(getComputedStyle(controlBox).transform);
-    const host = this.#ctx.stage.ownerDocument.documentElement;
-    host.style.setProperty('--le-drag-bounds-x', `${transform.m41 + targetLeft - controlRect.left}px`);
-    host.style.setProperty('--le-drag-bounds-y', `${transform.m42 + targetTop - controlRect.top}px`);
-    host.classList.add('syncing-drag-bounds');
-    controlBox.toggleAttribute('data-rm-drag-bounds', true);
+    this.#syncBoundsToMoveFeedback(controlBox);
     this.#ctx.hover.paint();
-    llog('drag', 'flush move frame', { moved: moved.map(({ id, x, y }) => ({ id, x, y })) });
+    if (layoutLogEnabled()) {
+      llog('drag', 'flush move frame', { moved: moved.map(({ id, x, y }) => ({ id, x, y })) });
+    }
   }
 
   #clearPendingMoves(): void {
     if (this.#moveFrame !== null) cancelAnimationFrame(this.#moveFrame);
     this.#moveFrame = null;
     this.#pendingMoves.clear();
+    if (this.#boundsFrame !== null) cancelAnimationFrame(this.#boundsFrame);
+    this.#boundsFrame = null;
     this.#clearMoveFeedback();
     this.#clearBoundsCorrection();
   }
@@ -1037,20 +1139,25 @@ export class TransformController {
     this.#moveFeedback.clear();
   }
 
-  /** Moveable advances its group wrappers after the raw object transform. Pin
-   * the visible child box to the already-painted target union before this event
-   * can paint, without committing layout geometry. */
-  #syncBoundsToMoveFeedback(): void {
-    if (this.#moveFeedback.size === 0) return;
-    const controlBox = this.#activeControlBox();
+  /** Coalesce control correction to one display-frame task. Pointer samples only
+   * update the cached common delta; no selected-target rectangle is re-read. */
+  #scheduleBoundsSync(): void {
+    if (this.#boundsFrame !== null) return;
+    this.#boundsFrame = requestAnimationFrame(() => {
+      this.#boundsFrame = null;
+      this.#syncBoundsToMoveFeedback();
+    });
+  }
+
+  /** Moveable advances its group wrapper independently. Pin it to the selected
+   * union derived from gesture-start client geometry plus the common model delta;
+   * only the single control box is measured in the frame-coalesced correction. */
+  #syncBoundsToMoveFeedback(controlBox = this.#activeControlBox()): void {
+    const union = this.#dragClientUnionStart;
+    if (this.#moveFeedback.size === 0 || !union) return;
     this.#clearBoundsCorrection();
-    const selectedTargets = [...this.#ctx.doc.selection]
-      .map((id) => this.#ctx.elementForId(id))
-      .filter((target): target is HTMLElement => !!target && this.#moveFeedback.has(target));
-    const targetRects = (selectedTargets.length > 0 ? selectedTargets : [...this.#moveFeedback.keys()])
-      .map((target) => target.getBoundingClientRect());
-    const targetLeft = Math.min(...targetRects.map((rect) => rect.left));
-    const targetTop = Math.min(...targetRects.map((rect) => rect.top));
+    const targetLeft = union.left + this.#latestDragDelta.dx * (this.#ctx.zoom || 1);
+    const targetTop = union.top + this.#latestDragDelta.dy * (this.#ctx.zoom || 1);
     const controlRect = controlBox.getBoundingClientRect();
     const transform = new DOMMatrixReadOnly(getComputedStyle(controlBox).transform);
     const host = this.#ctx.stage.ownerDocument.documentElement;
@@ -1076,6 +1183,50 @@ export class TransformController {
   #activeControlBox(): HTMLElement {
     const boxes = [...this.#ctx.stage.querySelectorAll<HTMLElement>('.moveable-control-box')];
     return boxes.findLast((box) => box.querySelector('.moveable-line')) ?? this.#moveable.getControlBoxElement();
+  }
+
+  /** Keep resize chrome live without asking Moveable to remeasure every selected
+   * target. The group frame is an affine projection of the captured union, so a
+   * translate + scale of its one control box is sufficient until pointer-up. */
+  #startResizeBoundsPreview(): void {
+    if (this.#resizeControlStart) return;
+    const box = this.#activeControlBox();
+    const transform = new DOMMatrixReadOnly(getComputedStyle(box).transform);
+    this.#resizeControlStart = { x: transform.m41, y: transform.m42 };
+    box.toggleAttribute('data-rm-resize-bounds', true);
+    this.#ctx.stage.ownerDocument.documentElement.classList.add('syncing-resize-bounds');
+  }
+
+  #paintResizeBoundsPreview(start: GuideBox, next: GuideBox): void {
+    const control = this.#resizeControlStart;
+    if (!control) return;
+    const zoom = this.#ctx.zoom || 1;
+    const scaleX = start.w > 0 ? next.w / start.w : 1;
+    const scaleY = start.h > 0 ? next.h / start.h : 1;
+    const host = this.#ctx.stage.ownerDocument.documentElement;
+    host.style.setProperty('--le-resize-bounds-x', `${control.x + (next.x - start.x) * zoom}px`);
+    host.style.setProperty('--le-resize-bounds-y', `${control.y + (next.y - start.y) * zoom}px`);
+    host.style.setProperty('--le-resize-bounds-scale-x', `${scaleX}`);
+    host.style.setProperty('--le-resize-bounds-scale-y', `${scaleY}`);
+    host.style.setProperty('--le-resize-control-scale-x', `${1 / scaleX}`);
+    host.style.setProperty('--le-resize-control-scale-y', `${1 / scaleY}`);
+  }
+
+  #clearResizeBoundsPreview(): void {
+    this.#resizeControlStart = null;
+    const host = this.#ctx.stage.ownerDocument.documentElement;
+    host.classList.remove('syncing-resize-bounds');
+    for (const property of [
+      '--le-resize-bounds-x',
+      '--le-resize-bounds-y',
+      '--le-resize-bounds-scale-x',
+      '--le-resize-bounds-scale-y',
+      '--le-resize-control-scale-x',
+      '--le-resize-control-scale-y',
+    ]) host.style.removeProperty(property);
+    this.#ctx.stage.querySelectorAll('[data-rm-resize-bounds]').forEach((box) => {
+      box.removeAttribute('data-rm-resize-bounds');
+    });
   }
 
   #applyMove(target: HTMLElement | SVGElement, left: number, top: number, paintFeedback = true): void {
@@ -1122,7 +1273,9 @@ export class TransformController {
     const dx = resolved.dx;
     const dy = resolved.dy;
     this.#queueDragDelta(dx, dy, paintFeedback);
-    llog('drag', 'queue group move', { anchorId, dx, dy, ids: [...this.#dragStarts.keys()] });
+    if (layoutLogEnabled()) {
+      llog('drag', 'queue group move', { anchorId, dx, dy, ids: [...this.#dragStarts.keys()] });
+    }
   }
 
   /** Settle every moved object onto a real band after a drag: read its absolute
@@ -1200,7 +1353,8 @@ export class TransformController {
     const id = this.#ctx.idForElement(target, identity);
     const o = id === undefined ? undefined : this.#ctx.doc.getObject(id);
     const pointer = inputEvent as PointerEvent | MouseEvent | undefined;
-    if (id === undefined || !o || !pointer) return;
+    const partTop = o ? this.#ctx.partTop(o.partId) : null;
+    if (id === undefined || !o || !pointer || partTop === null) return;
     this.#resizeStarts.set(id, {
       x: o.x,
       y: o.y,
@@ -1209,10 +1363,17 @@ export class TransformController {
       direction: direction.slice(),
       clientX: pointer.clientX,
       clientY: pointer.clientY,
+      target,
+      partTop,
+      box: { x: o.x, y: partTop + o.y, w: o.w, h: o.h },
     });
     this.#resizePointerId = 'pointerId' in pointer
       ? pointer.pointerId
       : (this.#pressedPointer?.pointerId ?? null);
+  }
+
+  #finishResizeCapture(): void {
+    this.#resizeUnionStart = unionGuideBoxes([...this.#resizeStarts.values()].map((start) => start.box));
     this.#captureGuideFrame(new Set(this.#ctx.doc.selection));
   }
 
@@ -1222,16 +1383,8 @@ export class TransformController {
    * and zero document/render-model commits. */
   #applyPointerResize(pointer: PointerEvent): void {
     const starts = [...this.#resizeStarts.entries()]
-      .map(([id, start]) => {
-        const object = this.#ctx.doc.getObject(id);
-        const target = this.#ctx.elementForId(id);
-        const partTop = object ? this.#ctx.partTop(object.partId) : null;
-        return object && target && partTop !== null
-          ? { id, start, target, partTop, box: { x: start.x, y: partTop + start.y, w: start.w, h: start.h } }
-          : null;
-      })
-      .filter((entry): entry is NonNullable<typeof entry> => !!entry);
-    const union = unionGuideBoxes(starts.map((entry) => entry.box));
+      .map(([id, start]) => ({ id, start, target: start.target, partTop: start.partTop, box: start.box }));
+    const union = this.#resizeUnionStart;
     const anchor = starts[0];
     if (!union || !anchor) return;
 
@@ -1257,11 +1410,12 @@ export class TransformController {
       raw.h = union.y + union.h - raw.y;
     }
 
+    const threshold = SNAP_THRESHOLD / zoom;
     const resolved = resolveResizeGuides(
       raw,
       anchor.start.direction,
-      this.#guideCandidates,
-      SNAP_THRESHOLD / zoom,
+      candidatesNearGuideBox(this.#guideIndex, raw, threshold, anchor.start.direction),
+      threshold,
     );
     this.#paintSmartGuides(resolved.guides);
     const scaleX = union.w > 0 ? resolved.box.w / union.w : 1;
@@ -1284,7 +1438,7 @@ export class TransformController {
         direction: entry.start.direction,
       });
     }
-    this.#scheduleRectUpdate();
+    this.#paintResizeBoundsPreview(union, resolved.box);
   }
 
   #applyResize(
@@ -1297,15 +1451,16 @@ export class TransformController {
   ): void {
     const proposal = this.#resizeProposal(target, width, height, left, top, inputEvent);
     if (!proposal) return;
+    const threshold = SNAP_THRESHOLD / (this.#ctx.zoom || 1);
     const resolved = resolveResizeGuides(
       proposal.box,
       proposal.direction,
-      this.#guideCandidates,
-      SNAP_THRESHOLD / (this.#ctx.zoom || 1),
+      candidatesNearGuideBox(this.#guideIndex, proposal.box, threshold, proposal.direction),
+      threshold,
     );
     this.#paintSmartGuides(resolved.guides);
     this.#previewResizeProposal({ ...proposal, box: resolved.box });
-    this.#scheduleRectUpdate();
+    if (!this.#rawResizeStreamStopped) this.#scheduleRectUpdate();
   }
 
   #applyResizeGroup(events: Array<{
@@ -1329,11 +1484,12 @@ export class TransformController {
     const union = unionGuideBoxes(proposals.map((proposal) => proposal.box));
     if (!union || proposals.length === 0) return;
     const direction = proposals[0].direction;
+    const threshold = SNAP_THRESHOLD / (this.#ctx.zoom || 1);
     const resolved = resolveResizeGuides(
       union,
       direction,
-      this.#guideCandidates,
-      SNAP_THRESHOLD / (this.#ctx.zoom || 1),
+      candidatesNearGuideBox(this.#guideIndex, union, threshold, direction),
+      threshold,
     );
     this.#paintSmartGuides(resolved.guides);
     const dirX = Math.sign(direction[0] ?? 0);
@@ -1352,7 +1508,7 @@ export class TransformController {
       }
       this.#previewResizeProposal({ ...proposal, box });
     }
-    this.#scheduleRectUpdate();
+    if (!this.#rawResizeStreamStopped) this.#scheduleRectUpdate();
   }
 
   #resizeProposal(
@@ -1408,7 +1564,9 @@ export class TransformController {
       h = Math.max(1, Math.round(h));
       x = clampOrigin(x);
       y = clampOrigin(y);
-      llog('resize', 'apply resize from pointer', { id, w, h, x, y, dx: Math.round(dx), dy: Math.round(dy) });
+      if (layoutLogEnabled()) {
+        llog('resize', 'apply resize from pointer', { id, w, h, x, y, dx: Math.round(dx), dy: Math.round(dy) });
+      }
     } else {
       x = clampOrigin(left);
       y = clampOrigin(top);
@@ -1437,8 +1595,6 @@ export class TransformController {
     }
 
     const target = proposal.target as HTMLElement;
-    const shape = target.querySelector<HTMLElement>('.fm-shape');
-    const portal = target.querySelector<HTMLElement>('.fm-portal');
     const preview: ResizePreview = {
       ...proposal,
       geometry,
@@ -1447,32 +1603,21 @@ export class TransformController {
         top: target.style.top,
         width: target.style.width,
         height: target.style.height,
+        transform: target.style.transform,
+        transformOrigin: target.style.transformOrigin,
         willChange: target.style.willChange,
-        shapeStyle: shape?.getAttribute('style') ?? null,
-        portalStyle: portal?.getAttribute('style') ?? null,
       },
     };
     this.#resizePreviews.set(proposal.id, preview);
-    target.style.left = `${geometry.x}px`;
-    target.style.top = `${geometry.y}px`;
-    target.style.width = `${geometry.w}px`;
-    target.style.height = `${geometry.h}px`;
-    target.style.willChange = 'left, top, width, height';
-
-    const object = this.#ctx.doc.getObject(proposal.id);
-    if (object && shape) {
-      const behavior = objectBehavior(object.kind);
-      const props = behavior.syncGeometry({ ...object, ...geometry });
-      const shapeStyle = props ? behavior.shapeStyle(props) : null;
-      if (shapeStyle !== null) shape.setAttribute('style', shapeStyle);
-    }
-    if (object?.kind === 'portal' && portal) {
-      const rows = portalRowCount(parseProps(object.props));
-      portal.style.setProperty('--fm-portal-row-h', `${geometry.h}px`);
-      portal.style.setProperty('--fm-portal-h', `${geometry.h * rows}px`);
-    }
+    const dx = geometry.x - (start?.x ?? geometry.x);
+    const dy = geometry.y - (start?.y ?? geometry.y);
+    const scaleX = start && start.w > 0 ? geometry.w / start.w : 1;
+    const scaleY = start && start.h > 0 ? geometry.h / start.h : 1;
+    target.style.transformOrigin = '0 0';
+    target.style.transform = `translate(${dx}px, ${dy}px) scale(${scaleX}, ${scaleY}) ${preview.original.transform}`.trim();
+    target.style.willChange = 'transform';
     this.#moved = true;
-    llog('resize', 'paint resize preview', { id: proposal.id, ...geometry });
+    if (layoutLogEnabled()) llog('resize', 'paint resize preview', { id: proposal.id, ...geometry });
   }
 
   #restoreResizePreview(preview: ResizePreview): void {
@@ -1481,17 +1626,9 @@ export class TransformController {
     target.style.top = preview.original.top;
     target.style.width = preview.original.width;
     target.style.height = preview.original.height;
+    target.style.transform = preview.original.transform;
+    target.style.transformOrigin = preview.original.transformOrigin;
     target.style.willChange = preview.original.willChange;
-    const shape = target.querySelector<HTMLElement>('.fm-shape');
-    if (shape) {
-      if (preview.original.shapeStyle === null) shape.removeAttribute('style');
-      else shape.setAttribute('style', preview.original.shapeStyle);
-    }
-    const portal = target.querySelector<HTMLElement>('.fm-portal');
-    if (portal) {
-      if (preview.original.portalStyle === null) portal.removeAttribute('style');
-      else portal.setAttribute('style', preview.original.portalStyle);
-    }
   }
 
   #commitResizePreviews(): number[] {
@@ -1499,6 +1636,13 @@ export class TransformController {
     for (const preview of previews) {
       this.#ctx.doc.setObjectGeometry(preview.id, preview.geometry);
       this.#syncObjectToBox(preview.id);
+      const target = preview.target as HTMLElement;
+      target.style.left = `${preview.geometry.x}px`;
+      target.style.top = `${preview.geometry.y}px`;
+      target.style.width = `${preview.geometry.w}px`;
+      target.style.height = `${preview.geometry.h}px`;
+      target.style.transform = preview.original.transform;
+      target.style.transformOrigin = preview.original.transformOrigin;
     }
     return previews.map((preview) => preview.id);
   }
@@ -1506,7 +1650,12 @@ export class TransformController {
   #clearResizePreviews(restore: boolean): void {
     for (const preview of this.#resizePreviews.values()) {
       if (restore) this.#restoreResizePreview(preview);
-      else (preview.target as HTMLElement).style.willChange = preview.original.willChange;
+      else {
+        const target = preview.target as HTMLElement;
+        target.style.transform = preview.original.transform;
+        target.style.transformOrigin = preview.original.transformOrigin;
+        target.style.willChange = preview.original.willChange;
+      }
     }
     this.#resizePreviews.clear();
   }
@@ -1641,8 +1790,10 @@ export class TransformController {
     window.removeEventListener('pointerup', this.#onObjectClickUp);
     window.removeEventListener('pointerdown', this.#onPointerDown, { capture: true });
     window.removeEventListener('pointermove', this.#onTransformPointerMove, { capture: true });
+    window.removeEventListener('pointerup', this.#onRawDragPointerUp, { capture: true });
     this.#clearPendingMoves();
     this.#clearResizePreviews(true);
+    this.#clearResizeBoundsPreview();
     if (this.#rectFrame !== null) cancelAnimationFrame(this.#rectFrame);
     this.#moveable.destroy();
     this.#selecto.destroy();

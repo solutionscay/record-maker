@@ -1,6 +1,8 @@
 export type GuideBox = { x: number; y: number; w: number; h: number };
 export type GuideCandidate = { id: number; box: GuideBox };
 export type ActiveGuide = { axis: 'x' | 'y'; position: number };
+type GuideIndexEntry = { position: number; candidate: GuideCandidate };
+export type GuideIndex = { x: GuideIndexEntry[]; y: GuideIndexEntry[] };
 
 export type SnapResult = {
   box: GuideBox;
@@ -42,6 +44,62 @@ function candidateAnchors(candidates: GuideCandidate[], axis: 'x' | 'y'): number
   return candidates
     .flatMap(({ box }) => axis === 'x' ? anchors(box.x, box.w) : anchors(box.y, box.h))
     .sort((a, b) => a - b);
+}
+
+/** Immutable per-gesture spatial index. Each candidate contributes its two
+ * edges and center on both axes; pointer samples binary-search only the ranges
+ * surrounding the active anchors instead of scanning the canvas. */
+export function buildGuideIndex(candidates: GuideCandidate[]): GuideIndex {
+  const entries = (axis: 'x' | 'y') => candidates
+    .flatMap((candidate) => {
+      const { box } = candidate;
+      return (axis === 'x' ? anchors(box.x, box.w) : anchors(box.y, box.h))
+        .map((position) => ({ position, candidate }));
+    })
+    .sort((a, b) => a.position - b.position || a.candidate.id - b.candidate.id);
+  return { x: entries('x'), y: entries('y') };
+}
+
+function lowerBound(entries: GuideIndexEntry[], value: number): number {
+  let low = 0;
+  let high = entries.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (entries[middle].position < value) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+/** Return only candidates capable of producing a guide for this exact move or
+ * active resize edge. A candidate matching either axis is retained because the
+ * authoritative resolver chooses x/y independently from the same set. */
+export function candidatesNearGuideBox(
+  index: GuideIndex,
+  box: GuideBox,
+  threshold: number,
+  direction?: readonly number[],
+): GuideCandidate[] {
+  const selected = new Map<number, GuideCandidate>();
+  const sourceAnchors = (axis: 'x' | 'y'): number[] => {
+    const start = axis === 'x' ? box.x : box.y;
+    const size = axis === 'x' ? box.w : box.h;
+    if (!direction) return anchors(start, size);
+    const dir = Math.sign(direction[axis === 'x' ? 0 : 1] ?? 0);
+    return dir === 0 ? [] : [dir < 0 ? start : start + size];
+  };
+  for (const axis of ['x', 'y'] as const) {
+    const entries = index[axis];
+    for (const source of sourceAnchors(axis)) {
+      const limit = source + threshold;
+      for (let cursor = lowerBound(entries, source - threshold); cursor < entries.length; cursor += 1) {
+        const entry = entries[cursor];
+        if (entry.position > limit) break;
+        selected.set(entry.candidate.id, entry.candidate);
+      }
+    }
+  }
+  return [...selected.values()];
 }
 
 /** Snap a translated single/group union. One common x/y offset preserves every
@@ -108,4 +166,3 @@ export function unionGuideBoxes(boxes: GuideBox[]): GuideBox | null {
   const bottom = Math.max(...boxes.map((box) => box.y + box.h));
   return { x, y, w: right - x, h: bottom - y };
 }
-

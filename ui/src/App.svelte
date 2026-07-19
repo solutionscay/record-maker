@@ -746,6 +746,16 @@
   :global(html.syncing-drag-bounds .le-stage .moveable-control-box[data-rm-drag-bounds]) {
     transform: translate3d(var(--le-drag-bounds-x), var(--le-drag-bounds-y), 0) !important;
   }
+  /* #215: raw group resize projects the captured control frame instead of
+     remeasuring every selected target. Counter-scale handles so they stay round. */
+  :global(html.syncing-resize-bounds .le-stage .moveable-control-box[data-rm-resize-bounds]) {
+    transform: translate3d(var(--le-resize-bounds-x), var(--le-resize-bounds-y), 0)
+      scale(var(--le-resize-bounds-scale-x), var(--le-resize-bounds-scale-y)) !important;
+    transform-origin: 0 0;
+  }
+  :global(html.syncing-resize-bounds .le-stage .moveable-control-box[data-rm-resize-bounds] .moveable-control) {
+    scale: var(--le-resize-control-scale-x) var(--le-resize-control-scale-y);
+  }
   .le-stage :global(.fm-obj:has(.fm-line)) {
     overflow: visible;
     pointer-events: auto;

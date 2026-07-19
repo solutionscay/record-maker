@@ -10,7 +10,7 @@ import { defaultBox, partAtY } from '../create';
 import { createObject } from '../persist';
 import { FIELD_DRAG_MIME, PORTAL_COLUMN_DRAG_MIME, type PortalColumnDrag } from '../dnd';
 import { llog, lerror } from '../log';
-import type { CanvasContext } from './context';
+import type { CanvasContext, CanvasCoordinateFrame } from './context';
 import { GestureLifecycle, type GestureCancelReason } from './gesture-lifecycle';
 import { objectBehavior } from './object-behavior';
 
@@ -32,6 +32,7 @@ interface DrawPlacement {
   dragged: boolean;
   box: { x: number; y: number; w: number; h: number };
   line: { angle: number; length: number } | null;
+  coordinateFrame: CanvasCoordinateFrame;
 }
 
 export class PlacementController {
@@ -44,6 +45,7 @@ export class PlacementController {
    * separate from #drawPreview since a drop can land while no tool is armed and
    * no #drawing gesture is in progress. */
   #dropPreview: HTMLElement | null = null;
+  #dropCoordinateFrame: CanvasCoordinateFrame | null = null;
 
   constructor(ctx: CanvasContext) {
     this.#ctx = ctx;
@@ -72,8 +74,9 @@ export class PlacementController {
       llog('place', 'draw start ignored', { tool, placing: this.#ctx.placing, drawing: !!this.#drawing });
       return;
     }
-    const point = this.#ctx.canvasPoint(input.clientX, input.clientY);
-    if (!point) {
+    const coordinateFrame = this.#ctx.coordinateFrame();
+    const point = this.#ctx.canvasPoint(input.clientX, input.clientY, coordinateFrame);
+    if (!coordinateFrame || !point) {
       llog('error', 'draw start: no .fm-canvas in stage');
       doc.setTool('pointer');
       return;
@@ -108,6 +111,7 @@ export class PlacementController {
       dragged: false,
       box: { x: point.x, y: where.localY, w: 1, h: 1 },
       line: null,
+      coordinateFrame,
     };
     this.#drawPreview = document.createElement('div');
     this.#drawPreview.className = `le-draw-preview le-draw-${tool}`;
@@ -145,7 +149,9 @@ export class PlacementController {
 
   #updateDraw(input: MouseEvent | PointerEvent): void {
     const drawing = this.#drawing;
-    const point = this.#ctx.canvasPoint(input.clientX, input.clientY);
+    const point = drawing
+      ? this.#ctx.canvasPoint(input.clientX, input.clientY, drawing.coordinateFrame)
+      : null;
     if (!drawing || !point) return;
 
     const partBottom = drawing.partTop + drawing.partHeight;
@@ -307,7 +313,8 @@ export class PlacementController {
    * partAtY still returns the last part then, so this is really just "no
    * `.fm-canvas` under the cursor at all"). */
   #dropTargetFor(clientX: number, clientY: number): (FieldPlacementTarget & { partTop: number }) | null {
-    const point = this.#ctx.canvasPoint(clientX, clientY);
+    this.#dropCoordinateFrame ??= this.#ctx.coordinateFrame();
+    const point = this.#ctx.canvasPoint(clientX, clientY, this.#dropCoordinateFrame);
     if (!point) return null;
     const where = partAtY(this.#ctx.doc.renderModel, point.y);
     if (!where) return null;
@@ -340,7 +347,10 @@ export class PlacementController {
     // stage (e.g. crossing from the canvas onto a part label); only clear the
     // preview once the pointer has actually left the stage entirely.
     const related = e.relatedTarget as Node | null;
-    if (!related || !this.#ctx.stage.contains(related)) this.#paintDropPreview(null);
+    if (!related || !this.#ctx.stage.contains(related)) {
+      this.#paintDropPreview(null);
+      this.#dropCoordinateFrame = null;
+    }
   };
 
   onDrop = (e: DragEvent): void => {
@@ -352,20 +362,29 @@ export class PlacementController {
     if (portalRaw) {
       e.preventDefault();
       const payload = this.#parsePortalColumnDrag(portalRaw);
-      if (payload) void this.#placePortalColumnsAt(payload, e.clientX, e.clientY);
+      if (payload) void this.#placePortalColumnsAt(payload, e.clientX, e.clientY, this.#dropCoordinateFrame);
+      this.#dropCoordinateFrame = null;
       return;
     }
     const raw = e.dataTransfer?.getData(FIELD_DRAG_MIME);
-    if (!raw) return; // some other kind of drop (e.g. dragging in browser text) — ignore
+    if (!raw) {
+      this.#dropCoordinateFrame = null;
+      return; // some other kind of drop (e.g. dragging in browser text) — ignore
+    }
     e.preventDefault();
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {
+      this.#dropCoordinateFrame = null;
       return;
     }
-    if (!Array.isArray(parsed) || parsed.length === 0 || !parsed.every((v) => typeof v === 'number')) return;
+    if (!Array.isArray(parsed) || parsed.length === 0 || !parsed.every((v) => typeof v === 'number')) {
+      this.#dropCoordinateFrame = null;
+      return;
+    }
     const target = this.#dropTargetFor(e.clientX, e.clientY);
+    this.#dropCoordinateFrame = null;
     if (!target) {
       llog('place', 'field drop outside any part — ignored', { clientX: e.clientX, clientY: e.clientY });
       return;
@@ -429,7 +448,12 @@ export class PlacementController {
    * successive columns. Columns share the portal's header row (y = portal.y),
    * matching the click-append geometry. The portal stays selected afterwards so
    * its Columns list/card stays open for the next add. */
-  async #placePortalColumnsAt(payload: PortalColumnDrag, clientX: number, clientY: number): Promise<void> {
+  async #placePortalColumnsAt(
+    payload: PortalColumnDrag,
+    clientX: number,
+    clientY: number,
+    coordinateFrame: CanvasCoordinateFrame | null,
+  ): Promise<void> {
     if (this.#ctx.placing) return;
     const doc = this.#ctx.doc;
     const portal = doc.getObject(payload.portalId);
@@ -437,7 +461,7 @@ export class PlacementController {
       llog('place', 'portal-column drop: portal missing or not a portal — ignored', { portalId: payload.portalId });
       return;
     }
-    const point = this.#ctx.canvasPoint(clientX, clientY);
+    const point = this.#ctx.canvasPoint(clientX, clientY, coordinateFrame ?? this.#ctx.coordinateFrame());
     const size = defaultBox('field');
     const baseX = point ? clampOrigin(this.#snap(point.x)) : portal.x;
     const y = portal.y;
@@ -528,5 +552,6 @@ export class PlacementController {
     this.#lifecycle.destroy();
     this.#clearDrawGesture();
     this.#dropPreview?.remove();
+    this.#dropCoordinateFrame = null;
   }
 }

@@ -3,9 +3,9 @@
 // (marquee multi-select) to the editor document store (#45), and owns moveable's
 // target sync with the store selection. The vanilla cores are consumed directly.
 //
-// Single source of truth is the store. During a drag, compositor-only transforms
-// immediately paint the latest snapped pointer geometry; pointer-up then replaces
-// that temporary feedback with authored left/top in one store commit.
+// Single source of truth is the store. During drag/resize, temporary DOM feedback
+// immediately paints the latest snapped pointer geometry; pointer-up then replaces
+// that preview with authored geometry in one store transaction.
 // moveable derives its control box from the gesture's cached start rect + pointer
 // delta, so routing output back into the store does NOT create a feedback loop. A
 // whole gesture commits as ONE undo step (mark on end) and persists to the engine
@@ -23,7 +23,7 @@ import {
   setObjectsGeometry,
 } from '../persist';
 import { llog, lerror } from '../log';
-import { parseProps } from '../object-props';
+import { parseProps, portalRowCount } from '../object-props';
 import type { CanvasContext, IdentitySnapshot } from './context';
 import { GestureLifecycle, type GestureCancelReason } from './gesture-lifecycle';
 import { objectBehavior } from './object-behavior';
@@ -50,6 +50,19 @@ type ResizeProposal = {
   box: GuideBox;
   partTop: number;
   direction: number[];
+};
+
+type ResizePreview = ResizeProposal & {
+  geometry: { x: number; y: number; w: number; h: number };
+  original: {
+    left: string;
+    top: string;
+    width: string;
+    height: string;
+    willChange: string;
+    shapeStyle: string | null;
+    portalStyle: string | null;
+  };
 };
 
 export class TransformController {
@@ -120,6 +133,10 @@ export class TransformController {
   #guideCandidates: GuideCandidate[] = [];
   #dragUnionStart: GuideBox | null = null;
   #guideElements: HTMLElement[] = [];
+  /** Object resize is an ephemeral DOM preview. No EditorDoc geometry changes
+   * occur until pointer-up, when this map is committed once per target. */
+  #resizePreviews = new Map<number, ResizePreview>();
+  #resizePointerId: number | null = null;
 
   constructor(ctx: CanvasContext) {
     this.#ctx = ctx;
@@ -128,7 +145,7 @@ export class TransformController {
     // Register before Moveable so compositor feedback is authored at the entry
     // to each pointer sample, before the library's drag calculations.
     window.addEventListener('pointerdown', this.#onPointerDown, { capture: true });
-    window.addEventListener('pointermove', this.#onDragPointerMove, { capture: true });
+    window.addEventListener('pointermove', this.#onTransformPointerMove, { capture: true });
     this.#moveable = new Moveable(stage, {
       target: [],
       draggable: true,
@@ -183,13 +200,19 @@ export class TransformController {
       this.#selectFromTarget(e.target);
       this.#captureResizeStart(e.target, e.direction, e.inputEvent);
     });
-    this.#moveable.on('resize', (e) => this.#applyResize(e.target, e.width, e.height, e.drag.left, e.drag.top, e.inputEvent));
+    this.#moveable.on('resize', (e) => {
+      if (this.#resizePointerId === null) {
+        this.#applyResize(e.target, e.width, e.height, e.drag.left, e.drag.top, e.inputEvent);
+      }
+    });
     this.#moveable.on('resizeEnd', () => this.#end('resize'));
     this.#moveable.on('resizeGroupStart', (e) => {
       this.#begin(e.inputEvent);
       e.events.forEach((ev) => this.#captureResizeStart(ev.target, ev.direction, ev.inputEvent));
     });
-    this.#moveable.on('resizeGroup', (e) => this.#applyResizeGroup(e.events));
+    this.#moveable.on('resizeGroup', (e) => {
+      if (this.#resizePointerId === null) this.#applyResizeGroup(e.events);
+    });
     this.#moveable.on('resizeGroupEnd', () => this.#end('resize'));
 
     // ── rotate (line objects only) ──────────────────────────────────────────
@@ -603,6 +626,8 @@ export class TransformController {
     // start for one physical pointer. They share one transaction/lifecycle.
     if (this.#ctx.gesturing && this.#lifecycle.active) return;
     this.#clearPendingMoves();
+    this.#clearResizePreviews(true);
+    this.#resizePointerId = null;
     this.#clearSmartGuides();
     this.#stopDragPointerFeedback();
     this.#historyCheckpoint = this.#ctx.doc.beginGestureTransaction();
@@ -657,13 +682,16 @@ export class TransformController {
     // Pointer-up can arrive before the last requested display frame. Commit that
     // final authored position before band settlement, undo sealing, or persist.
     this.#flushMoves();
+    const resizedIds = kind === 'resize' ? this.#commitResizePreviews() : [];
+    this.#resizePointerId = null;
     this.#ctx.gesturing = false;
     // A drag may have carried objects across band boundaries; settle them onto a
     // real band (reparenting) BEFORE the undo mark so it's one step. Resize never
     // crosses bands, so it skips this.
-    const affectedIds = kind === 'drag' ? [...this.#dragStarts.keys()] : [...this.#ctx.doc.selection];
+    const affectedIds = kind === 'drag' ? [...this.#dragStarts.keys()] : resizedIds;
     const reparented = kind === 'drag' && this.#moved ? this.#settleBands(affectedIds) : new Set<number>();
     this.#clearMoveFeedback();
+    this.#clearResizePreviews(false);
     this.#clearBoundsCorrection();
     this.#clearSmartGuides();
     llog(kind, `${kind}End`, { moved: this.#moved, selection: [...this.#ctx.doc.selection], reparented: [...reparented] });
@@ -698,6 +726,8 @@ export class TransformController {
     this.#moveable.stopDrag();
     this.#stopDragPointerFeedback();
     this.#clearPendingMoves();
+    this.#clearResizePreviews(true);
+    this.#resizePointerId = null;
     if (this.#historyCheckpoint) {
       this.#ctx.doc.cancelGestureTransaction(this.#historyCheckpoint);
       this.#historyCheckpoint = null;
@@ -792,7 +822,15 @@ export class TransformController {
     this.#pressedPointer = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY };
   };
 
-  #onDragPointerMove = (event: PointerEvent): void => {
+  #onTransformPointerMove = (event: PointerEvent): void => {
+    if (
+      this.#resizePointerId !== null &&
+      event.pointerId === this.#resizePointerId &&
+      this.#resizeStarts.size > 0
+    ) {
+      this.#applyPointerResize(event);
+      return;
+    }
     const pointer = this.#dragPointer;
     if (!pointer || (pointer.pointerId !== -1 && event.pointerId !== pointer.pointerId)) return;
     const anchorStart = this.#dragStarts.get(pointer.anchorId);
@@ -1172,7 +1210,81 @@ export class TransformController {
       clientX: pointer.clientX,
       clientY: pointer.clientY,
     });
+    this.#resizePointerId = 'pointerId' in pointer
+      ? pointer.pointerId
+      : (this.#pressedPointer?.pointerId ?? null);
     this.#captureGuideFrame(new Set(this.#ctx.doc.selection));
+  }
+
+  /** Resolve the raw pointer against the captured group union, then project the
+   * one snapped union back onto each member. This is independent of Moveable's
+   * reactive target geometry, so 80 pointer samples remain 80 cheap DOM paints
+   * and zero document/render-model commits. */
+  #applyPointerResize(pointer: PointerEvent): void {
+    const starts = [...this.#resizeStarts.entries()]
+      .map(([id, start]) => {
+        const object = this.#ctx.doc.getObject(id);
+        const target = this.#ctx.elementForId(id);
+        const partTop = object ? this.#ctx.partTop(object.partId) : null;
+        return object && target && partTop !== null
+          ? { id, start, target, partTop, box: { x: start.x, y: partTop + start.y, w: start.w, h: start.h } }
+          : null;
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => !!entry);
+    const union = unionGuideBoxes(starts.map((entry) => entry.box));
+    const anchor = starts[0];
+    if (!union || !anchor) return;
+
+    const zoom = this.#ctx.zoom || 1;
+    const dx = (pointer.clientX - anchor.start.clientX) / zoom;
+    const dy = (pointer.clientY - anchor.start.clientY) / zoom;
+    const grid = this.#ctx.doc.snapToGrid ? this.#ctx.doc.gridSize : 0;
+    const dirX = Math.sign(anchor.start.direction[0] ?? 0);
+    const dirY = Math.sign(anchor.start.direction[1] ?? 0);
+    const raw = { ...union };
+    if (dirX > 0) {
+      const right = Math.max(union.x + 1, snapToGrid(union.x + union.w + dx, grid));
+      raw.w = right - union.x;
+    } else if (dirX < 0) {
+      raw.x = Math.min(union.x + union.w - 1, clampOrigin(snapToGrid(union.x + dx, grid)));
+      raw.w = union.x + union.w - raw.x;
+    }
+    if (dirY > 0) {
+      const bottom = Math.max(union.y + 1, snapToGrid(union.y + union.h + dy, grid));
+      raw.h = bottom - union.y;
+    } else if (dirY < 0) {
+      raw.y = Math.min(union.y + union.h - 1, clampOrigin(snapToGrid(union.y + dy, grid)));
+      raw.h = union.y + union.h - raw.y;
+    }
+
+    const resolved = resolveResizeGuides(
+      raw,
+      anchor.start.direction,
+      this.#guideCandidates,
+      SNAP_THRESHOLD / zoom,
+    );
+    this.#paintSmartGuides(resolved.guides);
+    const scaleX = union.w > 0 ? resolved.box.w / union.w : 1;
+    const scaleY = union.h > 0 ? resolved.box.h / union.h : 1;
+    for (const entry of starts) {
+      const box = { ...entry.box };
+      if (dirX !== 0) {
+        box.x = resolved.box.x + (entry.box.x - union.x) * scaleX;
+        box.w = entry.box.w * scaleX;
+      }
+      if (dirY !== 0) {
+        box.y = resolved.box.y + (entry.box.y - union.y) * scaleY;
+        box.h = entry.box.h * scaleY;
+      }
+      this.#previewResizeProposal({
+        id: entry.id,
+        target: entry.target,
+        box,
+        partTop: entry.partTop,
+        direction: entry.start.direction,
+      });
+    }
+    this.#scheduleRectUpdate();
   }
 
   #applyResize(
@@ -1192,7 +1304,8 @@ export class TransformController {
       SNAP_THRESHOLD / (this.#ctx.zoom || 1),
     );
     this.#paintSmartGuides(resolved.guides);
-    this.#applyResizeProposal({ ...proposal, box: resolved.box });
+    this.#previewResizeProposal({ ...proposal, box: resolved.box });
+    this.#scheduleRectUpdate();
   }
 
   #applyResizeGroup(events: Array<{
@@ -1210,6 +1323,7 @@ export class TransformController {
         event.drag.left,
         event.drag.top,
         event.inputEvent,
+        true,
       ))
       .filter((proposal): proposal is ResizeProposal => !!proposal);
     const union = unionGuideBoxes(proposals.map((proposal) => proposal.box));
@@ -1236,8 +1350,9 @@ export class TransformController {
         box.y = resolved.box.y + (proposal.box.y - union.y) * scaleY;
         box.h = proposal.box.h * scaleY;
       }
-      this.#applyResizeProposal({ ...proposal, box });
+      this.#previewResizeProposal({ ...proposal, box });
     }
+    this.#scheduleRectUpdate();
   }
 
   #resizeProposal(
@@ -1247,6 +1362,7 @@ export class TransformController {
     left: number,
     top: number,
     inputEvent?: Event,
+    preferEventGeometry = false,
   ): ResizeProposal | null {
     const identity = this.#ctx.currentIdentity();
     const id = this.#ctx.idForElement(target, identity);
@@ -1267,7 +1383,7 @@ export class TransformController {
     let y: number;
     let w: number;
     let h: number;
-    if (pointer && start) {
+    if (pointer && start && !preferEventGeometry) {
       const dx = (pointer.clientX - start.clientX) / (this.#ctx.zoom || 1);
       const dy = (pointer.clientY - start.clientY) / (this.#ctx.zoom || 1);
       const dirX = Math.sign(start.direction[0] ?? 1);
@@ -1302,18 +1418,97 @@ export class TransformController {
     return { id, target, box: { x, y: partTop + y, w, h }, partTop, direction: start?.direction ?? [1, 1] };
   }
 
-  #applyResizeProposal(proposal: ResizeProposal): void {
+  #previewResizeProposal(proposal: ResizeProposal): void {
     const geometry = {
       x: clampOrigin(Math.round(proposal.box.x)),
       y: clampOrigin(Math.round(proposal.box.y - proposal.partTop)),
       w: Math.max(1, Math.round(proposal.box.w)),
       h: Math.max(1, Math.round(proposal.box.h)),
     };
+    const start = this.#resizeStarts.get(proposal.id);
+    const unchanged = !!start && geometry.x === start.x && geometry.y === start.y &&
+      geometry.w === start.w && geometry.h === start.h;
+    const prior = this.#resizePreviews.get(proposal.id);
+    if (unchanged) {
+      if (prior) this.#restoreResizePreview(prior);
+      this.#resizePreviews.delete(proposal.id);
+      this.#moved = this.#resizePreviews.size > 0;
+      return;
+    }
+
+    const target = proposal.target as HTMLElement;
+    const shape = target.querySelector<HTMLElement>('.fm-shape');
+    const portal = target.querySelector<HTMLElement>('.fm-portal');
+    const preview: ResizePreview = {
+      ...proposal,
+      geometry,
+      original: prior?.original ?? {
+        left: target.style.left,
+        top: target.style.top,
+        width: target.style.width,
+        height: target.style.height,
+        willChange: target.style.willChange,
+        shapeStyle: shape?.getAttribute('style') ?? null,
+        portalStyle: portal?.getAttribute('style') ?? null,
+      },
+    };
+    this.#resizePreviews.set(proposal.id, preview);
+    target.style.left = `${geometry.x}px`;
+    target.style.top = `${geometry.y}px`;
+    target.style.width = `${geometry.w}px`;
+    target.style.height = `${geometry.h}px`;
+    target.style.willChange = 'left, top, width, height';
+
+    const object = this.#ctx.doc.getObject(proposal.id);
+    if (object && shape) {
+      const behavior = objectBehavior(object.kind);
+      const props = behavior.syncGeometry({ ...object, ...geometry });
+      const shapeStyle = props ? behavior.shapeStyle(props) : null;
+      if (shapeStyle !== null) shape.setAttribute('style', shapeStyle);
+    }
+    if (object?.kind === 'portal' && portal) {
+      const rows = portalRowCount(parseProps(object.props));
+      portal.style.setProperty('--fm-portal-row-h', `${geometry.h}px`);
+      portal.style.setProperty('--fm-portal-h', `${geometry.h * rows}px`);
+    }
     this.#moved = true;
-    this.#ctx.doc.setObjectGeometry(proposal.id, geometry);
-    this.#syncObjectToBox(proposal.id);
-    this.#scheduleRectUpdate();
-    llog('resize', 'apply resolved resize', { id: proposal.id, ...geometry });
+    llog('resize', 'paint resize preview', { id: proposal.id, ...geometry });
+  }
+
+  #restoreResizePreview(preview: ResizePreview): void {
+    const target = preview.target as HTMLElement;
+    target.style.left = preview.original.left;
+    target.style.top = preview.original.top;
+    target.style.width = preview.original.width;
+    target.style.height = preview.original.height;
+    target.style.willChange = preview.original.willChange;
+    const shape = target.querySelector<HTMLElement>('.fm-shape');
+    if (shape) {
+      if (preview.original.shapeStyle === null) shape.removeAttribute('style');
+      else shape.setAttribute('style', preview.original.shapeStyle);
+    }
+    const portal = target.querySelector<HTMLElement>('.fm-portal');
+    if (portal) {
+      if (preview.original.portalStyle === null) portal.removeAttribute('style');
+      else portal.setAttribute('style', preview.original.portalStyle);
+    }
+  }
+
+  #commitResizePreviews(): number[] {
+    const previews = [...this.#resizePreviews.values()];
+    for (const preview of previews) {
+      this.#ctx.doc.setObjectGeometry(preview.id, preview.geometry);
+      this.#syncObjectToBox(preview.id);
+    }
+    return previews.map((preview) => preview.id);
+  }
+
+  #clearResizePreviews(restore: boolean): void {
+    for (const preview of this.#resizePreviews.values()) {
+      if (restore) this.#restoreResizePreview(preview);
+      else (preview.target as HTMLElement).style.willChange = preview.original.willChange;
+    }
+    this.#resizePreviews.clear();
   }
 
   #applyObjectRotate(angle: number): void {
@@ -1445,8 +1640,9 @@ export class TransformController {
     this.#clearSmartGuides();
     window.removeEventListener('pointerup', this.#onObjectClickUp);
     window.removeEventListener('pointerdown', this.#onPointerDown, { capture: true });
-    window.removeEventListener('pointermove', this.#onDragPointerMove, { capture: true });
+    window.removeEventListener('pointermove', this.#onTransformPointerMove, { capture: true });
     this.#clearPendingMoves();
+    this.#clearResizePreviews(true);
     if (this.#rectFrame !== null) cancelAnimationFrame(this.#rectFrame);
     this.#moveable.destroy();
     this.#selecto.destroy();

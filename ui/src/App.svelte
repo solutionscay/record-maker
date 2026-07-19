@@ -18,12 +18,14 @@
   import { lerror, llog } from './lib/log';
   import LayoutPreview from './lib/LayoutPreview.svelte';
   import { snapToGrid } from './lib/canvas-edit';
+  import { GestureLifecycle } from './lib/canvas/gesture-lifecycle';
 
   let { doc, layoutId = '' }: { doc: EditorDoc; layoutId?: string } = $props();
 
   let stage = $state<HTMLElement>();
   let contextMenuEl = $state<HTMLElement>();
   let resizingPartId = $state<number | null>(null);
+  const partResizeLifecycle = new GestureLifecycle('band-resize');
   const DESIGN_PAGE_WIDTH = 760;
 
   type ContextMenuItem = {
@@ -78,6 +80,7 @@
   // Stand the interaction layer up once the canvas is in the DOM; tear it down on
   // unmount. moveable + selecto bind to the shared store, not this island.
   let interaction = $state<CanvasInteraction | null>(null);
+  $effect(() => () => partResizeLifecycle.destroy());
   $effect(() => {
     if (!doc.hydrated || !stage) return;
     const ix = new CanvasInteraction(stage, doc, layoutId);
@@ -273,30 +276,56 @@
     if (!canvas) return;
     const minHeight = doc.minPartHeight(id);
     const canvasRect = canvas.getBoundingClientRect();
+    const selectionBefore = [...doc.selection];
+    const selectedPartBefore = doc.selectedPartId;
+    const checkpoint = doc.beginGestureTransaction();
     resizingPartId = id;
+    interaction?.setExternalGesturing(true);
     doc.selectPart(id);
     llog('resize', 'part resizeStart', { id, minHeight });
 
     const move = (e: PointerEvent) => {
+      if (!partResizeLifecycle.owns(e)) return;
       const zoom = doc.zoom || 1;
       const modelY = (e.clientY - canvasRect.top) / zoom;
       const authored = modelY - top;
       const height = Math.max(minHeight, snapToGrid(authored, doc.snapToGrid ? doc.gridSize : 0));
       doc.setPartHeight(id, height);
     };
-    const up = () => {
+    const cleanup = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
       resizingPartId = null;
+      interaction?.setExternalGesturing(false);
+    };
+    const restoreSelection = () => {
+      if (selectedPartBefore !== null) doc.selectPart(selectedPartBefore);
+      else doc.selectOnly(selectionBefore);
+    };
+    const up = (e: PointerEvent) => {
+      if (!partResizeLifecycle.owns(e)) return;
+      partResizeLifecycle.commit();
+      cleanup();
       const part = doc.getPart(id);
       if (!part) return;
-      doc.mark();
+      doc.commitGestureTransaction(checkpoint);
       llog('resize', 'part resizeEnd', { id, height: part.height });
       void persistPartHeight(layoutId, id, part.height).catch((e) => {
         lerror('persist', 'failed to persist part height', e);
         doc.setError(e instanceof Error ? e.message : String(e));
       });
     };
+    partResizeLifecycle.begin({
+      inputEvent: event,
+      pointerId: event.pointerId,
+      captureTarget: event.currentTarget as Element | null,
+      onCancel: (reason) => {
+        cleanup();
+        doc.cancelGestureTransaction(checkpoint);
+        restoreSelection();
+        llog('resize', 'part resize cancelled', { id, reason });
+      },
+    });
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up, { once: true });
   }

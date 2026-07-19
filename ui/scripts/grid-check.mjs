@@ -257,6 +257,16 @@ try {
     h: 40,
   });
   const modifierTargetId = createdModifierTarget[0].id;
+  const createdLine = await postJson(`/design/${layout.id}/object`, {
+    partId: bodyPart.id,
+    kind: 'line',
+    x: 540,
+    y: 130,
+    w: 100,
+    h: 2,
+    props: { stroke: '#888888', strokeWidth: 2, angle: 0, length: 100 },
+  });
+  const lineId = createdLine[0].id;
   const createdColumn = await postJson(`/design/${layout.id}/object`, {
     partId: bodyPart.id,
     kind: 'field',
@@ -276,7 +286,11 @@ try {
   });
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
   const pageErrors = [];
+  const writeRequests = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
+  page.on('request', (request) => {
+    if (request.method() === 'POST') writeRequests.push(new URL(request.url()).pathname);
+  });
   await page.goto(`${base}/design/${layout.id}`);
   await page.locator('.fm-canvas').waitFor();
 
@@ -364,6 +378,85 @@ try {
   await dragBy(page, object, 3);
   assert.equal(await objectX(object), fineBefore + 3, '1px grid is effectively free-flowing');
 
+  // #217: Escape cancels a live object drag, restores the exact authored box,
+  // and emits no geometry persistence. Releasing the physical pointer afterward
+  // must not revive or commit the cancelled gesture.
+  await object.click();
+  const cancelDragBefore = await objectX(object);
+  const cancelDragWrites = writeRequests.filter((path) => path.endsWith('/geometry')).length;
+  const cancelDragBox = await object.boundingBox();
+  await page.mouse.move(cancelDragBox.x + cancelDragBox.width / 2, cancelDragBox.y + cancelDragBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(cancelDragBox.x + cancelDragBox.width / 2 + 19, cancelDragBox.y + cancelDragBox.height / 2 + 7, { steps: 4 });
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.equal(await objectX(object), cancelDragBefore, 'Escape restores drag start geometry');
+  assert.equal(writeRequests.filter((path) => path.endsWith('/geometry')).length, cancelDragWrites,
+    'cancelled drag performs no geometry request');
+  assert.equal(await page.locator('[data-rm-drag-bounds], .le-draw-preview').count(), 0,
+    'cancelled drag leaves no live preview or bounds correction');
+
+  const pointerCancelBefore = await objectX(object);
+  const pointerCancelWrites = writeRequests.filter((path) => path.endsWith('/geometry')).length;
+  const pointerCancelBox = await object.boundingBox();
+  await page.mouse.move(pointerCancelBox.x + pointerCancelBox.width / 2, pointerCancelBox.y + pointerCancelBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(pointerCancelBox.x + pointerCancelBox.width / 2 + 14, pointerCancelBox.y + pointerCancelBox.height / 2, { steps: 3 });
+  await page.evaluate(() => window.dispatchEvent(new PointerEvent('pointercancel', { pointerId: 1, bubbles: true })));
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.equal(await objectX(object), pointerCancelBefore, 'pointercancel restores drag start geometry');
+  assert.equal(writeRequests.filter((path) => path.endsWith('/geometry')).length, pointerCancelWrites,
+    'pointercancel performs no geometry request');
+
+  const lostCaptureBefore = await objectX(object);
+  const lostCaptureWrites = writeRequests.filter((path) => path.endsWith('/geometry')).length;
+  const lostCaptureBox = await object.boundingBox();
+  await page.mouse.move(lostCaptureBox.x + lostCaptureBox.width / 2, lostCaptureBox.y + lostCaptureBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(lostCaptureBox.x + lostCaptureBox.width / 2 + 12, lostCaptureBox.y + lostCaptureBox.height / 2, { steps: 3 });
+  const releasedCapture = await page.evaluate(() => {
+    const owner = [...document.querySelectorAll('*')].find((element) =>
+      element instanceof HTMLElement && element.hasPointerCapture(1));
+    if (!(owner instanceof HTMLElement)) return false;
+    owner.releasePointerCapture(1);
+    return true;
+  });
+  assert.equal(releasedCapture, true, 'test gesture owns pointer capture');
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.equal(await objectX(object), lostCaptureBefore, 'lostpointercapture restores drag start geometry');
+  assert.equal(writeRequests.filter((path) => path.endsWith('/geometry')).length, lostCaptureWrites,
+    'lostpointercapture performs no geometry request');
+
+  // Resize uses the same transaction and finalizer. The southeast handle is a
+  // Moveable control, so this also exercises cancellation through control chrome.
+  const resizeBefore = await object.evaluate((element) => ({
+    x: Number.parseFloat(element.style.left),
+    y: Number.parseFloat(element.style.top),
+    w: Number.parseFloat(element.style.width),
+    h: Number.parseFloat(element.style.height),
+  }));
+  const resizeHandle = page.locator('.moveable-control[data-direction="se"]').last();
+  const resizeHandleBox = await resizeHandle.boundingBox();
+  assert.ok(resizeHandleBox, 'selected object exposes a southeast resize handle');
+  const cancelResizeWrites = writeRequests.filter((path) => path.endsWith('/geometry')).length;
+  await page.mouse.move(resizeHandleBox.x + resizeHandleBox.width / 2, resizeHandleBox.y + resizeHandleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(resizeHandleBox.x + resizeHandleBox.width / 2 + 23, resizeHandleBox.y + resizeHandleBox.height / 2 + 17, { steps: 4 });
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.deepEqual(await object.evaluate((element) => ({
+    x: Number.parseFloat(element.style.left),
+    y: Number.parseFloat(element.style.top),
+    w: Number.parseFloat(element.style.width),
+    h: Number.parseFloat(element.style.height),
+  })), resizeBefore, 'Escape restores resize start geometry');
+  assert.equal(writeRequests.filter((path) => path.endsWith('/geometry')).length, cancelResizeWrites,
+    'cancelled resize performs no geometry request');
+
   // #99/#205: modifier presses stay pending until the movement threshold. A
   // Shift-press on an unselected object immediately hands the live stream to
   // Moveable and drags the expanded selection. A stationary Shift-click still
@@ -419,6 +512,131 @@ try {
   await page.waitForTimeout(50);
   await fastDragAligned(page, 1, 411, 'single object and bounds');
 
+  // A cancelled marquee restores the exact prior selection. Prove it by
+  // dragging the prior single target afterward: the unrelated rectangle stays.
+  const marqueeObjectBefore = await objectX(object);
+  const marqueeOtherBefore = await objectX(modifierTarget);
+  const liveCanvas = await page.locator('.fm-canvas').boundingBox();
+  await page.mouse.move(liveCanvas.x + liveCanvas.width - 8, liveCanvas.y + liveCanvas.height - 8);
+  await page.mouse.down();
+  await page.mouse.move(liveCanvas.x + 5, liveCanvas.y + 5, { steps: 4 });
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  await dragBy(page, object, 5);
+  assert.equal(await objectX(object), marqueeObjectBefore + 5, 'a new drag starts immediately after marquee cancel');
+  assert.equal(await objectX(modifierTarget), marqueeOtherBefore, 'marquee cancel restores the prior single selection');
+
+  // Band resize participates in the same explicit lifecycle and history
+  // transaction. Cancel restores both height and prior object selection.
+  const bodyBand = page.locator(`[data-part-id="${bodyPart.id}"]`);
+  const bodyResize = page.getByTitle('Resize Body band');
+  const bodyBeforeCancel = await bodyBand.boundingBox();
+  const bodyResizeBox = await bodyResize.boundingBox();
+  const cancelBandWrites = writeRequests.filter((path) => path.endsWith(`/part/${bodyPart.id}/height`)).length;
+  await page.mouse.move(bodyResizeBox.x + bodyResizeBox.width / 2, bodyResizeBox.y + bodyResizeBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bodyResizeBox.x + bodyResizeBox.width / 2, bodyResizeBox.y + bodyResizeBox.height / 2 + 20, { steps: 4 });
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.equal((await bodyBand.boundingBox()).height, bodyBeforeCancel.height, 'Escape restores band height');
+  assert.equal(writeRequests.filter((path) => path.endsWith(`/part/${bodyPart.id}/height`)).length, cancelBandWrites,
+    'cancelled band resize performs no height request');
+
+  const bodyResizeAfterCancel = await bodyResize.boundingBox();
+  const committedBandSaved = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === `/design/${layout.id}/part/${bodyPart.id}/height` &&
+      response.request().method() === 'POST');
+  await page.mouse.move(bodyResizeAfterCancel.x + bodyResizeAfterCancel.width / 2, bodyResizeAfterCancel.y + bodyResizeAfterCancel.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bodyResizeAfterCancel.x + bodyResizeAfterCancel.width / 2, bodyResizeAfterCancel.y + bodyResizeAfterCancel.height / 2 + 10, { steps: 3 });
+  await page.mouse.up();
+  assert.equal((await committedBandSaved).status(), 200, 'successful band resize persists once');
+  assert.equal(writeRequests.filter((path) => path.endsWith(`/part/${bodyPart.id}/height`)).length, cancelBandWrites + 1,
+    'successful band resize emits exactly one height request');
+
+  // Draw cancellation removes its preview, creates no object, and leaves the
+  // tool armed. A second Escape disarms it, establishing the documented priority.
+  const rectangleTool = page.locator('button[aria-label="Rectangle"]');
+  await rectangleTool.click();
+  const countBeforeDrawCancel = await page.locator('.fm-canvas .fm-obj').count();
+  const objectWritesBeforeDrawCancel = writeRequests.filter((path) => path === `/design/${layout.id}/object`).length;
+  const liveBodyBox = await bodyBand.boundingBox();
+  const drawX = liveBodyBox.x + liveBodyBox.width - 170;
+  const drawY = liveBodyBox.y + liveBodyBox.height - 45;
+  await page.mouse.move(drawX, drawY);
+  await page.mouse.down();
+  await page.mouse.move(drawX + 35, drawY - 25, { steps: 4 });
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator('.le-draw-preview').count(), 0, 'draw cancel removes its preview');
+  assert.equal(await page.locator('.fm-canvas .fm-obj').count(), countBeforeDrawCancel, 'draw cancel creates no object');
+  assert.equal(writeRequests.filter((path) => path === `/design/${layout.id}/object`).length, objectWritesBeforeDrawCancel,
+    'draw cancel performs no create request');
+  assert.equal(await rectangleTool.getAttribute('aria-pressed'), 'true', 'first Escape cancels but keeps the draw tool armed');
+  await page.keyboard.press('Escape');
+  assert.equal(await rectangleTool.getAttribute('aria-pressed'), 'false', 'second Escape disarms the draw tool');
+
+  // Window focus loss follows the same draw recovery path.
+  await rectangleTool.click();
+  const countBeforeBlurCancel = await page.locator('.fm-canvas .fm-obj').count();
+  await page.mouse.move(drawX, drawY);
+  await page.mouse.down();
+  await page.mouse.move(drawX + 20, drawY - 15, { steps: 3 });
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator('.fm-canvas .fm-obj').count(), countBeforeBlurCancel,
+    'window blur cancels draw without creating an object');
+  assert.equal(await page.locator('.le-draw-preview').count(), 0, 'window blur removes draw preview');
+
+  const countBeforeHiddenCancel = await page.locator('.fm-canvas .fm-obj').count();
+  await page.mouse.move(drawX, drawY);
+  await page.mouse.down();
+  await page.mouse.move(drawX + 18, drawY - 12, { steps: 3 });
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    delete document.visibilityState;
+  });
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator('.fm-canvas .fm-obj').count(), countBeforeHiddenCancel,
+    'visibility loss cancels draw without creating an object');
+  assert.equal(await page.locator('.le-draw-preview').count(), 0, 'visibility loss removes draw preview');
+  await page.keyboard.press('Escape');
+
+  // Rotation is another authored-geometry family and must roll both its box and
+  // behavior props back together.
+  const line = page.locator(`[data-object-id="${lineId}"]`);
+  await line.click({ force: true });
+  await page.waitForTimeout(50);
+  const lineBeforeRotateCancel = await line.evaluate((element) => ({
+    x: Number.parseFloat(element.style.left),
+    y: Number.parseFloat(element.style.top),
+    w: Number.parseFloat(element.style.width),
+    h: Number.parseFloat(element.style.height),
+  }));
+  const rotationControl = page.locator('.moveable-rotation-control').last();
+  const rotationBox = await rotationControl.boundingBox();
+  assert.ok(rotationBox, 'selected line exposes a rotation control');
+  const lineWritesBeforeCancel = writeRequests.length;
+  await page.mouse.move(rotationBox.x + rotationBox.width / 2, rotationBox.y + rotationBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(rotationBox.x + rotationBox.width / 2 + 30, rotationBox.y + rotationBox.height / 2 + 20, { steps: 4 });
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.deepEqual(await line.evaluate((element) => ({
+    x: Number.parseFloat(element.style.left),
+    y: Number.parseFloat(element.style.top),
+    w: Number.parseFloat(element.style.width),
+    h: Number.parseFloat(element.style.height),
+  })), lineBeforeRotateCancel, 'Escape restores line rotation geometry');
+  assert.equal(writeRequests.length, lineWritesBeforeCancel, 'cancelled line rotation performs no persistence');
+
   // #203: a portal's owned header + field move implicitly while the portal stays
   // the sole visible selection. Pointer drag, keyboard nudge, cross-band settle,
   // and reload persistence all operate on the same expanded movement set.
@@ -460,9 +678,36 @@ try {
   assert.ok(settledPartIds.every((partId) => partId === headerPart.id),
     `portal and children settle into the same destination band: ${JSON.stringify({ settledPartIds, destinationPart: headerPart.id, portalBox, destinationBox, afterBandDrag })}`);
 
+  // Pointer capture keeps a drag alive when the pointer leaves the canvas. The
+  // outside release commits normally and the next gesture remains available.
+  const outsideBox = await modifierTarget.boundingBox();
+  const outsideSaved = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === `/design/${layout.id}/geometry` && response.request().method() === 'POST');
+  await page.mouse.move(outsideBox.x + outsideBox.width / 2, outsideBox.y + outsideBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(canvas.x - 20, outsideBox.y + outsideBox.height / 2, { steps: 5 });
+  await page.mouse.up();
+  assert.equal((await outsideSaved).status(), 200, 'release outside canvas commits through pointer capture');
+  assert.equal(await objectX(modifierTarget), 0, 'outside release persists the live clamped geometry');
+
   await page.waitForTimeout(300);
+  // Component teardown during an active draw runs the same cancel finalizer.
+  await rectangleTool.click();
+  const countBeforeTeardown = await page.locator('.fm-canvas .fm-obj').count();
+  const objectWritesBeforeTeardown = writeRequests.filter((path) => path === `/design/${layout.id}/object`).length;
+  const teardownBodyBox = await bodyBand.boundingBox();
+  const teardownX = teardownBodyBox.x + teardownBodyBox.width - 150;
+  const teardownY = teardownBodyBox.y + teardownBodyBox.height - 40;
+  await page.mouse.move(teardownX, teardownY);
+  await page.mouse.down();
+  await page.mouse.move(teardownX + 25, teardownY - 15, { steps: 3 });
   await page.reload();
+  await page.mouse.up();
   await page.locator('.fm-canvas').waitFor();
+  assert.equal(await page.locator('.fm-canvas .fm-obj').count(), countBeforeTeardown,
+    'teardown during draw creates no object');
+  assert.equal(writeRequests.filter((path) => path === `/design/${layout.id}/object`).length, objectWritesBeforeTeardown,
+    'teardown during draw performs no create request');
   assert.ok(await Promise.all([portal, ...portalChildren].map((locator) =>
     locator.evaluate((element, partId) => Number(element.closest('.fm-part')?.getAttribute('data-part-id')) === partId, headerPart.id)))
     .then((values) => values.every(Boolean)), 'portal child movement persists across reload');

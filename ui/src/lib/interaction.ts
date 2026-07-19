@@ -96,6 +96,11 @@ export class CanvasInteraction {
     this.#transform.setGrid(size, enabled);
   }
 
+  /** Band resize lives in App.svelte but shares the canvas-wide mutation gate. */
+  setExternalGesturing(active: boolean): void {
+    this.#ctx.gesturing = active;
+  }
+
   /** Re-apply the editing object's server-derived text style to the open inline
    * editor, so inspector size/style changes appear LIVE without closing it (#5). */
   syncOpenTextEditor(): void {
@@ -125,6 +130,15 @@ export class CanvasInteraction {
     const target = e.target as HTMLElement | null;
     const inEditable = !!target?.closest('input, textarea, select, [contenteditable="true"]');
     const doc = this.#ctx.doc;
+
+    // An active gesture's lifecycle consumes the first Escape and restores its
+    // start state. Once idle, Escape disarms a placement tool; inline editors
+    // keep their own higher-priority Escape handling.
+    if (e.key === 'Escape' && !inEditable && !this.#ctx.gesturing && doc.activeTool !== 'pointer') {
+      e.preventDefault();
+      doc.setTool('pointer');
+      return;
+    }
 
     // Cmd/Ctrl+A selects every layout object — but only when focus is on the
     // canvas, not in a text control. Inside an input / textarea / inline text

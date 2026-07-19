@@ -130,6 +130,20 @@ try {
     ok('resize: w/h/x changed, y untouched', r.x === before.x + 5 && r.w === before.w - 5 && r.h === before.h + 12 && r.y === before.y);
     d.undo();
     eq('resize: undo restores exact geometry', geom(obj(d.renderModel, 2)), before);
+
+    const cancelled = d.beginGestureTransaction();
+    d.resizeObject(2, { x: before.x + 17, w: before.w + 9 });
+    const cancelledDiffs = d.cancelGestureTransaction(cancelled);
+    eq('gesture transaction: cancel restores exact geometry', geom(obj(d.renderModel, 2)), before);
+    ok('gesture transaction: cancel restores redo and seals no undo',
+      cancelledDiffs.length === 2 && d.canUndo === false && d.canRedo === true);
+
+    const committed = d.beginGestureTransaction();
+    d.resizeObject(2, { x: before.x + 5 });
+    d.commitGestureTransaction(committed);
+    ok('gesture transaction: commit seals one undo step', d.canUndo === true);
+    d.undo();
+    eq('gesture transaction: committed step undoes normally', geom(obj(d.renderModel, 2)), before);
   }
 
   // 4. setProp on a structural prop (z) round-trips; no-op set records nothing.

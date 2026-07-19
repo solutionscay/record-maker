@@ -101,6 +101,14 @@ export class CanvasInteraction {
     this.#ctx.gesturing = active;
   }
 
+  updateBandResizeAutoscroll(clientX: number, clientY: number, onScroll: (deltaY: number) => void): void {
+    this.#ctx.autoscroll.start('band-resize', clientX, clientY, (delta) => onScroll(delta.y));
+  }
+
+  stopBandResizeAutoscroll(): void {
+    this.#ctx.autoscroll.stop('band-resize');
+  }
+
   /** Re-apply the editing object's server-derived text style to the open inline
    * editor, so inspector size/style changes appear LIVE without closing it (#5). */
   syncOpenTextEditor(): void {
@@ -122,6 +130,7 @@ export class CanvasInteraction {
     this.#text.destroy();
     this.#unregisterCleanup();
     this.#transform.destroy();
+    this.#ctx.autoscroll.destroy();
   }
 
   // ── keyboard dispatch (cross-controller, so it lives on the coordinator) ──

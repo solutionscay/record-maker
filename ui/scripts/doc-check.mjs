@@ -600,6 +600,12 @@ try {
         5,
       ).map((candidate) => candidate.id),
       [2]);
+
+    const { edgeVelocity } = await vite.ssrLoadModule('/src/lib/canvas/autoscroll.ts');
+    eq('autoscroll: center has no velocity', edgeVelocity(50, 0, 100, 20), 0);
+    ok('autoscroll: edge direction and proximity ramp are deterministic',
+      edgeVelocity(1, 0, 100, 20) < edgeVelocity(15, 0, 100, 20) &&
+      edgeVelocity(99, 0, 100, 20) > edgeVelocity(85, 0, 100, 20));
   }
 } finally {
   await vite.close();

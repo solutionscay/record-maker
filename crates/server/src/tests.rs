@@ -2788,6 +2788,59 @@ async fn table_view_grid_honors_layout_column_visibility_and_order() {
     assert!(!html.contains("London"), "hidden value must not leak\n{html}");
 }
 
+/// #206: Table Browse derives its grid from placed Body fields, so each cell must
+/// carry that field object's authored box/text appearance as well as its value
+/// format. The value-dependent colour is appended last and overrides textColor.
+#[tokio::test]
+async fn table_view_grid_honors_authored_field_styling() {
+    let mut sol = Solution::open_in_memory().unwrap();
+    sol.create_table(
+        "Invoices",
+        &[NewField {
+            name: "Total".into(),
+            kind: FieldKind::Number,
+        }],
+    )
+    .unwrap();
+    let table = sol.table_by_name("Invoices").unwrap().unwrap();
+    let field = sol.fields(table.id).unwrap().remove(0);
+    sol.insert_record(&table, &[(&field, "-1234.5".into())])
+        .unwrap();
+    let table_layout = sol
+        .layouts_for_table(table.id)
+        .unwrap()
+        .into_iter()
+        .find(|layout| layout.view == "table")
+        .unwrap()
+        .id;
+    let body = body_part(&sol, table_layout);
+    let object = sol
+        .objects(body.id)
+        .unwrap()
+        .into_iter()
+        .find(|object| object.binding.as_deref() == Some("Invoices.Total"))
+        .unwrap();
+    sol.set_object_props(
+        table_layout,
+        object.id,
+        r##"{"fill":"#ffeecc","stroke":"#335577","strokeWidth":3,"strokeSides":["top","right"],"radius":6,"textColor":"#112233","fontSize":18,"bold":true,"italic":true,"underline":true,"align":"right","format":{"mode":"decimal","fixedDecimals":true,"decimalDigits":2,"thousandsSeparator":",","negativeColor":"#d70015"}}"##,
+    )
+    .unwrap();
+
+    let (status, html) = get_body(state_for(sol), &format!("/browse/{table_layout}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.contains(
+            r##"value="-1,234.50" data-raw="-1234.5" data-fmt="-1,234.50" style="background:#ffeecc;border:0;box-shadow:none;--fm-stroke-color:#335577;--fm-stroke-top:3px;--fm-stroke-right:3px;--fm-stroke-bottom:0px;--fm-stroke-left:0px;border-radius:6px;color:#112233;font-size:18px;font-weight:700;font-style:italic;text-decoration:underline;text-align:right;justify-content:flex-end;color:#d70015;""##
+        ),
+        "Table cell preserves authored style and appends format colour last\n{html}"
+    );
+    assert!(
+        html.contains(r#".cell-input[style*="--fm-stroke-"]"#),
+        "Table inputs project explicit edge borders\n{html}"
+    );
+}
+
 /// #57 Layout-mode chrome: the view toggle stays (switching which view you
 /// DESIGN, via /design/ siblings) and the pagination control is repurposed to
 /// step layouts; record actions are Browse-only.

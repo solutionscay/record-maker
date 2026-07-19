@@ -216,16 +216,16 @@ fn state_pending(
 }
 
 fn table_cell(column: &crate::viewmodel::TableColumn, value: String) -> CellView {
-    let (display, style) = match column.format.as_ref() {
+    let mut style = format!("{}{}", column.object_style, column.text_style);
+    let display = match column.format.as_ref() {
         Some(spec) => {
             let formatted = format::format_value(&value, Some(spec), column.field.kind);
-            let style = formatted
-                .color
-                .map(|color| format!("color:{color};"))
-                .unwrap_or_default();
-            (formatted.text, style)
+            if let Some(color) = formatted.color {
+                style.push_str(&format!("color:{color};"));
+            }
+            formatted.text
         }
-        None => (value.clone(), String::new()),
+        None => value.clone(),
     };
     CellView {
         field_id: column.field.id,

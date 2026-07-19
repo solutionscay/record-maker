@@ -15,6 +15,7 @@
     "test:size": "node scripts/size-check.mjs",
     "test:grid": "node scripts/grid-check.mjs",
     "test:dense": "npm run build && node scripts/dense-transform-check.mjs",
+    "test:autoscroll": "npm run build && node scripts/autoscroll-check.mjs",
     "test:border-placement": "node scripts/border-placement-check.mjs",
     "test:record-edit": "node scripts/record-edit-check.mjs",
     "monitor": "node scripts/monitor.mjs",

@@ -14,6 +14,7 @@ import type { HoverController } from './hover';
 import type { PlacementController } from './placement';
 import type { TextEditController } from './text-edit';
 import type { TransformController } from './transform';
+import { EdgeAutoscroll } from './autoscroll';
 
 export type IdentitySnapshot = {
   painted: HTMLElement[];
@@ -27,12 +28,15 @@ export type CanvasCoordinateFrame = {
   zoom: number;
   clientLeft: number;
   clientTop: number;
+  scrollLeft: number;
+  scrollTop: number;
 };
 
 export class CanvasContext {
   readonly stage: HTMLElement;
   readonly doc: EditorDoc;
   readonly layoutId: string;
+  readonly autoscroll: EdgeAutoscroll;
 
   /** Canvas zoom factor (#62) — the stage is CSS-scaled by this, so client→model
    * pointer coordinates divide by it when placing a new object. Written by the
@@ -69,6 +73,7 @@ export class CanvasContext {
     this.stage = stage;
     this.doc = doc;
     this.layoutId = layoutId;
+    this.autoscroll = new EdgeAutoscroll(stage);
   }
 
   /** The render model (and thus the canvas DOM) may have changed — drop the
@@ -107,6 +112,8 @@ export class CanvasContext {
       zoom: this.zoom || 1,
       clientLeft: canvas.clientLeft,
       clientTop: canvas.clientTop,
+      scrollLeft: this.stage.scrollLeft,
+      scrollTop: this.stage.scrollTop,
     };
   }
 
@@ -117,8 +124,8 @@ export class CanvasContext {
   ): { x: number; y: number } | null {
     if (!frame) return null;
     return {
-      x: Math.max(0, (clientX - frame.rect.left) / frame.zoom - frame.clientLeft),
-      y: Math.max(0, (clientY - frame.rect.top) / frame.zoom - frame.clientTop),
+      x: Math.max(0, (clientX - frame.rect.left + this.stage.scrollLeft - frame.scrollLeft) / frame.zoom - frame.clientLeft),
+      y: Math.max(0, (clientY - frame.rect.top + this.stage.scrollTop - frame.scrollTop) / frame.zoom - frame.clientTop),
     };
   }
 

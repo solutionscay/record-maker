@@ -281,6 +281,8 @@
     const startHeight = part.height;
     let latestHeight = startHeight;
     const startClientY = event.clientY;
+    let latestClientY = event.clientY;
+    let scrollDeltaY = 0;
     const partElement = canvas.querySelector<HTMLElement>(`.fm-part[data-part-id="${id}"]`);
     const overlay = stage.querySelector<HTMLElement>('.le-part-overlays');
     const label = overlay?.querySelector<HTMLElement>(`.le-part-label[data-overlay-part-id="${id}"]`) ?? null;
@@ -318,16 +320,21 @@
       if (grid) grid.style.height = `${startLayoutHeight + delta}px`;
       for (const element of shifted) element.style.transform = `translateY(${delta}px)`;
     };
-    const propose = (e: PointerEvent) => {
+    const propose = (clientY: number) => {
       const zoom = doc.zoom || 1;
-      const authored = startHeight + (e.clientY - startClientY) / zoom;
+      const authored = startHeight + (clientY - startClientY + scrollDeltaY) / zoom;
       latestHeight = Math.max(minHeight, snapToGrid(authored, doc.snapToGrid ? doc.gridSize : 0));
       if (previewFrame === null) previewFrame = requestAnimationFrame(paintPreview);
     };
     const move = (e: PointerEvent) => {
       if (!partResizeLifecycle.owns(e)) return;
       receivedMove = true;
-      propose(e);
+      latestClientY = e.clientY;
+      interaction?.updateBandResizeAutoscroll(e.clientX, e.clientY, (deltaY) => {
+        scrollDeltaY += deltaY;
+        propose(latestClientY);
+      });
+      propose(e.clientY);
     };
     const clearPreview = (restore: boolean) => {
       if (previewFrame !== null) cancelAnimationFrame(previewFrame);
@@ -344,6 +351,7 @@
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
       clearPreview(restore);
+      interaction?.stopBandResizeAutoscroll();
       interaction?.setExternalGesturing(false);
     };
     const restoreSelection = () => {
@@ -352,7 +360,10 @@
     };
     const up = (e: PointerEvent) => {
       if (!partResizeLifecycle.owns(e)) return;
-      if (receivedMove) propose(e);
+      if (receivedMove) {
+        latestClientY = e.clientY;
+        propose(e.clientY);
+      }
       if (receivedMove && previewFrame !== null) {
         cancelAnimationFrame(previewFrame);
         previewFrame = null;
@@ -747,14 +758,11 @@
     transform: translate3d(var(--le-drag-bounds-x), var(--le-drag-bounds-y), 0) !important;
   }
   /* #215: raw group resize projects the captured control frame instead of
-     remeasuring every selected target. Counter-scale handles so they stay round. */
+     remeasuring every selected target. */
   :global(html.syncing-resize-bounds .le-stage .moveable-control-box[data-rm-resize-bounds]) {
     transform: translate3d(var(--le-resize-bounds-x), var(--le-resize-bounds-y), 0)
       scale(var(--le-resize-bounds-scale-x), var(--le-resize-bounds-scale-y)) !important;
     transform-origin: 0 0;
-  }
-  :global(html.syncing-resize-bounds .le-stage .moveable-control-box[data-rm-resize-bounds] .moveable-control) {
-    scale: var(--le-resize-control-scale-x) var(--le-resize-control-scale-y);
   }
   .le-stage :global(.fm-obj:has(.fm-line)) {
     overflow: visible;

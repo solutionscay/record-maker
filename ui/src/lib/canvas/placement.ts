@@ -46,6 +46,8 @@ export class PlacementController {
    * no #drawing gesture is in progress. */
   #dropPreview: HTMLElement | null = null;
   #dropCoordinateFrame: CanvasCoordinateFrame | null = null;
+  #drawPointer: { clientX: number; clientY: number } | null = null;
+  #dropPointer: { clientX: number; clientY: number } | null = null;
 
   constructor(ctx: CanvasContext) {
     this.#ctx = ctx;
@@ -137,17 +139,22 @@ export class PlacementController {
 
   #onDrawMove = (e: PointerEvent | MouseEvent): void => {
     if (e instanceof PointerEvent && !this.#lifecycle.owns(e)) return;
+    this.#drawPointer = { clientX: e.clientX, clientY: e.clientY };
+    this.#ctx.autoscroll.start('draw', e.clientX, e.clientY, () => {
+      if (this.#drawPointer) this.#updateDraw(this.#drawPointer);
+    });
     this.#updateDraw(e);
   };
 
   #onDrawUp = (e: PointerEvent | MouseEvent): void => {
     if (e instanceof PointerEvent && !this.#lifecycle.owns(e)) return;
+    this.#ctx.autoscroll.stop('draw');
     this.#updateDraw(e);
     this.#lifecycle.commit();
     void this.#finishDraw();
   };
 
-  #updateDraw(input: MouseEvent | PointerEvent): void {
+  #updateDraw(input: { clientX: number; clientY: number }): void {
     const drawing = this.#drawing;
     const point = drawing
       ? this.#ctx.canvasPoint(input.clientX, input.clientY, drawing.coordinateFrame)
@@ -283,6 +290,8 @@ export class PlacementController {
     this.#drawPreview?.remove();
     this.#drawPreview = null;
     this.#drawing = null;
+    this.#drawPointer = null;
+    this.#ctx.autoscroll.stop('draw');
     this.#ctx.gesturing = false;
   }
 
@@ -339,6 +348,12 @@ export class PlacementController {
     if (!types || (!types.includes(FIELD_DRAG_MIME) && !types.includes(PORTAL_COLUMN_DRAG_MIME))) return;
     e.preventDefault(); // required for `drop` to fire on this target at all
     e.dataTransfer!.dropEffect = 'copy';
+    this.#dropPointer = { clientX: e.clientX, clientY: e.clientY };
+    this.#ctx.autoscroll.start('drop', e.clientX, e.clientY, () => {
+      if (this.#dropPointer) {
+        this.#paintDropPreview(this.#dropTargetFor(this.#dropPointer.clientX, this.#dropPointer.clientY));
+      }
+    });
     this.#paintDropPreview(this.#dropTargetFor(e.clientX, e.clientY));
   };
 
@@ -350,10 +365,14 @@ export class PlacementController {
     if (!related || !this.#ctx.stage.contains(related)) {
       this.#paintDropPreview(null);
       this.#dropCoordinateFrame = null;
+      this.#dropPointer = null;
+      this.#ctx.autoscroll.stop('drop');
     }
   };
 
   onDrop = (e: DragEvent): void => {
+    this.#ctx.autoscroll.stop('drop');
+    this.#dropPointer = null;
     this.#paintDropPreview(null);
     // A portal-column drag (#168) takes priority: the same picker gesture, but the
     // dragged related fields become COLUMNS of the payload's portal (parent-aware
@@ -553,5 +572,7 @@ export class PlacementController {
     this.#clearDrawGesture();
     this.#dropPreview?.remove();
     this.#dropCoordinateFrame = null;
+    this.#dropPointer = null;
+    this.#ctx.autoscroll.stop('drop');
   }
 }

@@ -632,6 +632,9 @@ try {
   assert.ok(zoomDelta, 'zoom acceptance finds a guide-free resize delta');
   for (const percent of [25, 400]) {
     await setCanvasZoom(page, percent);
+    // #219 keeps the viewport centre stable while zooming, so a target that was
+    // visible at the opposite zoom limit can legitimately move offscreen.
+    await object.scrollIntoViewIfNeeded();
     await page.locator('.fm-canvas').dispatchEvent('click');
     await object.dispatchEvent('click');
     await page.waitForTimeout(50);

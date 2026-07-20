@@ -12,7 +12,7 @@
   // control box stays crisp; the interaction layer is told the zoom so pointer
   // placement maps back to model coordinates.
   import type { EditorDoc } from './lib/doc.svelte';
-  import { flushSync } from 'svelte';
+  import { flushSync, untrack } from 'svelte';
   import { registerEchoStage } from './lib/echo';
   import { CanvasInteraction } from './lib/interaction';
   import { setPartHeight as persistPartHeight } from './lib/persist';
@@ -118,6 +118,11 @@
 
   $effect(() => {
     interaction?.setGrid(doc.gridSize, doc.snapToGrid);
+  });
+
+  $effect(() => {
+    const command = doc.viewportCommand;
+    if (command.sequence > 0) untrack(() => interaction?.runViewportCommand(command.kind));
   });
 
   $effect(() => {
@@ -502,6 +507,15 @@
     overflow: auto;
     height: 100%;
     padding: 30px;
+  }
+  :global(.le-stage.is-pan-ready),
+  :global(.le-stage.is-pan-ready *) {
+    cursor: grab !important;
+  }
+  :global(.le-stage.is-panning),
+  :global(.le-stage.is-panning *) {
+    cursor: grabbing !important;
+    user-select: none !important;
   }
   /* The zoom layer: transform scales the canvas without reflowing the chrome.
      The workspace FILLS the pane so the canvas card stretches to a symmetric 30px

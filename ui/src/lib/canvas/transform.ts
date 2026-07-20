@@ -910,10 +910,22 @@ export class TransformController {
 
   #stopSelectoGesture(): void {
     // Selecto does not expose its Gesto stop method, but its documented instance
-    // `destroy()` uses this same internal object. Stopping delivery here leaves
-    // the reusable Selecto instance and its selection state intact.
-    const selecto = this.#selecto as unknown as { gesto?: { stop(): void } };
+    // `destroy()` uses this same internal object. `stop()` bypasses Selecto's
+    // normal drag-end cleanup, so it also leaves the last marquee rectangle at
+    // `display: block`. Hide and zero that application-visible residue here while
+    // keeping the reusable Selecto instance and its selection state intact.
+    const selecto = this.#selecto as unknown as {
+      gesto?: { stop(): void };
+      target?: HTMLElement;
+    };
     selecto.gesto?.stop();
+    const marquee = selecto.target;
+    if (marquee) {
+      marquee.style.display = 'none';
+      marquee.style.width = '0px';
+      marquee.style.height = '0px';
+      marquee.style.transform = 'none';
+    }
   }
 
   /** Make the dragged/resized single target the selection (if it wasn't already). */

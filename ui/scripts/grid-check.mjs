@@ -794,12 +794,16 @@ try {
   const marqueeObjectBefore = await objectX(object);
   const marqueeOtherBefore = await objectX(modifierTarget);
   const liveCanvas = await page.locator('.fm-canvas').boundingBox();
+  const marquee = page.locator('.selecto-selection');
   await page.mouse.move(liveCanvas.x + liveCanvas.width - 8, liveCanvas.y + liveCanvas.height - 8);
   await page.mouse.down();
   await page.mouse.move(liveCanvas.x + 5, liveCanvas.y + 5, { steps: 4 });
+  assert.equal(await marquee.isVisible(), true, 'live marquee paints its selection rectangle');
   await page.keyboard.press('Escape');
+  assert.equal(await marquee.isVisible(), false, 'Escape synchronously removes the marquee rectangle');
   await page.mouse.up();
   await page.waitForTimeout(100);
+  assert.equal(await marquee.isVisible(), false, 'cancelled pointer-up cannot restore a ghost marquee');
   await dragBy(page, object, 5);
   assert.notEqual(await objectX(object), marqueeObjectBefore, 'a new drag starts immediately after marquee cancel');
   assert.equal(await objectX(modifierTarget), marqueeOtherBefore, 'marquee cancel restores the prior single selection');

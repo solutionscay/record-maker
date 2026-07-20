@@ -147,7 +147,7 @@
   // ── Zoom zone ────────────────────────────────────────────────────────────
 
   function zoomBy(delta: number): void {
-    doc.setZoom(doc.zoom + delta);
+    doc.requestViewportCommand(delta < 0 ? 'zoom-out' : 'zoom-in');
   }
 </script>
 
@@ -241,6 +241,15 @@
     <button type="button" class="le-icon-btn" title="Zoom out" aria-label="Zoom out" onclick={() => zoomBy(-0.1)}><Icon name="minus" /></button>
     <span class="le-zoom-num">{Math.round(doc.zoom * 100)}%</span>
     <button type="button" class="le-icon-btn" title="Zoom in" aria-label="Zoom in" onclick={() => zoomBy(0.1)}><Icon name="plus" /></button>
+  </div>
+  <div class="le-viewport-actions">
+    <button type="button" onclick={() => doc.requestViewportCommand('actual-size')}>100%</button>
+    <button type="button" onclick={() => doc.requestViewportCommand('fit-layout')}>Fit Layout</button>
+    <button
+      type="button"
+      onclick={() => doc.requestViewportCommand('fit-selection')}
+      disabled={doc.selection.size === 0}
+    >Fit Selection</button>
   </div>
 </section>
 
@@ -337,5 +346,27 @@
     font-size: 13px;
     font-weight: 500;
     font-variant-numeric: tabular-nums;
+  }
+  .le-viewport-actions {
+    display: grid;
+    gap: 6px;
+  }
+  .le-viewport-actions button {
+    min-height: 30px;
+    padding: 5px 8px;
+    border: 0.5px solid var(--rm-border);
+    border-radius: var(--rm-radius);
+    background: var(--rm-control-bg);
+    color: var(--rm-text);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+  }
+  .le-viewport-actions button:hover:not(:disabled) {
+    background: #f0f0f2;
+  }
+  .le-viewport-actions button:disabled {
+    cursor: default;
+    opacity: 0.45;
   }
 </style>

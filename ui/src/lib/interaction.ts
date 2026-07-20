@@ -32,6 +32,8 @@ import { HoverController } from './canvas/hover';
 import { PlacementController } from './canvas/placement';
 import { TextEditController } from './canvas/text-edit';
 import { TransformController } from './canvas/transform';
+import { ViewportNavigationController } from './canvas/viewport-navigation';
+import type { ViewportCommandKind } from './doc.svelte';
 
 export class CanvasInteraction {
   readonly #ctx: CanvasContext;
@@ -40,12 +42,14 @@ export class CanvasInteraction {
   readonly #placement: PlacementController;
   readonly #clipboard: ClipboardController;
   readonly #transform: TransformController;
+  readonly #viewport: ViewportNavigationController;
   /** Unregisters this instance's canvas-cleanup callback from the command layer. */
   #unregisterCleanup: () => void = () => {};
 
   constructor(stage: HTMLElement, doc: EditorDoc, layoutId: string) {
     const ctx = new CanvasContext(stage, doc, layoutId);
     this.#ctx = ctx;
+    this.#viewport = new ViewportNavigationController(ctx);
     // Controllers only reach their peers inside event handlers, so constructing
     // them before the cross-references are wired is safe.
     this.#hover = new HoverController(ctx);
@@ -96,6 +100,10 @@ export class CanvasInteraction {
     this.#transform.setGrid(size, enabled);
   }
 
+  runViewportCommand(command: ViewportCommandKind): void {
+    this.#viewport.run(command);
+  }
+
   /** Band resize lives in App.svelte but shares the canvas-wide mutation gate. */
   setExternalGesturing(active: boolean): void {
     this.#ctx.gesturing = active;
@@ -130,6 +138,7 @@ export class CanvasInteraction {
     this.#text.destroy();
     this.#unregisterCleanup();
     this.#transform.destroy();
+    this.#viewport.destroy();
     this.#ctx.autoscroll.destroy();
   }
 

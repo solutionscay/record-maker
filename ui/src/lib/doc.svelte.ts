@@ -99,6 +99,15 @@ export interface PartDoc {
  * tool. */
 export type ToolKind = 'pointer' | 'text' | 'line' | 'rect' | 'ellipse' | 'field' | 'portal';
 
+/** One-shot viewport actions emitted by the rail and consumed by the canvas.
+ * They are session-only commands: no document/history state changes. */
+export type ViewportCommandKind =
+  | 'zoom-in'
+  | 'zoom-out'
+  | 'actual-size'
+  | 'fit-layout'
+  | 'fit-selection';
+
 /** The server-resolved render projection of an object (#44/#60): whether it is a
  * bound `field` (its field id, label, live value) or a `shape` (its derived
  * appearance `shapeStyle`) — all decided server-side (the value/label for the
@@ -284,6 +293,12 @@ export class EditorDoc {
   /** Canvas zoom factor (#62 Zoom zone): 1 = 100%. A viewport concern — applied as
    * a CSS scale on the stage, never persisted, never undoable. */
   #zoom = $state(1);
+  /** Monotonic command envelope lets repeated clicks on the same viewport action
+   * retrigger a Svelte effect without storing viewport geometry in the document. */
+  #viewportCommand = $state<{ sequence: number; kind: ViewportCommandKind }>({
+    sequence: 0,
+    kind: 'actual-size',
+  });
   /** Last hydration/load error, surfaced in the editor chrome. */
   #error = $state<string | null>(null);
 
@@ -1085,6 +1100,14 @@ export class EditorDoc {
    * so the readout and the CSS scale never drift. */
   setZoom(z: number): void {
     this.#zoom = Math.min(4, Math.max(0.25, Math.round(z * 100) / 100));
+  }
+
+  get viewportCommand(): Readonly<{ sequence: number; kind: ViewportCommandKind }> {
+    return this.#viewportCommand;
+  }
+
+  requestViewportCommand(kind: ViewportCommandKind): void {
+    this.#viewportCommand = { sequence: this.#viewportCommand.sequence + 1, kind };
   }
 
   // ── session: lifecycle error ─────────────────────────────────────────────

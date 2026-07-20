@@ -808,6 +808,111 @@ try {
   assert.notEqual(await objectX(object), marqueeObjectBefore, 'a new drag starts immediately after marquee cancel');
   assert.equal(await objectX(modifierTarget), marqueeOtherBefore, 'marquee cancel restores the prior single selection');
 
+  // #224: viewport navigation must not split Selecto's visual coordinates from
+  // its hit-test coordinates. Constrain and scroll the stage, zoom the canvas,
+  // then prove the live rectangle follows the pointer and release selects the
+  // exact enclosed object with visible transform chrome.
+  const selectionStage = page.locator('.le-stage');
+  const selectionWorkspace = page.locator('.le-workspace');
+  const savedStageViewport = await selectionStage.evaluate((element) => ({
+    width: element.style.width,
+    height: element.style.height,
+    scrollLeft: element.scrollLeft,
+    scrollTop: element.scrollTop,
+  }));
+  const savedSelectionWorkspaceSize = await selectionWorkspace.evaluate((element) => ({
+    minWidth: element.style.minWidth,
+    minHeight: element.style.minHeight,
+  }));
+  await setCanvasZoom(page, 110);
+  await selectionWorkspace.evaluate((element) => {
+    element.style.minWidth = '1300px';
+    element.style.minHeight = '700px';
+  });
+  await selectionStage.evaluate((element) => {
+    element.style.width = '800px';
+    element.style.height = '320px';
+    void element.offsetWidth;
+    element.scrollLeft = 40;
+    element.scrollTop = 80;
+  });
+  await page.waitForTimeout(100);
+  const appliedSelectionScroll = await selectionStage.evaluate((element) => ({
+    left: element.scrollLeft,
+    top: element.scrollTop,
+  }));
+  assert.ok(
+    appliedSelectionScroll.left > 0 && appliedSelectionScroll.top > 0,
+    `marquee acceptance uses a genuinely scrolled stage: ${JSON.stringify(appliedSelectionScroll)}`,
+  );
+  const selectionStageBox = await selectionStage.boundingBox();
+  assert.ok(selectionStageBox, 'scrolled marquee stage is visible');
+  await selectionStage.dispatchEvent('click');
+  await selectionStage.dispatchEvent('click');
+  await page.locator('.le-stage.no-object-selection').waitFor();
+  const marqueeTarget = modifierTarget;
+  const scrolledTargetBox = await marqueeTarget.boundingBox();
+  assert.ok(scrolledTargetBox, 'scrolled marquee target is visible');
+  const autoscrollEdge = 56;
+  // Begin below/right of the target so the portal fixture above it cannot own
+  // the press through its visually overflowing row content.
+  const selectionStart = {
+    x: scrolledTargetBox.x + scrolledTargetBox.width + 4,
+    y: scrolledTargetBox.y + scrolledTargetBox.height + 4,
+  };
+  const selectionEnd = { x: scrolledTargetBox.x - 4, y: scrolledTargetBox.y - 4 };
+  const selectionLeft = Math.min(selectionStart.x, selectionEnd.x);
+  const selectionTop = Math.min(selectionStart.y, selectionEnd.y);
+  const selectionRight = Math.max(selectionStart.x, selectionEnd.x);
+  const selectionBottom = Math.max(selectionStart.y, selectionEnd.y);
+  assert.ok(
+    selectionLeft > selectionStageBox.x + autoscrollEdge &&
+      selectionTop > selectionStageBox.y + autoscrollEdge &&
+      selectionRight < selectionStageBox.x + selectionStageBox.width - autoscrollEdge &&
+      selectionBottom < selectionStageBox.y + selectionStageBox.height - autoscrollEdge,
+    `scrolled marquee fixture stays outside autoscroll edges: ${JSON.stringify({ selectionStageBox, scrolledTargetBox })}`,
+  );
+  await page.mouse.move(selectionStart.x, selectionStart.y);
+  await page.mouse.down();
+  await page.mouse.move(selectionEnd.x, selectionEnd.y, { steps: 5 });
+  const scrolledMarqueeBox = await marquee.boundingBox();
+  assert.ok(scrolledMarqueeBox, 'scrolled and zoomed marquee is visible during the gesture');
+  assert.ok(
+    Math.abs(scrolledMarqueeBox.x - selectionLeft) <= 1.01 &&
+      Math.abs(scrolledMarqueeBox.y - selectionTop) <= 1.01 &&
+      Math.abs(scrolledMarqueeBox.width - (selectionRight - selectionLeft)) <= 1.01 &&
+      Math.abs(scrolledMarqueeBox.height - (selectionBottom - selectionTop)) <= 1.01,
+    `marquee stays in pointer coordinates after scroll and zoom: ${JSON.stringify({ selectionStart, selectionEnd, scrolledMarqueeBox })}`,
+  );
+  await page.mouse.up();
+  await page.locator(`#insp-left-${modifierTargetId}`).waitFor();
+  assert.equal(await marquee.isVisible(), false, 'successful marquee release removes its rectangle');
+  assert.equal(
+    await page.locator(`#insp-left-${modifierTargetId}`).inputValue(),
+    await marqueeTarget.evaluate((element) => String(Number.parseFloat(element.style.left))),
+    'marquee release selects the exact enclosed object',
+  );
+  assert.equal(
+    await page.locator('.moveable-line').evaluateAll((elements) => elements.some((element) => {
+      const rect = element.getBoundingClientRect();
+      return getComputedStyle(element).display !== 'none' && (rect.width > 0 || rect.height > 0);
+    })),
+    true,
+    'marquee release immediately exposes visible transform chrome',
+  );
+  await setCanvasZoom(page, 100);
+  await selectionWorkspace.evaluate((element, saved) => {
+    element.style.minWidth = saved.minWidth;
+    element.style.minHeight = saved.minHeight;
+  }, savedSelectionWorkspaceSize);
+  await selectionStage.evaluate((element, saved) => {
+    element.style.width = saved.width;
+    element.style.height = saved.height;
+    element.scrollLeft = saved.scrollLeft;
+    element.scrollTop = saved.scrollTop;
+  }, savedStageViewport);
+  await page.waitForTimeout(100);
+
   // Band resize participates in the same explicit lifecycle and history
   // transaction. Cancel restores both height and prior object selection.
   const bodyBand = page.locator(`[data-part-id="${bodyPart.id}"]`);

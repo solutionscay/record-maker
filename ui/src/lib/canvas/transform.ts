@@ -285,9 +285,14 @@ export class TransformController {
 
     // ── marquee multi-select ──
     this.#selecto = new Selecto({
-      container: stage,
-      rootContainer: stage,
-      selectableTargets: ['.fm-obj'],
+      // The stage is scrollable and the canvas below it is CSS-scaled. Keep the
+      // gesture listener on the stage, but render Selecto's rectangle against the
+      // viewport so stage scroll cannot offset the visual away from its client
+      // pointer coordinates. `rootContainer: stage` made the rectangle absolute
+      // inside that same scroller while hit-testing stayed viewport-relative.
+      container: document.body,
+      dragContainer: stage,
+      selectableTargets: [() => [...stage.querySelectorAll<HTMLElement>('.fm-obj')]],
       selectByClick: true,
       clickBySelectEnd: true,
       selectFromInside: true,
@@ -916,8 +921,13 @@ export class TransformController {
     // keeping the reusable Selecto instance and its selection state intact.
     const selecto = this.#selecto as unknown as {
       gesto?: { stop(): void };
+      dragScroll?: { dragEnd(): void };
       target?: HTMLElement;
     };
+    // Bypassing Selecto's normal drag-end path also bypasses DragScroll cleanup.
+    // Stop that listener before Gesto or the next viewport scroll will ask a
+    // stopped gesture for its current position and abort the next interaction.
+    selecto.dragScroll?.dragEnd();
     selecto.gesto?.stop();
     const marquee = selecto.target;
     if (marquee) {

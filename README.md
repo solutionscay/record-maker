@@ -1,5 +1,12 @@
 # record-maker
 
+[![Project Status: WIP](https://www.repostatus.org/badges/latest/wip.svg)](https://www.repostatus.org/#wip)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-red)
+![Not for production](https://img.shields.io/badge/production-not%20ready-critical)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
+> **⚠️ Work in progress — not ready for use.** No stable release yet; the schema, APIs, and file format change without notice or migrations. Expect breakage.
+
 record-maker is a metadata-driven app builder. You describe tables, layouts, and logic; the runtime renders both a design surface (Layout Mode) and a live, data-bound app (Browse Mode) from that same metadata. If you've used FileMaker, the idea will feel familiar: design and run the app in the same place. This isn't a FileMaker clone and doesn't touch its file format, just an app built around a similar idea.
 
 Eventually the plan is to let natural language drive the builder itself: describe the table, field, or layout you want, and an LLM issues typed edits against the metadata instead of writing freeform code. That keeps every change validated and undoable, since the engine is the one applying it, not the model.
@@ -36,3 +43,7 @@ If something's missing, Node for the UI bundle or the Tauri CLI and system libs 
 ## Status
 
 Early days. The metadata contract and engine are further along than the editor and the natural-language layer. Architecture decisions and design notes live in the [wiki](https://github.com/solutionscay/record-maker/wiki), not in this repo.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).

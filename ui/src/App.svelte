@@ -321,7 +321,7 @@
       const delta = latestHeight - startHeight;
       if (partElement) partElement.style.height = `${latestHeight}px`;
       if (label) label.style.height = `${latestHeight}px`;
-      if (handle) handle.style.top = `${top + latestHeight - 4}px`;
+      if (handle) handle.style.top = `${top + latestHeight}px`;
       if (grid) grid.style.height = `${startLayoutHeight + delta}px`;
       for (const element of shifted) element.style.transform = `translateY(${delta}px)`;
     };
@@ -413,12 +413,16 @@
     class="le-stage"
     class:placing={doc.activeTool !== 'pointer'}
     class:no-object-selection={doc.selection.size === 0}
+    style={`--le-canvas-inverse-zoom: ${1 / doc.zoom};`}
     bind:this={stage}
     role="application"
     aria-label="Layout canvas"
     oncontextmenu={onContextMenu}
   >
-    <div class="le-workspace" style={`transform: scale(${doc.zoom}); transform-origin: top left;`}>
+    <div
+      class="le-workspace"
+      style={`transform: scale(${doc.zoom}); transform-origin: top left; --le-zoom: ${doc.zoom}; --le-inverse-zoom: ${1 / doc.zoom};`}
+    >
       <div class="le-canvas-wrap">
         <LayoutPreview model={doc.renderModel} />
         {#if doc.showGrid}
@@ -450,7 +454,7 @@
               class:selected={doc.selectedPartId === band.part.id}
               class:resizing={resizingPartId === band.part.id}
               data-overlay-part-id={band.part.id}
-              style={`top: ${band.top + band.part.height - 4}px;`}
+              style={`top: ${band.top + band.part.height}px;`}
               title={`Resize ${partLabel(band.part.kind)} band`}
               onpointerdown={(e) => startPartResize(band.part.id, band.top, e)}
               oncontextmenu={(e) => openBandContextMenu(e, band.part.id)}
@@ -502,6 +506,8 @@
     color: #b00020;
   }
   .le-stage {
+    --le-transform-accent: var(--rm-accent, #0a84ff);
+    --le-transform-contrast: #fff;
     position: relative;
     touch-action: none;
     overflow: auto;
@@ -556,16 +562,23 @@
     position: absolute;
     z-index: 20;
     pointer-events: none;
-    background: #0b84ff;
-    box-shadow: 0 0 0 1px color-mix(in srgb, white 65%, transparent);
+    background: color-mix(in srgb, var(--le-transform-accent) 82%, #5b21b6);
+    box-shadow: 0 0 0 calc(1px * var(--le-inverse-zoom)) var(--le-transform-contrast);
+    opacity: 1;
+  }
+
+  /* Moveable's own nearby/grid hints are candidates. The thicker, fully opaque
+     application guide above exists only after the numeric resolver snaps. */
+  .le-stage :global(.moveable-guideline) {
+    opacity: 0.32 !important;
   }
 
   :global(.le-smart-guide-x) {
-    width: 1px;
+    width: calc(1px * var(--le-inverse-zoom));
   }
 
   :global(.le-smart-guide-y) {
-    height: 1px;
+    height: calc(1px * var(--le-inverse-zoom));
   }
   .le-part-label {
     position: absolute;
@@ -594,14 +607,28 @@
     color: #174ea6;
   }
   .le-part-resize {
+    --le-band-hit-before: calc(4px * var(--le-inverse-zoom));
+    --le-band-gutter-hit: calc(14px * var(--le-inverse-zoom));
+    --le-band-gutter-before: calc(7px * var(--le-inverse-zoom));
     position: absolute;
     left: 0;
     right: 0;
-    height: 8px;
+    height: calc(8px * var(--le-inverse-zoom));
     padding: 0;
     border: 0;
     background: transparent;
     cursor: row-resize;
+    pointer-events: auto;
+    margin-top: calc(-1 * var(--le-band-hit-before));
+    touch-action: none;
+  }
+  .le-part-resize::before {
+    content: '';
+    position: absolute;
+    left: calc(-28px * var(--le-inverse-zoom));
+    top: calc(var(--le-band-hit-before) - var(--le-band-gutter-before));
+    width: calc(28px * var(--le-inverse-zoom));
+    height: var(--le-band-gutter-hit);
     pointer-events: auto;
   }
   .le-part-resize::after {
@@ -609,12 +636,12 @@
     position: absolute;
     left: 0;
     right: 0;
-    top: 4px;
-    border-top: 1px solid rgba(31, 111, 235, 0.45);
+    top: var(--le-band-hit-before);
+    border-top: calc(1px * var(--le-inverse-zoom)) solid color-mix(in srgb, var(--le-transform-accent) 55%, transparent);
   }
   .le-part-resize.selected::after,
   .le-part-resize.resizing::after {
-    border-top: 2px solid #1f6feb;
+    border-top: calc(2px * var(--le-inverse-zoom)) solid var(--le-transform-accent);
   }
   .le-stage :global(.le-draw-preview) {
     position: absolute;
@@ -641,8 +668,10 @@
     box-sizing: border-box;
     z-index: 999;
     pointer-events: none;
-    border: 1px dashed #6b7280;
-    background: rgba(107, 114, 128, 0.05);
+    border: calc(1px * var(--le-inverse-zoom)) dashed var(--le-transform-accent);
+    outline: calc(1px * var(--le-inverse-zoom)) solid var(--le-transform-contrast);
+    outline-offset: calc(1px * var(--le-inverse-zoom));
+    background: color-mix(in srgb, var(--le-transform-accent) 7%, transparent);
   }
   .le-stage :global(.le-inline-text-editor) {
     position: absolute;
@@ -762,8 +791,113 @@
     outline-style: solid;
   }
   .le-stage :global(.fm-obj) {
-    cursor: move;
+    cursor: grab;
     user-select: none;
+  }
+  /* #220 transform target contract: a 24px invisible acquisition square with a
+     crisp 7px visual centre. Moveable lives outside the scaled workspace, so the
+     target stays 24 screen px at every canvas zoom. */
+  .le-stage :global(.moveable-control) {
+    --le-control-clip: calc(8px * var(--le-canvas-inverse-zoom));
+    width: calc(24px * var(--le-canvas-inverse-zoom)) !important;
+    height: calc(24px * var(--le-canvas-inverse-zoom)) !important;
+    margin-top: calc(-12px * var(--le-canvas-inverse-zoom)) !important;
+    margin-left: calc(-12px * var(--le-canvas-inverse-zoom)) !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-sizing: border-box !important;
+  }
+  .le-stage :global(.moveable-control::after) {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: calc(7px * var(--le-canvas-inverse-zoom));
+    height: calc(7px * var(--le-canvas-inverse-zoom));
+    box-sizing: border-box;
+    transform: translate(-50%, -50%);
+    border: calc(1px * var(--le-canvas-inverse-zoom)) solid var(--le-transform-contrast);
+    border-radius: 50%;
+    background: var(--le-transform-accent);
+    outline: calc(1px * var(--le-canvas-inverse-zoom)) solid color-mix(in srgb, #001b38 58%, transparent);
+  }
+  .le-stage :global(.moveable-line) {
+    height: calc(1px * var(--le-canvas-inverse-zoom)) !important;
+    background: var(--le-transform-accent) !important;
+    box-shadow: 0 0 0 calc(1px * var(--le-canvas-inverse-zoom)) var(--le-transform-contrast);
+  }
+  .le-stage :global(.moveable-area) {
+    cursor: grab !important;
+  }
+  /* Bias invisible acquisition geometry outward. Only four screen pixels cross
+     into the object, so even a small target retains a central grab surface. */
+  .le-stage :global(.moveable-control[data-direction='n']) {
+    clip-path: inset(0 0 var(--le-control-clip) 0);
+  }
+  .le-stage :global(.moveable-control[data-direction='s']) {
+    clip-path: inset(var(--le-control-clip) 0 0 0);
+  }
+  .le-stage :global(.moveable-control[data-direction='e']) {
+    clip-path: inset(0 0 0 var(--le-control-clip));
+  }
+  .le-stage :global(.moveable-control[data-direction='w']) {
+    clip-path: inset(0 var(--le-control-clip) 0 0);
+  }
+  .le-stage :global(.moveable-control[data-direction='nw']) {
+    clip-path: inset(0 var(--le-control-clip) var(--le-control-clip) 0);
+  }
+  .le-stage :global(.moveable-control[data-direction='ne']) {
+    clip-path: inset(0 0 var(--le-control-clip) var(--le-control-clip));
+  }
+  .le-stage :global(.moveable-control[data-direction='sw']) {
+    clip-path: inset(var(--le-control-clip) var(--le-control-clip) 0 0);
+  }
+  .le-stage :global(.moveable-control[data-direction='se']) {
+    clip-path: inset(var(--le-control-clip) 0 0 var(--le-control-clip));
+  }
+  .le-stage :global(.moveable-control[data-direction='n']),
+  .le-stage :global(.moveable-control[data-direction='s']) {
+    cursor: ns-resize !important;
+  }
+  .le-stage :global(.moveable-control[data-direction='e']),
+  .le-stage :global(.moveable-control[data-direction='w']) {
+    cursor: ew-resize !important;
+  }
+  .le-stage :global(.moveable-control[data-direction='nw']),
+  .le-stage :global(.moveable-control[data-direction='se']) {
+    cursor: nwse-resize !important;
+  }
+  .le-stage :global(.moveable-control[data-direction='ne']),
+  .le-stage :global(.moveable-control[data-direction='sw']) {
+    cursor: nesw-resize !important;
+  }
+  .le-stage :global(.moveable-rotation-control) {
+    cursor: grab !important;
+  }
+  :global(.le-stage.is-transforming),
+  :global(.le-stage.is-transforming *) {
+    cursor: var(--le-active-transform-cursor, grabbing) !important;
+  }
+  :global(.le-stage.is-transforming .moveable-line) {
+    background: color-mix(in srgb, var(--le-transform-accent) 78%, #5b21b6) !important;
+  }
+  .le-stage :global(.le-geometry-badge) {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 10020;
+    min-width: 54px;
+    padding: 4px 7px;
+    border: 1px solid var(--le-transform-contrast);
+    border-radius: 5px;
+    background: color-mix(in srgb, #071a2e 92%, transparent);
+    color: #fff;
+    pointer-events: none;
+    font: 600 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    white-space: nowrap;
   }
   /* #194: pin Moveable's frame-coalesced bounds to the same authored transform
      as the object. The variables live on `html`, outside both Svelte and
@@ -800,5 +934,58 @@
   .le-stage.placing :global(.fm-canvas),
   .le-stage.placing :global(.fm-obj) {
     cursor: crosshair;
+  }
+
+  @media (pointer: coarse) {
+    .le-stage :global(.moveable-control) {
+      --le-control-clip: calc(12px * var(--le-canvas-inverse-zoom));
+      width: calc(32px * var(--le-canvas-inverse-zoom)) !important;
+      height: calc(32px * var(--le-canvas-inverse-zoom)) !important;
+      margin-top: calc(-16px * var(--le-canvas-inverse-zoom)) !important;
+      margin-left: calc(-16px * var(--le-canvas-inverse-zoom)) !important;
+    }
+    .le-part-resize {
+      --le-band-gutter-hit: calc(28px * var(--le-inverse-zoom));
+      --le-band-gutter-before: calc(14px * var(--le-inverse-zoom));
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .le-stage :global(.moveable-control),
+    .le-stage :global(.moveable-line),
+    .le-stage :global(.le-hover-outline),
+    .le-stage :global(.le-geometry-badge) {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
+
+  @media (forced-colors: active) {
+    .le-stage :global(.moveable-line),
+    :global(.le-smart-guide),
+    .le-part-resize::after {
+      forced-color-adjust: none;
+      background: Highlight !important;
+      border-color: Highlight !important;
+      box-shadow: none;
+    }
+    .le-stage :global(.moveable-control::after) {
+      forced-color-adjust: none;
+      border: calc(2px * var(--le-canvas-inverse-zoom)) solid Highlight;
+      background: Canvas;
+      outline: calc(1px * var(--le-canvas-inverse-zoom)) solid CanvasText;
+    }
+    .le-stage :global(.le-hover-outline) {
+      forced-color-adjust: none;
+      border-color: Highlight;
+      outline-color: Canvas;
+      background: transparent;
+    }
+    .le-stage :global(.le-geometry-badge) {
+      forced-color-adjust: none;
+      border-color: CanvasText;
+      background: Canvas;
+      color: CanvasText;
+    }
   }
 </style>

@@ -79,6 +79,16 @@ type DragGestureTarget = {
   startRect: { left: number; top: number; right: number; bottom: number };
 };
 
+type TransformGestureKind = 'drag' | 'resize' | 'rotate';
+
+function resizeCursor(direction: readonly number[]): string {
+  const x = Math.sign(direction[0] ?? 0);
+  const y = Math.sign(direction[1] ?? 0);
+  if (x === 0) return 'ns-resize';
+  if (y === 0) return 'ew-resize';
+  return x === y ? 'nwse-resize' : 'nesw-resize';
+}
+
 export class TransformController {
   readonly #ctx: CanvasContext;
   readonly #moveable: Moveable;
@@ -165,6 +175,11 @@ export class TransformController {
    * occur until pointer-up, when this map is committed once per target. */
   #resizePreviews = new Map<number, ResizePreview>();
   #resizePointerId: number | null = null;
+  /** Application-owned active-state chrome (#220). One lightweight badge is
+   * frame-coalesced independently of object paint and removed synchronously. */
+  #geometryBadge: HTMLElement | null = null;
+  #badgeFrame: number | null = null;
+  #pendingBadge: { text: string; x: number; y: number } | null = null;
 
   constructor(ctx: CanvasContext) {
     this.#ctx = ctx;
@@ -194,7 +209,7 @@ export class TransformController {
     this.#moveable.on('dragStart', (e) => {
       const id = this.#ctx.idForElement(e.target);
       llog('drag', 'dragStart', { id });
-      this.#begin(e.inputEvent);
+      this.#begin('drag', e.inputEvent);
       this.#selectFromTarget(e.target);
       this.#captureDragStarts();
       if (id !== undefined) this.#startDragPointerFeedback(id, e.inputEvent);
@@ -209,7 +224,7 @@ export class TransformController {
       if (!this.#rawDragStreamStopped && !this.#rawResizeStreamStopped) this.#end('drag');
     });
     this.#moveable.on('dragGroupStart', (e) => {
-      this.#begin(e.inputEvent);
+      this.#begin('drag', e.inputEvent);
       this.#captureDragStarts();
       const anchorId = this.#dragStarts.keys().next().value;
       if (anchorId !== undefined) this.#startDragPointerFeedback(anchorId, e.inputEvent);
@@ -227,7 +242,7 @@ export class TransformController {
     // ── resize (single + group) — e.drag carries the new left/top for top/left handles ──
     this.#moveable.on('resizeStart', (e) => {
       llog('resize', 'resizeStart', { id: this.#ctx.idForElement(e.target) });
-      this.#begin(e.inputEvent);
+      this.#begin('resize', e.inputEvent, e.direction);
       this.#selectFromTarget(e.target);
       this.#captureResizeStart(e.target, e.direction, e.inputEvent);
       this.#finishResizeCapture();
@@ -241,7 +256,7 @@ export class TransformController {
       if (!this.#rawResizeStreamStopped) this.#end('resize');
     });
     this.#moveable.on('resizeGroupStart', (e) => {
-      this.#begin(e.inputEvent);
+      this.#begin('resize', e.inputEvent, e.events[0]?.direction);
       e.events.forEach((ev) => this.#captureResizeStart(ev.target, ev.direction, ev.inputEvent));
       this.#finishResizeCapture();
     });
@@ -258,7 +273,7 @@ export class TransformController {
       const o = id === undefined ? undefined : this.#ctx.doc.getObject(id);
       const start = o ? objectBehavior(o.kind).rotationStart(o) : null;
       if (id === undefined || !o || !start) return false;
-      this.#begin(e.inputEvent);
+      this.#begin('rotate', e.inputEvent);
       this.#selectFromTarget(e.target);
       this.#rotatingObjectId = id;
       this.#rotateStartMeasure = start.measure;
@@ -668,7 +683,7 @@ export class TransformController {
 
   // ── gesture lifecycle ──
 
-  #begin(inputEvent?: Event): void {
+  #begin(kind: TransformGestureKind, inputEvent?: Event, direction: readonly number[] = []): void {
     // Moveable can emit an individual start immediately followed by the group
     // start for one physical pointer. They share one transaction/lifecycle.
     if (this.#ctx.gesturing && this.#lifecycle.active) return;
@@ -693,6 +708,7 @@ export class TransformController {
     this.#resizeStarts.clear();
     this.#resizeUnionStart = null;
     this.#ctx.gestureIdentity = this.#ctx.identitySnapshot();
+    this.#showGesturePresentation(kind, direction);
     this.#lifecycle.begin({
       inputEvent,
       pointerId: this.#pressedPointer?.pointerId,
@@ -753,6 +769,7 @@ export class TransformController {
     this.#clearBoundsCorrection();
     this.#clearResizeBoundsPreview();
     this.#clearSmartGuides();
+    this.#clearGesturePresentation();
     llog(kind, `${kind}End`, { moved: this.#moved, selection: [...this.#ctx.doc.selection], reparented: [...reparented] });
     if (this.#moved) {
       if (this.#historyCheckpoint) this.#ctx.doc.commitGestureTransaction(this.#historyCheckpoint);
@@ -833,9 +850,62 @@ export class TransformController {
     this.#clearBoundsCorrection();
     this.#clearResizeBoundsPreview();
     this.#clearSmartGuides();
+    this.#clearGesturePresentation();
     this.#scheduleRectUpdate();
     this.updateTarget();
     llog('drag', 'gesture cancelled', { reason });
+  }
+
+  #showGesturePresentation(kind: TransformGestureKind, direction: readonly number[]): void {
+    this.#clearGesturePresentation();
+    const cursor = kind === 'resize' ? resizeCursor(direction) : 'grabbing';
+    const activeClass = kind === 'drag'
+      ? 'is-object-dragging'
+      : kind === 'resize' ? 'is-object-resizing' : 'is-object-rotating';
+    this.#ctx.stage.classList.add('is-transforming', activeClass);
+    this.#ctx.stage.style.setProperty('--le-active-transform-cursor', cursor);
+  }
+
+  #queueGeometryBadge(text: string, box: GuideBox): void {
+    const canvas = this.#ctx.canvas();
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const zoom = this.#ctx.zoom || 1;
+    this.#pendingBadge = {
+      text,
+      x: Math.min(window.innerWidth - 92, Math.max(8, rect.left + (box.x + box.w) * zoom + 10)),
+      y: Math.min(window.innerHeight - 34, Math.max(8, rect.top + (box.y + box.h) * zoom + 10)),
+    };
+    if (this.#badgeFrame !== null) return;
+    this.#badgeFrame = requestAnimationFrame(() => {
+      this.#badgeFrame = null;
+      const pending = this.#pendingBadge;
+      if (!pending || !this.#ctx.gesturing) return;
+      const badge = this.#geometryBadge ?? document.createElement('output');
+      if (!this.#geometryBadge) {
+        badge.className = 'le-geometry-badge';
+        badge.setAttribute('aria-live', 'off');
+        this.#ctx.stage.append(badge);
+        this.#geometryBadge = badge;
+      }
+      badge.textContent = pending.text;
+      badge.style.transform = `translate3d(${Math.round(pending.x)}px, ${Math.round(pending.y)}px, 0)`;
+    });
+  }
+
+  #clearGesturePresentation(): void {
+    this.#ctx.stage.classList.remove(
+      'is-transforming',
+      'is-object-dragging',
+      'is-object-resizing',
+      'is-object-rotating',
+    );
+    this.#ctx.stage.style.removeProperty('--le-active-transform-cursor');
+    if (this.#badgeFrame !== null) cancelAnimationFrame(this.#badgeFrame);
+    this.#badgeFrame = null;
+    this.#pendingBadge = null;
+    this.#geometryBadge?.remove();
+    this.#geometryBadge = null;
   }
 
   #stopSelectoGesture(): void {
@@ -1062,7 +1132,10 @@ export class TransformController {
     const width = Math.max(this.#ctx.doc.renderModel.width, 760);
     for (const guide of guides) {
       const element = document.createElement('div');
-      element.className = `le-smart-guide le-smart-guide-${guide.axis}`;
+      // Only resolver-returned guides reach this method, so the active class is
+      // an exact visual promise that the authored geometry applied the snap.
+      element.className = `le-smart-guide le-smart-guide-active le-smart-guide-${guide.axis}`;
+      element.dataset.rmSnapActive = 'true';
       if (guide.axis === 'x') {
         element.style.left = `${guide.position}px`;
         element.style.top = '0';
@@ -1084,6 +1157,14 @@ export class TransformController {
 
   #queueDragDelta(dx: number, dy: number, paintFeedback = true): void {
     this.#latestDragDelta = { dx, dy };
+    const union = this.#dragUnionStart;
+    if (union && (dx !== 0 || dy !== 0)) {
+      this.#queueGeometryBadge(`Δ ${Math.round(dx)}, ${Math.round(dy)}`, {
+        ...union,
+        x: union.x + dx,
+        y: union.y + dy,
+      });
+    }
     for (const [id, start] of this.#dragStarts) {
       this.#queueMove(id, start.target, { x: start.x + dx, y: start.y + dy }, paintFeedback);
     }
@@ -1474,6 +1555,7 @@ export class TransformController {
       threshold,
     );
     this.#paintSmartGuides(resolved.guides);
+    this.#queueGeometryBadge(`${Math.round(resolved.box.w)} × ${Math.round(resolved.box.h)}`, resolved.box);
     const scaleX = union.w > 0 ? resolved.box.w / union.w : 1;
     const scaleY = union.h > 0 ? resolved.box.h / union.h : 1;
     for (const entry of starts) {
@@ -1515,6 +1597,7 @@ export class TransformController {
       threshold,
     );
     this.#paintSmartGuides(resolved.guides);
+    this.#queueGeometryBadge(`${Math.round(resolved.box.w)} × ${Math.round(resolved.box.h)}`, resolved.box);
     this.#previewResizeProposal({ ...proposal, box: resolved.box });
     if (!this.#rawResizeStreamStopped) this.#scheduleRectUpdate();
   }
@@ -1548,6 +1631,7 @@ export class TransformController {
       threshold,
     );
     this.#paintSmartGuides(resolved.guides);
+    this.#queueGeometryBadge(`${Math.round(resolved.box.w)} × ${Math.round(resolved.box.h)}`, resolved.box);
     const dirX = Math.sign(direction[0] ?? 0);
     const dirY = Math.sign(direction[1] ?? 0);
     const scaleX = union.w > 0 ? resolved.box.w / union.w : 1;
@@ -1740,6 +1824,7 @@ export class TransformController {
     const id = this.#rotatingObjectId;
     const moved = this.#moved;
     this.#ctx.gesturing = false;
+    this.#clearGesturePresentation();
     this.#rotatingObjectId = null;
     this.#rotateStartMeasure = 0;
     this.#ctx.gestureIdentity = null;
@@ -1850,6 +1935,7 @@ export class TransformController {
     this.#clearPendingMoves();
     this.#clearResizePreviews(true);
     this.#clearResizeBoundsPreview();
+    this.#clearGesturePresentation();
     if (this.#rectFrame !== null) cancelAnimationFrame(this.#rectFrame);
     this.#moveable.destroy();
     this.#selecto.destroy();

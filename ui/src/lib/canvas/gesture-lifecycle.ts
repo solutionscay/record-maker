@@ -21,6 +21,8 @@ export class GestureLifecycle {
   readonly owner: string;
   #state: GestureState = 'idle';
   #pointerId: number | null = null;
+  #pointerReleased = false;
+  #captureLossFallback: number | null = null;
   #captureTarget: Element | null = null;
   #onCancel: ((reason: GestureCancelReason) => void) | null = null;
 
@@ -42,6 +44,7 @@ export class GestureLifecycle {
     this.#onCancel = start.onCancel;
     const pointer = start.inputEvent instanceof PointerEvent ? start.inputEvent : null;
     this.#pointerId = start.pointerId ?? pointer?.pointerId ?? null;
+    this.#pointerReleased = false;
     this.#captureTarget = start.captureTarget ?? (pointer?.target instanceof Element ? pointer.target : null);
     this.#attach();
     if (this.#pointerId !== null && this.#captureTarget instanceof HTMLElement) {
@@ -86,6 +89,9 @@ export class GestureLifecycle {
     this.#detach();
     const target = this.#captureTarget;
     const pointerId = this.#pointerId;
+    if (this.#captureLossFallback !== null) window.clearTimeout(this.#captureLossFallback);
+    this.#captureLossFallback = null;
+    this.#pointerReleased = false;
     this.#captureTarget = null;
     this.#pointerId = null;
     this.#onCancel = null;
@@ -101,6 +107,7 @@ export class GestureLifecycle {
 
   #attach(): void {
     window.addEventListener('keydown', this.#onKeyDown, true);
+    window.addEventListener('pointerup', this.#onPointerUp, true);
     window.addEventListener('pointercancel', this.#onPointerCancel, true);
     window.addEventListener('blur', this.#onBlur);
     document.addEventListener('visibilitychange', this.#onVisibilityChange);
@@ -109,6 +116,7 @@ export class GestureLifecycle {
 
   #detach(): void {
     window.removeEventListener('keydown', this.#onKeyDown, true);
+    window.removeEventListener('pointerup', this.#onPointerUp, true);
     window.removeEventListener('pointercancel', this.#onPointerCancel, true);
     window.removeEventListener('blur', this.#onBlur);
     document.removeEventListener('visibilitychange', this.#onVisibilityChange);
@@ -126,9 +134,22 @@ export class GestureLifecycle {
     if (this.owns(event)) this.cancel('pointercancel');
   };
 
+  #onPointerUp = (event: PointerEvent): void => {
+    if (this.owns(event)) this.#pointerReleased = true;
+  };
+
   #onLostPointerCapture = (): void => {
-    // Browser dispatches this synchronously after our deliberate release too;
-    // committing/cancelling are not active, so only unexpected loss cancels.
+    // WebKit releases pointer capture after a normal pointerup before its
+    // compatibility mouseup reaches Gesto/Selecto. Let that owner commit first;
+    // if it does not, the next task still recovers the abandoned gesture.
+    if (this.#pointerReleased) {
+      if (this.#captureLossFallback !== null) window.clearTimeout(this.#captureLossFallback);
+      this.#captureLossFallback = window.setTimeout(() => {
+        this.#captureLossFallback = null;
+        if (this.active && this.#pointerReleased) this.cancel('lostpointercapture');
+      }, 0);
+      return;
+    }
     this.cancel('lostpointercapture');
   };
 

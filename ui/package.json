@@ -14,6 +14,8 @@
     "test:position": "node scripts/position-check.mjs",
     "test:size": "node scripts/size-check.mjs",
     "test:grid": "node scripts/grid-check.mjs",
+    "test:marquee": "npm run build && node scripts/marquee-check.mjs",
+    "test:marquee:webkit": "npm run build && node scripts/marquee-check.mjs --browser=webkit",
     "test:dense": "npm run build && node scripts/dense-transform-check.mjs",
     "test:autoscroll": "npm run build && node scripts/autoscroll-check.mjs",
     "test:viewport": "npm run build && node scripts/viewport-navigation-check.mjs",
